@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createChatViewStore } from "../../src/chat/chatViewStore.mjs";
-import { isAgentRunActive, validateHistoryPage } from "../../src/chat/sessionEvents.mjs";
+import { createChatViewStore } from "../../src/chat/chatViewStore.ts";
+import { isAgentRunActive, validateHistoryPage } from "../../src/chat/sessionEvents.ts";
 import { buildAgentRunSections, formatPhaseElapsed, runningActivityPresentation, toolAtom } from "../../src/chat/agentRunPresentation.mjs";
-import { WorkspaceChatController } from "../../src/chat/workspaceChatController.mjs";
+import { WorkspaceChatController } from "../../src/chat/workspaceChatController.ts";
 
 const sessionId = "session_1";
 const agentRunId = "agent_run_1";

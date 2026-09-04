@@ -1,17 +1,47 @@
+import type { StreamEntry, TerminalSessionEventType } from "./streamTypes.ts";
+import type { ChatViewStore, StreamTelemetry } from "./chatViewStore.ts";
+
 const DEFAULT_MAX_ITEMS_PER_FRAME = 128;
 const DEFAULT_REDUCER_BUDGET_MS = 4;
 const DEFAULT_QUEUE_HIGH_WATER_MARK = 512;
-const TERMINALS = new Set(["agent_run_completed", "agent_run_failed", "agent_run_interrupted"]);
+const TERMINAL_EVENT_TYPES = [
+  "agent_run_completed",
+  "agent_run_failed",
+  "agent_run_interrupted",
+] as const satisfies readonly TerminalSessionEventType[];
+const TERMINALS: ReadonlySet<string> = new Set(TERMINAL_EVENT_TYPES);
 
-function canCoalesce(left, right) {
+type IdleWaiter = {
+  resolve(): void;
+  reject(reason: Error): void;
+};
+
+type WorkspaceChatControllerOptions = {
+  store: ChatViewStore;
+  workspaceId: string;
+  sessionId: string;
+  agentRunId: string;
+  initialCursor?: string;
+  maxItemsPerFrame?: number;
+  reducerBudgetMs?: number;
+  queueHighWaterMark?: number;
+  scheduleFrame?: (callback: () => void) => number;
+  cancelFrame?: (frameId: number) => void;
+  now?: () => number;
+  onAgentRunError?: (payload: unknown) => void;
+};
+
+function canCoalesce(left: StreamEntry | undefined, right: StreamEntry) {
   return left?.item.kind === "live"
     && right?.item.kind === "live"
     && left.item.agentRunId === right.item.agentRunId
     && left.item.messageId === right.item.messageId;
 }
 
-export function coalesceAdjacentStreamEntries(entries) {
-  const result = [];
+export function coalesceAdjacentStreamEntries(
+  entries: readonly StreamEntry[],
+) {
+  const result: StreamEntry[] = [];
   for (const entry of entries) {
     if (canCoalesce(result.at(-1), entry)) result[result.length - 1] = entry;
     else result.push(entry);
@@ -20,6 +50,28 @@ export function coalesceAdjacentStreamEntries(entries) {
 }
 
 export class WorkspaceChatController {
+  readonly store: ChatViewStore;
+  readonly workspaceId: string;
+  readonly sessionId: string;
+  readonly agentRunId: string;
+  lastCursor: string;
+  readonly maxItemsPerFrame: number;
+  readonly reducerBudgetMs: number;
+  readonly queueHighWaterMark: number;
+  readonly scheduleFrame: (callback: () => void) => number;
+  readonly cancelFrame: (frameId: number) => void;
+  readonly now: () => number;
+  readonly onAgentRunError: (payload: unknown) => void;
+  private queue: StreamEntry[];
+  private queueOffset: number;
+  private frameId: number | null;
+  private disposed: boolean;
+  private terminalAccepted: boolean;
+  private failure: Error | null;
+  private idleWaiters: IdleWaiter[];
+  private acceptedTelemetry: WeakMap<StreamEntry, Readonly<StreamTelemetry>>;
+  private acceptedOrdinal: number;
+
   constructor({
     store,
     workspaceId,
@@ -33,7 +85,7 @@ export class WorkspaceChatController {
     cancelFrame = (frameId) => cancelAnimationFrame(frameId),
     now = () => performance.now(),
     onAgentRunError = () => {},
-  }) {
+  }: WorkspaceChatControllerOptions) {
     if (!store || !workspaceId || !sessionId || !agentRunId) throw new Error("chat controller identity is required");
     if (typeof initialCursor !== "string" || !initialCursor) throw new Error("initial stream cursor is invalid");
     if (!Number.isInteger(maxItemsPerFrame) || maxItemsPerFrame < 1) throw new Error("max items per frame is invalid");
@@ -62,7 +114,7 @@ export class WorkspaceChatController {
     this.acceptedOrdinal = 0;
   }
 
-  accept(entry) {
+  accept(entry: StreamEntry) {
     if (this.disposed) throw new Error("chat controller is disposed");
     if (this.failure) throw this.failure;
     if (this.terminalAccepted) throw new Error("session stream emitted an item after terminal");
@@ -71,7 +123,8 @@ export class WorkspaceChatController {
       if (typeof entry.cursor !== "string" || !entry.cursor) throw new Error("session stream cursor is invalid");
       this.lastCursor = entry.cursor;
     }
-    this.terminalAccepted = entry.item.kind === "committed" && TERMINALS.has(entry.item.event.type);
+    this.terminalAccepted = entry.item.kind === "committed"
+      && TERMINALS.has(entry.item.event.type);
     this.acceptedOrdinal += 1;
     this.acceptedTelemetry.set(entry, this.store.beginStreamTelemetry(entry, this.acceptedOrdinal));
     const previous = this.queue.length > this.queueOffset ? this.queue.at(-1) : undefined;
@@ -80,13 +133,13 @@ export class WorkspaceChatController {
     this.ensureScheduled();
   }
 
-  setCursor(cursor) {
+  setCursor(cursor: string) {
     if (typeof cursor !== "string" || !cursor) throw new Error("resume cursor is invalid");
     if (this.hasQueuedItems()) throw new Error("cannot replace cursor while stream items are queued");
     this.lastCursor = cursor;
   }
 
-  async acceptWithBackpressure(entry) {
+  async acceptWithBackpressure(entry: StreamEntry) {
     this.accept(entry);
     if (this.queuedItemCount() >= this.queueHighWaterMark) await this.whenIdle();
   }
@@ -108,7 +161,7 @@ export class WorkspaceChatController {
     this.frameId = null;
     if (this.disposed) return;
     const startedAt = this.now();
-    const batch = [];
+    const batch: StreamEntry[] = [];
     while (this.hasQueuedItems() && batch.length < this.maxItemsPerFrame) {
       batch.push(this.queue[this.queueOffset++]);
       if (this.now() - startedAt >= this.reducerBudgetMs) break;
@@ -119,7 +172,9 @@ export class WorkspaceChatController {
         this.store.applyStreamEntries(batch, telemetry);
         batch.forEach((entry) => this.acceptedTelemetry.delete(entry));
         const failed = [...batch].reverse().find((entry) => entry.item.kind === "committed" && entry.item.event.type === "agent_run_failed");
-        if (failed) this.onAgentRunError(failed.item.event.payload);
+        if (failed?.item.kind === "committed") {
+          this.onAgentRunError(failed.item.event.payload);
+        }
       } catch (error) {
         this.failure = error instanceof Error ? error : new Error(String(error));
         this.queue = [];
@@ -139,14 +194,16 @@ export class WorkspaceChatController {
   whenIdle() {
     if (this.failure) return Promise.reject(this.failure);
     if (!this.hasQueuedItems() && this.frameId === null) return Promise.resolve();
-    return new Promise((resolve, reject) => this.idleWaiters.push({ resolve, reject }));
+    return new Promise<void>((resolve, reject) => {
+      this.idleWaiters.push({ resolve: () => resolve(), reject });
+    });
   }
 
   resolveIdle() {
     this.idleWaiters.splice(0).forEach(({ resolve }) => resolve());
   }
 
-  rejectIdle(error) {
+  rejectIdle(error: Error) {
     this.idleWaiters.splice(0).forEach(({ reject }) => reject(error));
   }
 

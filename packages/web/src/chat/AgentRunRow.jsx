@@ -1,7 +1,7 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Bot, Check, ChevronDown, Code2, Copy, FileText, Pencil, Search } from "lucide-react";
 import { useActivityDisclosures, useAgentRun } from "./chatStoreHooks";
-import { isAgentRunActive } from "./sessionEvents.mjs";
+import { isAgentRunActive } from "./sessionEvents";
 import { activityTarget, activityToolAtom, buildAgentRunSections, formatPhaseElapsed, referenceCitations, runningActivityPresentation } from "./agentRunPresentation.mjs";
 import { MarkdownContent, StreamingMarkdownContent } from "./MarkdownContent";
 import { AttachmentCard } from "./AttachmentCard";

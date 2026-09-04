@@ -4,9 +4,12 @@
   "private": true,
   "license": "AGPL-3.0-only",
   "scripts": {
-    "build": "npm run typecheck && vite build",
+    "build": "npm run lint && npm run typecheck && vite build",
     "dev": "vite --host 0.0.0.0 --port 3000",
-    "test:unit": "node --test tests/unit/chat-runtime.test.mjs",
+    "lint": "npm --prefix ../.. run lint",
+    "lint:hooks": "npm --prefix ../.. run lint:hooks",
+    "lint:unused": "npm --prefix ../.. run lint:unused",
+    "test:unit": "node --test tests/unit/chat-runtime.test.mjs tests/unit/lint-config.test.mjs",
     "typecheck": "tsc -p tsconfig.json --pretty false",
     "test:e2e": "playwright test"
   },

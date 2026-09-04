@@ -5,11 +5,11 @@ import { WorkspaceContextPanel } from "../components/WorkspaceContextPanel";
 import { ContextUsagePicker } from "../components/ContextUsagePicker";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { useModalDialog } from "../components/useModalDialog";
-import { createChatViewStore } from "../chat/chatViewStore.mjs";
+import { createChatViewStore } from "../chat/chatViewStore";
 import { useAgentRunList } from "../chat/chatStoreHooks";
-import { isAgentRunActive, validateHistoryPage } from "../chat/sessionEvents.mjs";
-import { WorkspaceChatController } from "../chat/workspaceChatController.mjs";
-import { streamWorkspaceAgentRun } from "../chat/workspaceWebTransport.mjs";
+import { isAgentRunActive, validateHistoryPage } from "../chat/sessionEvents";
+import { WorkspaceChatController } from "../chat/workspaceChatController";
+import { streamWorkspaceAgentRun } from "../chat/workspaceWebTransport";
 import { VirtualAgentRunList } from "../chat/VirtualAgentRunList";
 import { AttachmentCard, LocalAttachmentCard, localAttachmentKey } from "../chat/AttachmentCard";
 import {
@@ -1080,7 +1080,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         preview,
         objectUrl: preview.objectUrl || "",
       });
-    } catch (requestError) {
+    } catch {
       if (previewRequestIdRef.current !== requestId) return;
       setContextPanel({
         mode: "filePreview",

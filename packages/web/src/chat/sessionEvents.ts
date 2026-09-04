@@ -1,3 +1,117 @@
+import type {
+  SessionStreamEvent,
+  StreamEntry,
+  StreamItem,
+  UnknownRecord,
+} from "./streamTypes.ts";
+
+export type AgentRunStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type AgentRunIdentity = {
+  sessionId?: string;
+  workspaceId?: string;
+  agentRunId?: string;
+};
+
+export type StoredSessionEvent = {
+  sequence: number;
+  event: SessionStreamEvent;
+};
+
+export type LiveAssistant = {
+  afterSequence: number;
+  messageId: string;
+  revision: number;
+  text: string;
+  turnId: string;
+};
+
+export type ArtifactLink = UnknownRecord & {
+  artifactRef: string;
+  filename: string;
+  downloadUrl: string;
+};
+
+export type ChatMessage = UnknownRecord & {
+  messageId: string;
+  turnId?: string;
+  sequence: number;
+  role: string;
+  phase: string;
+  status: unknown;
+  text: string;
+  createdAtMs?: number;
+  attachments: unknown[];
+  artifacts: ArtifactLink[];
+};
+
+export type ToolActivity = UnknownRecord & {
+  activityId: string;
+  callId: string;
+  toolName: string;
+  turnId?: string;
+  sequence: number;
+  status: string;
+  childSessionId: string | null | undefined;
+  call: UnknownRecord;
+  result: UnknownRecord | null;
+  waitResult: UnknownRecord | null;
+};
+
+export type Citation = UnknownRecord & {
+  citationId: string;
+  sourceUrl: string;
+};
+
+type RawAgentRun = UnknownRecord & {
+  id: string;
+  status: AgentRunStatus;
+  model: unknown;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  events: StoredSessionEvent[];
+  live: LiveAssistant | null;
+  streamCursor: string;
+  sessionId?: string;
+  workspaceId?: string;
+};
+
+type AgentRunViewState = RawAgentRun & {
+  messages: ChatMessage[];
+  activities: ToolActivity[];
+  citations: Citation[];
+  artifacts: ArtifactLink[];
+  agentWaits: Record<string, string>;
+  overlayBarrierByTurnId: Record<string, number>;
+  startedAtMs: number;
+  phaseKey: string;
+  phaseStartedAtMs: number;
+  finishedAtMs: number | null;
+  connection: string;
+  projectionError: string | null;
+  failureReason?: unknown;
+  interruptionReason?: unknown;
+};
+
+export type ProjectedAgentRun = AgentRunViewState & {
+  eventIds: string[];
+  lastSourceSequence: number;
+};
+
+export type HistoryPage = UnknownRecord & {
+  schema: typeof HISTORY_PAGE_SCHEMA;
+  session: UnknownRecord & { id: string; workspaceId: string };
+  agentRuns: ProjectedAgentRun[];
+  nextCursor: string | null;
+  hasMore: boolean;
+};
+
 const AGENT_RUN_STATUSES = new Set(["queued", "running", "completed", "failed", "cancelled"]);
 const VISIBLE_EVENT_TYPES = new Set([
   "agent_run_started", "user_message", "turn_supplement", "assistant_message", "tool_call",
@@ -13,44 +127,59 @@ const STREAM_ITEM_FIELDS = {
 
 export const HISTORY_PAGE_SCHEMA = "session.history.page.v1";
 
-function hasExactFields(value, fields) {
+function isRecord(value: unknown): value is UnknownRecord {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value);
+}
+
+function hasExactFields(value: UnknownRecord, fields: readonly string[]) {
   return Object.keys(value).sort().join("|") === [...fields].sort().join("|");
 }
 
-function requireObject(value, name) {
+function requireObject(value: unknown, name: string): asserts value is UnknownRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${name} must be an object`);
-  return value;
 }
 
-function requireString(value, name, allowEmpty = false) {
+function requireString(
+  value: unknown,
+  name: string,
+  allowEmpty = false,
+): asserts value is string {
   if (typeof value !== "string" || (!allowEmpty && !value.trim())) throw new Error(`${name} must be a string`);
-  return value;
 }
 
-function validateSessionEvent(event, identity = {}) {
+function validateSessionEvent(
+  event: unknown,
+  identity: AgentRunIdentity = {},
+): SessionStreamEvent {
   requireObject(event, "session event");
   const required = ["sessionId", "createdAtMs", "eventId", "eventVersion", "payload", "schemaVersion", "sequence", "type"];
   const allowed = new Set([...required, "agentRunId", "turnId"]);
   if (required.some((field) => !(field in event)) || Object.keys(event).some((field) => !allowed.has(field))) {
     throw new Error("session event fields mismatch");
   }
-  if (event.schemaVersion !== "session.event.v1" || event.eventVersion !== 1 || !VISIBLE_EVENT_TYPES.has(event.type)) {
+  if (event.schemaVersion !== "session.event.v1" || event.eventVersion !== 1 || typeof event.type !== "string" || !VISIBLE_EVENT_TYPES.has(event.type)) {
     throw new Error("session event schema or type is unsupported");
   }
   for (const field of ["eventId", "sessionId"]) requireString(event[field], `session event ${field}`);
-  if (!Number.isInteger(event.createdAtMs) || event.createdAtMs < 0) throw new Error("session event createdAtMs is invalid");
-  if (!Number.isInteger(event.sequence) || event.sequence <= 0) throw new Error("session event sequence is invalid");
+  if (!isInteger(event.createdAtMs) || event.createdAtMs < 0) throw new Error("session event createdAtMs is invalid");
+  if (!isInteger(event.sequence) || event.sequence <= 0) throw new Error("session event sequence is invalid");
   requireObject(event.payload, "session event payload");
   if (identity.sessionId && event.sessionId !== identity.sessionId) throw new Error("session event session binding mismatch");
   if (identity.agentRunId && event.agentRunId !== identity.agentRunId) throw new Error("Session event AgentRun binding mismatch");
-  return event;
+  return event as SessionStreamEvent;
 }
 
-function validateOperation(operation, callId) {
+function validateOperation(operation: unknown, callId: string): UnknownRecord {
   requireObject(operation, "tool operation");
   for (const field of ["callId", "toolName", "status", "resultState"]) {
     requireString(operation[field], `tool operation ${field}`);
   }
+  requireString(operation.toolName, "tool operation toolName");
+  requireString(operation.resultState, "tool operation resultState");
   if (operation.callId !== callId) throw new Error("tool operation call binding mismatch");
   if (Object.hasOwn(operation, "title")) throw new Error("tool operation title is removed");
   if (operation.toolName === "bash") {
@@ -66,7 +195,7 @@ function validateOperation(operation, callId) {
   return { ...operation };
 }
 
-export function validateActivity(activity) {
+export function validateActivity(activity: unknown): ToolActivity {
   requireObject(activity, "activity");
   for (const field of ["activityId", "callId", "turnId", "toolName", "status"]) {
     requireString(activity[field], `activity ${field}`);
@@ -81,15 +210,19 @@ export function validateActivity(activity) {
       throw new Error("activity tool result identity mismatch");
     }
   }
-  return { ...activity, call: { ...activity.call }, result: activity.result ? { ...activity.result } : null };
+  return {
+    ...activity,
+    call: { ...activity.call },
+    result: activity.result ? { ...activity.result } : null,
+  } as ToolActivity;
 }
 
-function upsertBy(items, key, value) {
+function upsertBy<T>(items: readonly T[], key: keyof T, value: T) {
   const index = items.findIndex((item) => item[key] === value[key]);
   return index < 0 ? [...items, value] : items.map((item, itemIndex) => itemIndex === index ? value : item);
 }
 
-function artifactLink(payload) {
+function artifactLink(payload: UnknownRecord): ArtifactLink {
   requireString(payload.artifactRef, "artifactRef");
   requireString(payload.filename, "artifact filename");
   const artifactId = payload.artifactRef.startsWith("artifact:") ? payload.artifactRef.slice(9) : "";
@@ -97,12 +230,17 @@ function artifactLink(payload) {
   return { artifactRef: payload.artifactRef, filename: payload.filename, downloadUrl: `/api/artifacts/${artifactId}/download` };
 }
 
-function commitOverlayBarrier(view, event, sequence) {
+function commitOverlayBarrier(
+  view: AgentRunViewState,
+  event: SessionStreamEvent,
+  sequence: number,
+): AgentRunViewState {
   requireString(event.turnId, `${event.type} turnId`);
   const previousBarrier = Object.hasOwn(view.overlayBarrierByTurnId, event.turnId)
     ? view.overlayBarrierByTurnId[event.turnId]
     : 0;
   const barrier = Math.max(previousBarrier, sequence);
+  const liveMessageId = view.live?.messageId;
   const supersedesLive = view.live?.turnId === event.turnId && view.live.afterSequence < barrier;
   return {
     ...view,
@@ -110,13 +248,17 @@ function commitOverlayBarrier(view, event, sequence) {
       ? view.overlayBarrierByTurnId
       : { ...view.overlayBarrierByTurnId, [event.turnId]: barrier },
     messages: supersedesLive
-      ? view.messages.filter((message) => message.messageId !== view.live.messageId)
+      ? view.messages.filter((message) => message.messageId !== liveMessageId)
       : view.messages,
     live: supersedesLive ? null : view.live,
   };
 }
 
-function applySessionEvent(view, event, sequence) {
+function applySessionEvent(
+  view: AgentRunViewState,
+  event: SessionStreamEvent,
+  sequence: number,
+): AgentRunViewState {
   const payload = event.payload;
   if (event.type === "agent_run_started") {
     return { ...view, startedAtMs: event.createdAtMs };
@@ -182,10 +324,14 @@ function applySessionEvent(view, event, sequence) {
   }
   if (event.type === "tool_call") {
     for (const field of ["callId", "toolName", "toolContractDigest", "providerId", "displayTarget"]) requireString(payload[field], `tool_call ${field}`);
+    requireString(payload.callId, "tool_call callId");
+    requireString(payload.toolName, "tool_call toolName");
+    requireString(payload.toolContractDigest, "tool_call toolContractDigest");
     if (!/^sha256:[0-9a-f]{64}$/.test(payload.toolContractDigest)) throw new Error("tool_call toolContractDigest is invalid");
-    requireObject(payload.normalizedInput, "tool_call normalizedInput");
-    const outputRef = payload.toolName === "task_output" ? payload.normalizedInput?.output_ref : null;
-    if (outputRef?.kind === "agent" && typeof outputRef.child_session_id === "string") {
+    const normalizedInput = payload.normalizedInput;
+    requireObject(normalizedInput, "tool_call normalizedInput");
+    const outputRef = payload.toolName === "task_output" ? normalizedInput.output_ref : null;
+    if (isRecord(outputRef) && outputRef.kind === "agent" && typeof outputRef.child_session_id === "string") {
       const agent = view.activities.find((item) => item.toolName === "agent" && item.childSessionId === outputRef.child_session_id);
       if (!agent) throw new Error("task_output has no matching Agent activity");
       return {
@@ -204,12 +350,16 @@ function applySessionEvent(view, event, sequence) {
   }
   if (event.type === "tool_result") {
     for (const field of ["callId", "toolName", "resultState"]) requireString(payload[field], `tool_result ${field}`);
+    requireString(payload.callId, "tool_result callId");
+    requireString(payload.toolName, "tool_result toolName");
+    requireString(payload.resultState, "tool_result resultState");
     if (!Array.isArray(payload.operations)) throw new Error("tool_result operations are invalid");
+    const callId = payload.callId;
     const rawResult = {
       ...payload,
-      operations: payload.operations.map((operation) => validateOperation(operation, payload.callId)),
+      operations: payload.operations.map((operation) => validateOperation(operation, callId)),
     };
-    const waitingActivityId = view.agentWaits[payload.callId];
+    const waitingActivityId = view.agentWaits[callId];
     if (waitingActivityId) {
       const status = ["failed", "denied", "aborted"].includes(payload.resultState) ? "failed" : "completed";
       return {
@@ -219,17 +369,17 @@ function applySessionEvent(view, event, sequence) {
           : activity),
       };
     }
-    const index = view.activities.findIndex((item) => item.callId === payload.callId);
+    const index = view.activities.findIndex((item) => item.callId === callId);
     if (index < 0 || view.activities[index].toolName !== payload.toolName) throw new Error("tool_result has no matching tool_call");
     const current = view.activities[index];
     let status = ["failed", "denied", "aborted"].includes(payload.resultState) ? "failed" : "completed";
     let childSessionId = current.childSessionId;
     if (current.toolName === "agent") {
       try {
-        const result = JSON.parse(payload.modelContent);
-        if (result?.schema === "agent_tool_result_v1" && result.status === "started") {
+        const result: unknown = JSON.parse(payload.modelContent as string);
+        if (isRecord(result) && result.schema === "agent_tool_result_v1" && result.status === "started") {
           status = "running";
-          childSessionId = result.childSessionId;
+          childSessionId = result.childSessionId as string | undefined;
         }
       } catch {
         if (status === "completed") throw new Error("Agent tool result is invalid JSON");
@@ -245,12 +395,13 @@ function applySessionEvent(view, event, sequence) {
   }
   if (event.type === "citation_recorded") {
     for (const field of ["citationId", "inputRef", "displayName", "evidenceKind"]) requireString(payload[field], `citation ${field}`);
+    requireString(payload.citationId, "citation citationId");
     return {
       ...view,
       citations: upsertBy(view.citations, "citationId", {
         ...payload,
         sourceUrl: `/api/citations/${payload.citationId}`,
-      }),
+      } as Citation),
     };
   }
   if (event.type === "artifact_published") {
@@ -290,32 +441,43 @@ function applySessionEvent(view, event, sequence) {
   return view;
 }
 
-function applyLive(view, live) {
+function applyLive(
+  view: AgentRunViewState,
+  live: unknown,
+): AgentRunViewState {
   if (live === null) return view;
   requireObject(live, "live assistant");
   if (!hasExactFields(live, ["afterSequence", "messageId", "revision", "text", "turnId"])) throw new Error("live assistant fields mismatch");
   for (const field of ["messageId", "turnId"]) requireString(live[field], `live ${field}`);
   requireString(live.text, "live text", true);
-  if (!Number.isInteger(live.afterSequence) || live.afterSequence < 0 || !Number.isInteger(live.revision) || live.revision <= 0) {
+  if (!isInteger(live.afterSequence) || live.afterSequence < 0 || !isInteger(live.revision) || live.revision <= 0) {
     throw new Error("live assistant sequence is invalid");
   }
-  const barrier = Object.hasOwn(view.overlayBarrierByTurnId, live.turnId)
-    ? view.overlayBarrierByTurnId[live.turnId]
+  const { messageId, turnId, text, afterSequence, revision } = live;
+  requireString(messageId, "live messageId");
+  requireString(turnId, "live turnId");
+  requireString(text, "live text", true);
+  if (!isInteger(afterSequence) || !isInteger(revision)) {
+    throw new Error("live assistant sequence is invalid");
+  }
+  const barrier = Object.hasOwn(view.overlayBarrierByTurnId, turnId)
+    ? view.overlayBarrierByTurnId[turnId]
     : 0;
-  if (live.afterSequence < barrier) return view;
-  if (!live.text) return { ...view, live: { ...live } };
-  const messages = view.messages.filter((message) => message.messageId !== live.messageId);
+  const liveAssistant: LiveAssistant = { messageId, turnId, text, afterSequence, revision };
+  if (afterSequence < barrier) return view;
+  if (!text) return { ...view, live: liveAssistant };
+  const messages = view.messages.filter((message) => message.messageId !== messageId);
   messages.push({
-    messageId: live.messageId, turnId: live.turnId, sequence: live.afterSequence + 0.5,
-    role: "assistant", phase: "active", status: "streaming", text: live.text,
+    messageId, turnId, sequence: afterSequence + 0.5,
+    role: "assistant", phase: "active", status: "streaming", text,
     attachments: [], artifacts: [],
   });
-  return { ...view, messages, live: { ...live } };
+  return { ...view, messages, live: liveAssistant };
 }
 
-function projectAgentRun(agentRun) {
+function projectAgentRun(agentRun: RawAgentRun): ProjectedAgentRun {
   const initialStartedAtMs = Date.parse(agentRun.startedAt || agentRun.createdAt || "");
-  let view = {
+  let view: AgentRunViewState = {
     ...agentRun,
     messages: [],
     activities: [],
@@ -332,7 +494,7 @@ function projectAgentRun(agentRun) {
     projectionError: null,
   };
   let previousSequence = 0;
-  const eventIds = new Set();
+  const eventIds = new Set<string>();
   for (const stored of agentRun.events) {
     requireObject(stored, "stored session event");
     if (!hasExactFields(stored, ["event", "sequence"]) || !Number.isInteger(stored.sequence) || stored.sequence <= previousSequence) {
@@ -345,7 +507,13 @@ function projectAgentRun(agentRun) {
     previousSequence = stored.sequence;
     const previousPhaseKey = view.phaseKey;
     view = applySessionEvent(view, event, stored.sequence);
-    const runningActivity = view.activities.findLast((activity) => activity.status === "running");
+    let runningActivity: ToolActivity | undefined;
+    for (let index = view.activities.length - 1; index >= 0; index -= 1) {
+      if (view.activities[index].status === "running") {
+        runningActivity = view.activities[index];
+        break;
+      }
+    }
     const phaseKey = runningActivity ? `tool:${runningActivity.activityId}` : "thinking";
     view = {
       ...view,
@@ -359,21 +527,30 @@ function projectAgentRun(agentRun) {
   return { ...view, eventIds: [...eventIds], lastSourceSequence: previousSequence };
 }
 
-export function hydrateAgentRun(agentRun, identity = {}) {
+export function hydrateAgentRun(
+  agentRun: unknown,
+  identity: AgentRunIdentity = {},
+): ProjectedAgentRun {
   requireObject(agentRun, "agent run history");
   const fields = ["completedAt", "createdAt", "events", "id", "live", "model", "startedAt", "status", "streamCursor"];
-  if (!hasExactFields(agentRun, fields) || !AGENT_RUN_STATUSES.has(agentRun.status) || !Array.isArray(agentRun.events)) throw new Error("agent run history fields are invalid");
+  if (!hasExactFields(agentRun, fields) || typeof agentRun.status !== "string" || !AGENT_RUN_STATUSES.has(agentRun.status) || !Array.isArray(agentRun.events)) throw new Error("agent run history fields are invalid");
   requireString(agentRun.id, "agent run id");
   requireString(agentRun.streamCursor, "agent run streamCursor");
-  if (identity.sessionId) agentRun = { ...agentRun, sessionId: identity.sessionId };
-  if (identity.workspaceId) agentRun = { ...agentRun, workspaceId: identity.workspaceId };
-  return projectAgentRun(agentRun);
+  const boundAgentRun = {
+    ...agentRun,
+    ...(identity.sessionId ? { sessionId: identity.sessionId } : {}),
+    ...(identity.workspaceId ? { workspaceId: identity.workspaceId } : {}),
+  } as RawAgentRun;
+  return projectAgentRun(boundAgentRun);
 }
 
-function quarantineAgentRun(agentRun, identity) {
+function quarantineAgentRun(
+  agentRun: unknown,
+  identity: Required<Pick<AgentRunIdentity, "sessionId" | "workspaceId">>,
+): ProjectedAgentRun {
   requireObject(agentRun, "agent run history");
   requireString(agentRun.id, "agent run id");
-  if (!AGENT_RUN_STATUSES.has(agentRun.status)) throw new Error("agent run history status is invalid");
+  if (typeof agentRun.status !== "string" || !AGENT_RUN_STATUSES.has(agentRun.status)) throw new Error("agent run history status is invalid");
   return {
     ...agentRun,
     sessionId: identity.sessionId,
@@ -390,12 +567,15 @@ function quarantineAgentRun(agentRun, identity) {
     live: null,
     connection: ["queued", "running"].includes(agentRun.status) ? "running" : agentRun.status,
     projectionError: "session_projection_invalid",
-  };
+  } as unknown as ProjectedAgentRun;
 }
 
-export function validateHistoryPage(page, expectedIdentity = {}) {
+export function validateHistoryPage(
+  page: unknown,
+  expectedIdentity: AgentRunIdentity = {},
+): HistoryPage {
   const fields = ["agentRuns", "hasMore", "nextCursor", "schema", "session"];
-  if (!page || typeof page !== "object" || !hasExactFields(page, fields) || page.schema !== HISTORY_PAGE_SCHEMA || !Array.isArray(page.agentRuns)) {
+  if (!isRecord(page) || !hasExactFields(page, fields) || page.schema !== HISTORY_PAGE_SCHEMA || !Array.isArray(page.agentRuns)) {
     throw new Error("invalid session history page");
   }
   requireObject(page.session, "history session");
@@ -416,30 +596,33 @@ export function validateHistoryPage(page, expectedIdentity = {}) {
     }
   });
   if (new Set(agentRuns.map((agentRun) => agentRun.id)).size !== agentRuns.length) throw new Error("duplicate agentRunId");
-  return { ...page, agentRuns };
+  return { ...page, agentRuns } as HistoryPage;
 }
 
-function validateStreamItem(item, agentRunId) {
+function validateStreamItem(item: unknown, agentRunId: string): StreamItem {
   requireObject(item, "session stream item");
+  if (item.kind !== "committed" && item.kind !== "live") {
+    throw new Error("session stream item fields or binding are invalid");
+  }
   const fields = STREAM_ITEM_FIELDS[item.kind];
   if (!fields || !hasExactFields(item, fields) || item.schema !== "session.stream.item.v1" || item.agentRunId !== agentRunId) {
     throw new Error("session stream item fields or binding are invalid");
   }
   if (item.kind === "committed") {
-    if (!Number.isInteger(item.sourceSequence) || item.sourceSequence <= 0) throw new Error("sourceSequence is invalid");
+    if (!isInteger(item.sourceSequence) || item.sourceSequence <= 0) throw new Error("sourceSequence is invalid");
     const event = validateSessionEvent(item.event, { agentRunId });
     if (event.sequence !== item.sourceSequence) throw new Error("stream session event sequence binding mismatch");
   } else {
-    if (!Number.isInteger(item.afterSequence) || item.afterSequence < 0 || !Number.isInteger(item.revision) || item.revision <= 0) throw new Error("live stream sequence is invalid");
+    if (!isInteger(item.afterSequence) || item.afterSequence < 0 || !isInteger(item.revision) || item.revision <= 0) throw new Error("live stream sequence is invalid");
     for (const field of ["messageId", "turnId"]) requireString(item[field], `live ${field}`);
     requireString(item.text, "live text", true);
   }
-  return item;
+  return item as StreamItem;
 }
 
-export function readSseBlock(block, agentRunId) {
+export function readSseBlock(block: string, agentRunId: string): StreamEntry | null {
   let cursor = null;
-  const dataLines = [];
+  const dataLines: string[] = [];
   for (const line of block.split(/\r?\n/)) {
     if (line.startsWith("id:")) cursor = line.slice(3).trim();
     else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
@@ -448,17 +631,22 @@ export function readSseBlock(block, agentRunId) {
   return { cursor, item: validateStreamItem(JSON.parse(dataLines.join("\n")), agentRunId) };
 }
 
-function throwIfAborted(signal) {
+function throwIfAborted(signal?: AbortSignal) {
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 }
 
-export async function readSse(response, agentRunId, onItem, { signal } = {}) {
+export async function readSse(
+  response: Response,
+  agentRunId: string,
+  onItem: (entry: StreamEntry) => void | Promise<void>,
+  { signal }: { signal?: AbortSignal } = {},
+) {
   const reader = response.body?.getReader();
   if (!reader) throw new Error("stream body is unavailable");
   const decoder = new TextDecoder();
   let buffer = "";
   let terminal = false;
-  const deliver = async (block) => {
+  const deliver = async (block: string) => {
     throwIfAborted(signal);
     const entry = readSseBlock(block, agentRunId);
     if (!entry) return;
@@ -480,7 +668,10 @@ export async function readSse(response, agentRunId, onItem, { signal } = {}) {
   return terminal;
 }
 
-export function applyStreamEntry(agentRun, entry) {
+export function applyStreamEntry(
+  agentRun: ProjectedAgentRun,
+  entry: StreamEntry,
+): ProjectedAgentRun {
   const { cursor, item } = entry;
   if (item.agentRunId !== agentRun.id) throw new Error("Session stream AgentRun binding mismatch");
   const events = agentRun.events || [];
@@ -509,6 +700,6 @@ export function applyStreamEntry(agentRun, entry) {
   });
 }
 
-export function isAgentRunActive(agentRun) {
+export function isAgentRunActive(agentRun: { status: string }) {
   return ["queued", "running"].includes(agentRun.status);
 }

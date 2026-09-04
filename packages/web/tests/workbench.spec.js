@@ -907,11 +907,16 @@ test("renders coalesced live Markdown without remounting or losing the end ancho
       window.__latestScrollBehaviors.push(options.behavior);
       scrollTo(options);
     };
-    element.scrollTop = 0;
+    element.scrollTop = Math.min(
+      120,
+      Math.max(1, element.scrollHeight - element.clientHeight - 10),
+    );
     element.dispatchEvent(new Event("scroll", { bubbles: true }));
   });
   await expect(page.getByRole("button", { name: "回到最新", exact: true })).toBeVisible();
   const detachedScrollTop = await messageList.evaluate((element) => element.scrollTop);
+  expect(detachedScrollTop).toBeGreaterThan(0);
+  await page.waitForTimeout(250);
   releaseSecond();
   await expect(streamingText).toHaveText(secondRenderedText);
   expect(await streamingText.evaluate((element) => ({
@@ -1419,6 +1424,13 @@ test("edits session metadata without changing its row height", async ({ page }) 
 
 test("groups pinned, project, and recent sessions and lazily creates project children", async ({ page }) => {
   const fixture = await installChatFixture(page);
+  const navigationRequests = { sessions: 0, projects: 0 };
+  page.on("request", (request) => {
+    if (request.method() !== "GET") return;
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/workspaces/ws_1/sessions") navigationRequests.sessions += 1;
+    if (path === "/api/workspaces/ws_1/session-projects") navigationRequests.projects += 1;
+  });
   fixture.sessions[0].title = "顶部置顶";
   fixture.sessions[0].isPinned = true;
   fixture.projects.push({ id: "session_project_1", workspaceId: "ws_1", agentId: "centaeris", name: "Lumi", createdAt: "2026-07-14T00:00:00Z" });
@@ -1489,9 +1501,21 @@ test("groups pinned, project, and recent sessions and lazily creates project chi
   const sessionCount = fixture.sessions.length;
   await page.getByRole("button", { name: "在 新项目 中新建会话", exact: true }).click();
   await expect(page).toHaveURL(/new=1.*projectId=session_project_2/);
+  await expect.poll(() => navigationRequests).toEqual({ sessions: 2, projects: 2 });
   expect(fixture.sessions).toHaveLength(sessionCount);
-  await page.getByRole("textbox", { name: "输入消息", exact: true }).fill("项目中的新会话");
-  await page.getByRole("textbox", { name: "输入消息", exact: true }).press("Enter");
+  const composer = page.getByRole("textbox", { name: "输入消息", exact: true });
+  await composer.fill("不应带进另一个项目");
+  await page.getByRole("button", { name: "在 Lumi 中新建会话", exact: true }).click();
+  await expect(page).toHaveURL(/new=1.*projectId=session_project_1/);
+  await expect(composer).toHaveValue("");
+  await expect.poll(() => navigationRequests).toEqual({ sessions: 3, projects: 3 });
+  await composer.fill("仍不应带进新项目");
+  await page.getByRole("button", { name: "在 新项目 中新建会话", exact: true }).click();
+  await expect(page).toHaveURL(/new=1.*projectId=session_project_2/);
+  await expect(composer).toHaveValue("");
+  await expect.poll(() => navigationRequests).toEqual({ sessions: 4, projects: 4 });
+  await composer.fill("项目中的新会话");
+  await composer.press("Enter");
   await expect.poll(() => fixture.messageBody?.projectId).toBe("session_project_2");
   await expect(page.getByRole("navigation", { name: "新项目 会话" }).getByText("项目中的新会话", { exact: true })).toBeVisible();
 
@@ -1589,6 +1613,25 @@ test("keeps user and automation origins visible in recent sessions", async ({ pa
   await expect(recent.getByText("普通对话", { exact: true })).toBeVisible();
   await expect(recent.getByText("每日资料检查", { exact: true })).toBeVisible();
   await expect(recent.getByText("自动", { exact: true })).toBeVisible();
+});
+
+test("marks the initially selected unread session exactly once across unrelated rerenders", async ({ page }) => {
+  const fixture = await installChatFixture(page);
+  fixture.sessions[0].isUnread = true;
+  const readPatches = [];
+  page.on("request", (request) => {
+    if (request.method() === "PATCH" && new URL(request.url()).pathname === "/api/sessions/sess_1") {
+      readPatches.push(request.postDataJSON());
+    }
+  });
+
+  await page.goto("/w/ws_1/agents/centaeris?sessionId=sess_1");
+  await expect.poll(() => readPatches).toEqual([{ isUnread: false }]);
+  await page.getByRole("tab", { name: "主页", exact: true }).click();
+  await page.getByRole("tab", { name: "对话", exact: true }).click();
+  await page.setViewportSize({ width: 1000, height: 800 });
+  await page.waitForTimeout(100);
+  expect(readPatches).toEqual([{ isUnread: false }]);
 });
 
 test("keeps reconnecting until durable terminal history arrives", async ({ page }) => {
@@ -1746,6 +1789,19 @@ test("reloads history after an expired stream cursor", async ({ page }) => {
 });
 
 test("keeps tool evidence inline and opens one resizable reference preview", async ({ page }) => {
+  await page.addInitScript(() => {
+    const nativeAddEventListener = EventTarget.prototype.addEventListener;
+    const nativeRemoveEventListener = EventTarget.prototype.removeEventListener;
+    window.__windowKeydownSubscriptions = { adds: 0, removes: 0 };
+    EventTarget.prototype.addEventListener = function addEventListener(type, listener, options) {
+      if (this === window && type === "keydown") window.__windowKeydownSubscriptions.adds += 1;
+      return nativeAddEventListener.call(this, type, listener, options);
+    };
+    EventTarget.prototype.removeEventListener = function removeEventListener(type, listener, options) {
+      if (this === window && type === "keydown") window.__windowKeydownSubscriptions.removes += 1;
+      return nativeRemoveEventListener.call(this, type, listener, options);
+    };
+  });
   await page.route("http://localhost:8000/api/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     const records = [
@@ -1795,13 +1851,30 @@ test("keeps tool evidence inline and opens one resizable reference preview", asy
   await expect(details.locator(".activityOperation.is-edit .activityOperationDisclosure.isExpanded")).toContainText("replacement not found");
   await expect(details).not.toContainText("FAKE DIFF");
   await expect(details).not.toContainText("summary only");
+  const keydownBeforePreview = await page.evaluate(() => ({ ...window.__windowKeydownSubscriptions }));
   await references.getByRole("button", { name: /术前须知\.md 引用/ }).click();
   const preview = page.getByRole("complementary", { name: "文件预览", exact: true });
   await expect(preview.getByRole("navigation", { name: "文件预览路径" })).toContainText("库");
   await expect(preview.getByText("必须核对患者病史。", { exact: true })).toBeVisible();
   await expect(preview).toHaveCSS("width", "760px");
+  expect(await page.evaluate(() => ({ ...window.__windowKeydownSubscriptions }))).toEqual({
+    adds: keydownBeforePreview.adds + 1,
+    removes: keydownBeforePreview.removes,
+  });
   await preview.getByRole("separator", { name: "调整浏览栏宽度" }).press("ArrowLeft");
   await expect(preview).toHaveCSS("width", "776px");
+  expect(await page.evaluate(() => ({ ...window.__windowKeydownSubscriptions }))).toEqual({
+    adds: keydownBeforePreview.adds + 1,
+    removes: keydownBeforePreview.removes,
+  });
+  await page.keyboard.press("Escape");
+  await expect(preview).toBeHidden();
+  expect(await page.evaluate(() => ({ ...window.__windowKeydownSubscriptions }))).toEqual({
+    adds: keydownBeforePreview.adds + 1,
+    removes: keydownBeforePreview.removes + 1,
+  });
+  await references.getByRole("button", { name: /术前须知\.md 引用/ }).click();
+  await expect(preview).toBeVisible();
   await preview.getByRole("button", { name: "库", exact: true }).click();
   await expect(preview).toBeHidden();
 });

@@ -43,6 +43,7 @@ test("does not persist an untouched note draft", async ({ page }) => {
 });
 
 test("keeps the flat note identity visible when the sidebar is closed", async ({ page }) => {
+  const reads = { object: 0, note: 0 };
   await page.route("http://localhost:8000/api/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     const responses = {
@@ -52,6 +53,8 @@ test("keeps the flat note identity visible when the sidebar is closed", async ({
       "/api/library/note_1": { object: { id: "note_1", objectKind: "note", contentType: "text/markdown", displayName: "需求.md", status: "ready" } },
       "/api/library/note_1/note": { object: { id: "note_1", objectKind: "note", contentType: "text/markdown", displayName: "需求.md", status: "ready" }, markdown: "# 需求" },
     };
+    if (path === "/api/library/note_1") reads.object += 1;
+    if (path === "/api/library/note_1/note") reads.note += 1;
     return responses[path] ? route.fulfill({ json: responses[path] }) : route.fulfill({ status: 404, json: { error: "not_found" } });
   });
 
@@ -70,7 +73,55 @@ test("keeps the flat note identity visible when the sidebar is closed", async ({
   await expect(page.locator(".libraryPreviewHeader")).toHaveCSS("border-bottom-width", "0px");
   expect((await address.boundingBox())?.x).toBeGreaterThanOrEqual(52);
   await page.waitForTimeout(400);
+  expect(reads).toEqual({ object: 1, note: 1 });
   expect((await page.locator(".libraryPreviewMain").boundingBox())?.width).toBeGreaterThan(previewWidth);
+});
+
+test("loads each library folder once and ignores selection-only rerenders", async ({ page }) => {
+  const reads = { root: 0, child: 0, folder: 0 };
+  const folder = { id: "folder_1", objectKind: "folder", contentType: "application/x-directory", displayName: "项目资料", status: "ready", parentFolderId: null, updatedAt: "2026-07-15T00:00:00Z" };
+  const file = { id: "file_1", objectKind: "file", contentType: "text/plain", displayName: "计划.txt", status: "ready", parentFolderId: folder.id, updatedAt: "2026-07-15T00:00:00Z", sizeBytes: 12 };
+  await page.route("http://localhost:8000/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname;
+    if (path === "/api/csrf") return route.fulfill({ json: { csrfToken: "test-token" } });
+    if (path === "/api/me") return route.fulfill({ json: { user: { id: "user_1", email: "member@example.com" } } });
+    if (path === "/api/workspaces") return route.fulfill({ json: { workspaces: [{ id: "ws_1", name: "默认工作区", role: "owner" }] } });
+    if (path === "/api/workspaces/ws_1/agents") return route.fulfill({ json: { agents: [{ id: "centaeris", name: "Centaeris", description: "", workspaceId: "ws_1", avatarKind: "centaeris", status: "active" }] } });
+    if (path === "/api/library/folder_1") {
+      reads.folder += 1;
+      return route.fulfill({ json: { object: folder } });
+    }
+    if (path === "/api/library" && url.searchParams.get("parentFolderId") === folder.id) {
+      reads.child += 1;
+      return route.fulfill({ json: { objects: [file] } });
+    }
+    if (path === "/api/library") {
+      reads.root += 1;
+      return route.fulfill({ json: { objects: [folder] } });
+    }
+    return route.fulfill({ status: 404, json: { error: "not_found" } });
+  });
+
+  await page.goto("/w/ws_1/library");
+  const rootFolder = page.getByRole("cell", { name: "项目资料", exact: true });
+  await expect(rootFolder).toBeVisible();
+  const initialReads = { ...reads };
+  await rootFolder.click();
+  await expect(page).toHaveURL(/folder=folder_1/);
+  await expect(page.getByRole("cell", { name: "计划.txt", exact: true })).toBeVisible();
+  expect(reads).toEqual({ root: initialReads.root, child: 1, folder: 1 });
+
+  await page.getByRole("checkbox", { name: "选择 计划.txt", exact: true }).check();
+  await page.getByRole("checkbox", { name: "取消全选", exact: true }).click();
+  await page.waitForTimeout(100);
+  expect(reads).toEqual({ root: initialReads.root, child: 1, folder: 1 });
+
+  await page.getByRole("navigation", { name: "当前文件夹", exact: true }).getByRole("button", { name: "资料库", exact: true }).click();
+  await expect(page).toHaveURL(/\/w\/ws_1\/library$/);
+  await expect(page.getByRole("cell", { name: "项目资料", exact: true })).toBeVisible();
+  expect(reads).toEqual({ root: initialReads.root + 1, child: 1, folder: 1 });
 });
 
 test("library supports multi-select and select-all", async ({ page }) => {
