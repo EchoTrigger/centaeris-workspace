@@ -5,6 +5,9 @@
   "license": "AGPL-3.0-only",
   "scripts": {
     "build": "npm run build --workspace packages/web",
+    "lint": "node ./node_modules/@biomejs/biome/bin/biome lint packages/web/src packages/web/tests",
+    "lint:hooks": "node ./node_modules/@biomejs/biome/bin/biome lint packages/web/src packages/web/tests --only=lint/correctness/useExhaustiveDependencies",
+    "lint:unused": "node ./node_modules/@biomejs/biome/bin/biome lint packages/web/src packages/web/tests --only=lint/correctness/noUnusedImports --only=lint/correctness/noUnusedVariables",
     "typecheck": "npm run typecheck --workspace packages/web",
     "test": "npm run test:unit --workspace packages/web"
   },
@@ -17,6 +20,7 @@
   },
   "packageManager": "npm@10.9.4",
   "devDependencies": {
+    "@biomejs/biome": "2.5.12",
     "typescript": "7.0.2",
     "vite": "8.1.5"
   },

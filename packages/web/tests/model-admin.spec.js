@@ -36,6 +36,7 @@ async function mockAdminApi(page) {
     models: [],
     creates: [],
     tests: [],
+    reads: { providers: 0, models: 0, templates: 0 },
     templates: [
       template("deepseek", "DeepSeek", [{ modelName: "deepseek-v4-pro", displayName: "DeepSeek V4 Pro", contextTokens: 1000000, maxOutputTokens: 384000, thinkingMode: "high", thinkingModes: ["high", "max"] }]),
       template("moonshot_cn", "Moonshot AI CN", [
@@ -54,9 +55,18 @@ async function mockAdminApi(page) {
     if (path === "/api/workspaces/ws_1/sessions") return route.fulfill({ json: { sessions: [] } });
     if (path === "/api/csrf") return route.fulfill({ json: { csrfToken: "csrf-test-token" } });
     if (path === "/api/models") return route.fulfill({ json: { models: state.models.filter((model) => model.enabled).map(({ api, apiOverride, apiBase, enabled, revision, updatedAt, ...model }) => model) } });
-    if (path === "/api/admin/model-providers" && request.method() === "GET") return route.fulfill({ json: { providers: state.providers } });
-    if (path === "/api/admin/models" && request.method() === "GET") return route.fulfill({ json: { models: state.models } });
-    if (path === "/api/admin/model-provider-templates") return route.fulfill({ json: { templates: state.templates } });
+    if (path === "/api/admin/model-providers" && request.method() === "GET") {
+      state.reads.providers += 1;
+      return route.fulfill({ json: { providers: state.providers } });
+    }
+    if (path === "/api/admin/models" && request.method() === "GET") {
+      state.reads.models += 1;
+      return route.fulfill({ json: { models: state.models } });
+    }
+    if (path === "/api/admin/model-provider-templates") {
+      state.reads.templates += 1;
+      return route.fulfill({ json: { templates: state.templates } });
+    }
     if (path === "/api/admin/model-provider-templates/moonshot_cn/instantiate") {
       state.creates.push(request.postDataJSON());
       const provider = { id: "provider_moonshot_cn", displayName: "Moonshot AI CN", templateId: "moonshot_cn", api: "openai-completions", apiBase: "https://api.moonshot.cn/v1", enabled: true, credentialVersion: 1, updatedAt: "2026-08-01T00:00:00Z" };
@@ -127,6 +137,7 @@ test("superuser connects a managed provider without exposing model editing", asy
   await page.keyboard.press("Escape");
   await expect(picker).toHaveCount(0);
   await expect(page.getByRole("dialog", { name: "模型" })).toBeVisible();
+  expect(state.reads).toEqual({ providers: 1, models: 1, templates: 1 });
   await page.getByRole("button", { name: "Add provider", exact: true }).last().click();
   await picker.getByRole("button", { name: /^Moonshot AI CN/ }).click();
   await expect(page.locator(".workspaceModelsTreeModels")).toHaveCount(0);

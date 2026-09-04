@@ -3,8 +3,8 @@ import { Link, useNavigate, useParams, useRevalidator, useRouteLoaderData } from
 import { ArrowLeft, LoaderCircle, RotateCcw, Trash2 } from "lucide-react";
 import { apiJson, apiUrl } from "../api";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import { createChatViewStore } from "../chat/chatViewStore.mjs";
-import { validateHistoryPage } from "../chat/sessionEvents.mjs";
+import { createChatViewStore } from "../chat/chatViewStore";
+import { validateHistoryPage } from "../chat/sessionEvents";
 import { VirtualAgentRunList } from "../chat/VirtualAgentRunList";
 import { attachmentPreviewUrl } from "../chat/attachments.mjs";
 import { ShellPage } from "../shell/ShellPage";

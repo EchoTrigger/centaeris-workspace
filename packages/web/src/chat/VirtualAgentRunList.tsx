@@ -1,4 +1,12 @@
-import { Component, memo, useLayoutEffect, useRef, useState } from "react";
+import {
+  Component,
+  memo,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ComponentType,
+  type ReactNode,
+} from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronDown } from "lucide-react";
 import { useAgentRunList } from "./chatStoreHooks";
@@ -7,8 +15,99 @@ import { AgentRunRow } from "./AgentRunRow";
 const END_TOLERANCE_PX = 2;
 const LOAD_OLDER_PX = 180;
 
-class AgentRunErrorBoundary extends Component {
-  state = { failed: false };
+type AgentRunListSnapshot = {
+  agentRunIds: string[];
+};
+
+type ChatViewStore = {
+  subscribeList: (listener: () => void) => () => void;
+  getListSnapshot: () => AgentRunListSnapshot;
+};
+
+export type AgentRunCitation = {
+  citationId: string;
+  displayName: string;
+  sourceUrl: string;
+};
+
+export type AgentRunArtifact = {
+  artifactRef: string;
+  downloadUrl: string;
+  filename: string;
+};
+
+export type AgentRunAsset = {
+  id: string;
+  displayName: string;
+  contentType?: string;
+};
+
+export type EditableAgentRunMessage = {
+  messageId: string;
+  text: string;
+  attachments?: Array<{ inputRef: string }>;
+};
+
+type VirtualAgentRunListProps = {
+  store: ChatViewStore;
+  sessionId: string | null;
+  loadingHistory: boolean;
+  hasMoreHistory: boolean;
+  loadingOlderHistory: boolean;
+  onLoadOlderHistory: () => Promise<void>;
+  emptyState?: ReactNode;
+  onShowCitation?: (agentRunId: string, citation: AgentRunCitation) => void;
+  onShowArtifact?: (agentRunId: string, artifact: AgentRunArtifact) => void;
+  assets?: AgentRunAsset[];
+  onShowAttachment?: (asset: AgentRunAsset) => void;
+  editableMessageId?: string;
+  editingMessageId?: string;
+  editingPrompt?: string;
+  editingDisabled?: boolean;
+  onStartEditingMessage?: (message: EditableAgentRunMessage) => void;
+  onEditingPromptChange?: (text: string) => void;
+  onCancelEditingMessage?: () => void;
+  onSubmitEditingMessage?: () => void;
+  onRetryAgentRun?: (agentRunId: string) => void | Promise<void>;
+};
+
+type AgentRunErrorBoundaryProps = {
+  agentRunId: string;
+  onRetry?: VirtualAgentRunListProps["onRetryAgentRun"];
+  children: ReactNode;
+};
+
+type AgentRunErrorBoundaryState = {
+  failed: boolean;
+};
+
+type AgentRunRowProps = Pick<
+  VirtualAgentRunListProps,
+  | "store"
+  | "onShowCitation"
+  | "onShowArtifact"
+  | "assets"
+  | "onShowAttachment"
+  | "editableMessageId"
+  | "editingMessageId"
+  | "editingPrompt"
+  | "editingDisabled"
+  | "onStartEditingMessage"
+  | "onEditingPromptChange"
+  | "onCancelEditingMessage"
+  | "onSubmitEditingMessage"
+  | "onRetryAgentRun"
+> & {
+  agentRunId: string;
+};
+
+const TypedAgentRunRow = AgentRunRow as ComponentType<AgentRunRowProps>;
+
+class AgentRunErrorBoundary extends Component<
+  AgentRunErrorBoundaryProps,
+  AgentRunErrorBoundaryState
+> {
+  state: AgentRunErrorBoundaryState = { failed: false };
 
   static getDerivedStateFromError() {
     return { failed: true };
@@ -59,9 +158,9 @@ export const VirtualAgentRunList = memo(function VirtualAgentRunList({
   onCancelEditingMessage,
   onSubmitEditingMessage,
   onRetryAgentRun,
-}) {
-  const { agentRunIds } = useAgentRunList(store);
-  const scrollRef = useRef(null);
+}: VirtualAgentRunListProps) {
+  const { agentRunIds } = useAgentRunList(store) as AgentRunListSnapshot;
+  const scrollRef = useRef<HTMLDivElement>(null);
   const [isFollowingLatest, setIsFollowingLatest] = useState(true);
   const isFollowingLatestRef = useRef(true);
   const lastScrollTopRef = useRef(0);
@@ -75,13 +174,13 @@ export const VirtualAgentRunList = memo(function VirtualAgentRunList({
     anchorTo: "end",
     followOnAppend: true,
     scrollEndThreshold: END_TOLERANCE_PX,
-    shouldAdjustScrollPositionOnItemSizeChange: (item, _delta, instance) => {
-      if (isFollowingLatestRef.current) return true;
-      if (item.index === agentRunIds.length - 1) return false;
-      return item.start < instance.getScrollOffset() + instance.scrollAdjustments
-        && instance.scrollDirection !== "backward";
-    },
   });
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
+    if (isFollowingLatestRef.current) return true;
+    if (item.index === agentRunIds.length - 1) return false;
+    return item.start < (instance.scrollOffset ?? 0)
+      && instance.scrollDirection !== "backward";
+  };
   useLayoutEffect(() => {
     isFollowingLatestRef.current = true;
     setIsFollowingLatest(true);
@@ -166,7 +265,7 @@ export const VirtualAgentRunList = memo(function VirtualAgentRunList({
               >
                 <div className="workspaceVirtualAgentRunInner">
                   <AgentRunErrorBoundary agentRunId={agentRunIds[item.index]} onRetry={onRetryAgentRun}>
-                    <AgentRunRow
+                    <TypedAgentRunRow
                       store={store}
                       agentRunId={agentRunIds[item.index]}
                       onShowCitation={onShowCitation}

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Eye, EyeOff, KeyRound, Plus, Trash2 } from "lucide-react";
+import { ArrowLeft, Eye, EyeOff, KeyRound, Plus } from "lucide-react";
 import { apiJson as api } from "../api";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 

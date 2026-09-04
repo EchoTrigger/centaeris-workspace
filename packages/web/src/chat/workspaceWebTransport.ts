@@ -1,8 +1,22 @@
 import { ApiError, apiResponse } from "../api";
-import { readSse } from "./sessionEvents.mjs";
+import { readSse } from "./sessionEvents.ts";
+import type { StreamEntry } from "./streamTypes.ts";
+import type { WorkspaceChatController } from "./workspaceChatController.ts";
 
-function abortableDelay(delayMs, signal) {
-  return new Promise((resolve, reject) => {
+type ResumeState = {
+  status: string;
+  streamCursor: string;
+};
+
+type StreamWorkspaceAgentRunOptions = {
+  controller: WorkspaceChatController;
+  signal: AbortSignal;
+  onConnection(connection: "running" | "reconnecting"): void;
+  refreshResumeState(): Promise<ResumeState>;
+};
+
+function abortableDelay(delayMs: number, signal: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
     if (signal.aborted) {
       reject(new DOMException("Aborted", "AbortError"));
       return;
@@ -24,7 +38,7 @@ export async function streamWorkspaceAgentRun({
   signal,
   onConnection,
   refreshResumeState,
-}) {
+}: StreamWorkspaceAgentRunOptions) {
   while (!signal.aborted) {
     try {
       const response = await apiResponse(
@@ -38,15 +52,15 @@ export async function streamWorkspaceAgentRun({
       const terminal = await readSse(
         response,
         controller.agentRunId,
-        (entry) => controller.acceptWithBackpressure(entry),
+        (entry: StreamEntry) => controller.acceptWithBackpressure(entry),
         { signal },
       );
       await controller.whenIdle();
       if (terminal || signal.aborted) {
         return;
       }
-    } catch (error) {
-      if (error?.name === "AbortError") throw error;
+    } catch (error: unknown) {
+      if (error instanceof Error && error.name === "AbortError") throw error;
       if (error instanceof ApiError && error.message === "agent_run_event_cursor_expired") {
         onConnection("reconnecting");
         const resumedAgentRun = await refreshResumeState();

@@ -1,10 +1,98 @@
-import { applyStreamEntry, isAgentRunActive } from "./sessionEvents.mjs";
+import {
+  applyStreamEntry,
+  isAgentRunActive,
+  type ChatMessage,
+  type ProjectedAgentRun,
+} from "./sessionEvents.ts";
+import type { StreamEntry, UnknownRecord } from "./streamTypes.ts";
 
-function displayPhaseKey(agentRun) {
+type Listener = () => void;
+type ChangeListener = (agentRunId: string) => void;
+
+export type StreamTelemetry = {
+  entry: StreamEntry;
+  acceptedAt: number;
+  acceptedOrdinal: number;
+  agentRunId: string;
+  streamItemKind: StreamEntry["item"]["kind"];
+};
+
+type PendingRenderTelemetry = StreamTelemetry & {
+  renderRevision: number;
+  reducerAppliedAt: number;
+  domCommitAt?: number;
+};
+
+type ScheduledRenderTelemetry = {
+  frameId: number;
+  telemetry: PendingRenderTelemetry;
+};
+
+export type RenderTelemetryMetric = Readonly<{
+  schema: "workspace.chat_render_telemetry.v1";
+  agentRunId: string;
+  acceptedOrdinal: number;
+  streamItemKind: StreamEntry["item"]["kind"];
+  acceptedAt: number;
+  reducerAppliedAt: number;
+  domCommitAt: number;
+  domPaintBoundaryAt: number;
+  acceptedToReducerMs: number;
+  reducerToDomCommitMs: number;
+  domCommitToPaintBoundaryMs: number;
+  acceptedToDomPaintBoundaryMs: number;
+}>;
+
+type ChatViewStoreOptions = {
+  now?: () => number;
+  monotonicNow?: () => number;
+  scheduleFrame?: (callback: () => void) => number;
+  cancelFrame?: (frameId: number) => void;
+  onRenderTelemetry?: (metric: RenderTelemetryMetric) => void;
+};
+
+type ChatListSnapshot = Readonly<{
+  agentRunIds: readonly string[];
+  hasActiveAgentRun: boolean;
+}>;
+
+export type ChatViewStore = {
+  getListSnapshot(): ChatListSnapshot;
+  getAgentRunSnapshot(agentRunId: string): ProjectedAgentRun | null;
+  getMessageSnapshot(messageId: string): ChatMessage | null;
+  getMessageIdsForAgentRun(agentRunId: string): readonly string[];
+  getStreamRenderRevision(agentRunId: string): number;
+  getActivityDisclosures(agentRunId: string): ReadonlySet<string>;
+  toggleActivityDisclosure(agentRunId: string, identity: string): void;
+  subscribeList(listener: Listener): () => boolean;
+  subscribeAgentRun(agentRunId: string, listener: Listener): () => boolean | void;
+  subscribeChanges(listener: ChangeListener): () => boolean;
+  clear(): void;
+  replaceAll(agentRuns: readonly ProjectedAgentRun[]): void;
+  prependAgentRuns(agentRuns: readonly ProjectedAgentRun[]): void;
+  appendAgentRun(agentRun: ProjectedAgentRun): void;
+  replaceAgentRun(agentRun: ProjectedAgentRun): void;
+  replaceAgentRunId(previousAgentRunId: string, agentRun: ProjectedAgentRun): void;
+  updateConnection(agentRunId: string, connection: string): void;
+  rejectPendingAgentRun(agentRunId: string): void;
+  markAgentRunProjectionError(agentRunId: string): void;
+  beginStreamTelemetry(entry: StreamEntry, acceptedOrdinal: number): Readonly<StreamTelemetry>;
+  applyStreamEntries(
+    entries: readonly StreamEntry[],
+    telemetry?: readonly (Readonly<StreamTelemetry> | undefined)[],
+  ): void;
+  markDomCommit(agentRunId: string, renderRevision: number): (() => void) | undefined;
+};
+
+function cloneUnknownObject(value: unknown): UnknownRecord {
+  return { ...(value as UnknownRecord) };
+}
+
+function displayPhaseKey(agentRun: ProjectedAgentRun) {
   return agentRun.connection === "reconnecting" ? "reconnecting" : agentRun.phaseKey || "thinking";
 }
 
-function cloneAgentRun(agentRun) {
+function cloneAgentRun(agentRun: ProjectedAgentRun): ProjectedAgentRun {
   return {
     ...agentRun,
     events: (agentRun.events || []).map((stored) => ({ ...stored, event: { ...stored.event, payload: { ...stored.event.payload } } })),
@@ -13,41 +101,53 @@ function cloneAgentRun(agentRun) {
     projectionError: agentRun.projectionError || null,
     messages: (agentRun.messages || []).map((message) => ({
       ...message,
-      attachments: (message.attachments || []).map((attachment) => ({ ...attachment })),
+      attachments: (message.attachments || []).map(cloneUnknownObject),
       artifacts: (message.artifacts || []).map((artifact) => ({ ...artifact })),
     })),
     activities: (agentRun.activities || []).map((activity) => ({
       ...activity,
-      call: { ...activity.call, normalizedInput: { ...(activity.call?.normalizedInput || {}) } },
-      result: activity.result ? { ...activity.result, operations: (activity.result.operations || []).map((operation) => ({ ...operation })) } : null,
+      call: {
+        ...activity.call,
+        normalizedInput: cloneUnknownObject(activity.call.normalizedInput),
+      },
+      result: activity.result ? {
+        ...activity.result,
+        operations: ((activity.result.operations || []) as unknown[]).map(cloneUnknownObject),
+      } : null,
       waitResult: activity.waitResult ? { ...activity.waitResult } : null,
     })),
     citations: (agentRun.citations || []).map((citation) => ({ ...citation })),
-  };
+  } as ProjectedAgentRun;
 }
 
 export function createChatViewStore({
   now = () => Date.now(),
   monotonicNow = () => performance.now(),
-  scheduleFrame = (callback) => requestAnimationFrame(callback),
-  cancelFrame = (frameId) => cancelAnimationFrame(frameId),
+  scheduleFrame = (callback: () => void) => requestAnimationFrame(callback),
+  cancelFrame = (frameId: number) => cancelAnimationFrame(frameId),
   onRenderTelemetry = () => {},
-} = {}) {
-  const agentRunsById = new Map();
-  const messagesById = new Map();
-  const messageIdsByAgentRunId = new Map();
-  const agentRunListeners = new Map();
-  const activityDisclosures = new Map();
-  const emptyDisclosures = new Set();
-  const listListeners = new Set();
-  const changeListeners = new Set();
-  const pendingRenderTelemetry = new Map();
-  const renderTelemetryFrames = new Map();
-  const streamRenderRevisions = new Map();
-  let orderedAgentRunIds = Object.freeze([]);
-  let listSnapshot = Object.freeze({ agentRunIds: orderedAgentRunIds, hasActiveAgentRun: false });
+}: ChatViewStoreOptions = {}) {
+  const agentRunsById = new Map<string, ProjectedAgentRun>();
+  const messagesById = new Map<string, ChatMessage>();
+  const messageIdsByAgentRunId = new Map<string, readonly string[]>();
+  const agentRunListeners = new Map<string, Set<Listener>>();
+  const activityDisclosures = new Map<string, ReadonlySet<string>>();
+  const emptyDisclosures: ReadonlySet<string> = new Set();
+  const listListeners = new Set<Listener>();
+  const changeListeners = new Set<ChangeListener>();
+  const pendingRenderTelemetry = new Map<string, PendingRenderTelemetry>();
+  const renderTelemetryFrames = new Map<string, ScheduledRenderTelemetry>();
+  const streamRenderRevisions = new Map<string, number>();
+  let orderedAgentRunIds: readonly string[] = Object.freeze([]);
+  let listSnapshot: ChatListSnapshot = Object.freeze({
+    agentRunIds: orderedAgentRunIds,
+    hasActiveAgentRun: false,
+  });
 
-  const cancelRenderTelemetry = (agentRunId, telemetry = null) => {
+  const cancelRenderTelemetry = (
+    agentRunId: string,
+    telemetry: PendingRenderTelemetry | null = null,
+  ) => {
     const scheduled = renderTelemetryFrames.get(agentRunId);
     if (scheduled && (!telemetry || scheduled.telemetry === telemetry)) {
       cancelFrame(scheduled.frameId);
@@ -63,10 +163,10 @@ export function createChatViewStore({
     pendingRenderTelemetry.clear();
   };
 
-  const rebuildMessages = (agentRun) => {
+  const rebuildMessages = (agentRun: ProjectedAgentRun) => {
     const previousIds = messageIdsByAgentRunId.get(agentRun.id) || [];
     previousIds.forEach((messageId) => messagesById.delete(messageId));
-    const ids = [];
+    const ids: string[] = [];
     for (const message of agentRun.messages || []) {
       if (messagesById.has(message.messageId)) throw new Error(`duplicate messageId: ${message.messageId}`);
       ids.push(message.messageId);
@@ -78,18 +178,21 @@ export function createChatViewStore({
   const emitList = () => {
     listSnapshot = Object.freeze({
       agentRunIds: orderedAgentRunIds,
-      hasActiveAgentRun: orderedAgentRunIds.some((agentRunId) => isAgentRunActive(agentRunsById.get(agentRunId))),
+      hasActiveAgentRun: orderedAgentRunIds.some((agentRunId) => {
+        const agentRun = agentRunsById.get(agentRunId);
+        return agentRun ? isAgentRunActive(agentRun) : false;
+      }),
     });
     listListeners.forEach((listener) => listener());
   };
 
-  const emitAgentRun = (agentRunId, listMayHaveChanged = false) => {
+  const emitAgentRun = (agentRunId: string, listMayHaveChanged = false) => {
     agentRunListeners.get(agentRunId)?.forEach((listener) => listener());
     changeListeners.forEach((listener) => listener(agentRunId));
     if (listMayHaveChanged) emitList();
   };
 
-  const putAgentRun = (agentRun) => {
+  const putAgentRun = (agentRun: ProjectedAgentRun) => {
     const cloned = cloneAgentRun(agentRun);
     agentRunsById.set(cloned.id, cloned);
     if (!streamRenderRevisions.has(cloned.id)) streamRenderRevisions.set(cloned.id, 0);
@@ -97,7 +200,7 @@ export function createChatViewStore({
     return cloned;
   };
 
-  return {
+  const store: ChatViewStore = {
     getListSnapshot: () => listSnapshot,
     getAgentRunSnapshot: (agentRunId) => agentRunsById.get(agentRunId) || null,
     getMessageSnapshot: (messageId) => messagesById.get(messageId) || null,
@@ -119,8 +222,12 @@ export function createChatViewStore({
     },
     subscribeAgentRun(agentRunId, listener) {
       if (!agentRunId) return () => {};
-      if (!agentRunListeners.has(agentRunId)) agentRunListeners.set(agentRunId, new Set());
-      agentRunListeners.get(agentRunId).add(listener);
+      let listeners = agentRunListeners.get(agentRunId);
+      if (!listeners) {
+        listeners = new Set();
+        agentRunListeners.set(agentRunId, listeners);
+      }
+      listeners.add(listener);
       return () => {
         const listeners = agentRunListeners.get(agentRunId);
         listeners?.delete(listener);
@@ -167,7 +274,7 @@ export function createChatViewStore({
     prependAgentRuns(agentRuns) {
       if (!agentRuns.length) return;
       const existing = new Set(orderedAgentRunIds);
-      const newIds = [];
+      const newIds: string[] = [];
       for (const agentRun of agentRuns) {
         if (existing.has(agentRun.id) || newIds.includes(agentRun.id)) throw new Error(`history page overlaps agentRunId: ${agentRun.id}`);
         newIds.push(agentRun.id);
@@ -184,8 +291,8 @@ export function createChatViewStore({
       emitAgentRun(agentRun.id);
     },
     replaceAgentRun(agentRun) {
-      if (!agentRunsById.has(agentRun.id)) throw new Error(`unknown agentRunId: ${agentRun.id}`);
       const previous = agentRunsById.get(agentRun.id);
+      if (!previous) throw new Error(`unknown agentRunId: ${agentRun.id}`);
       putAgentRun(agentRun);
       emitAgentRun(agentRun.id, isAgentRunActive(previous) !== isAgentRunActive(agentRun));
     },
@@ -221,7 +328,7 @@ export function createChatViewStore({
       const agentRun = agentRunsById.get(agentRunId);
       if (!agentRun) return;
       if (!isAgentRunActive(agentRun)) return;
-      const next = {
+      const next: ProjectedAgentRun = {
         ...agentRun,
         status: "failed",
         connection: "failed",
@@ -251,8 +358,8 @@ export function createChatViewStore({
     },
     applyStreamEntries(entries, telemetry = []) {
       if (telemetry.length && telemetry.length !== entries.length) throw new Error("stream telemetry batch length mismatch");
-      const changed = new Map();
-      const activeChanges = new Set();
+      const changed = new Map<string, ProjectedAgentRun>();
+      const activeChanges = new Set<string>();
       for (const entry of entries) {
         const agentRunId = entry.item.agentRunId;
         const current = changed.get(agentRunId) || agentRunsById.get(agentRunId);
@@ -265,20 +372,22 @@ export function createChatViewStore({
         if (wasActive !== isAgentRunActive(next)) activeChanges.add(agentRunId);
         changed.set(agentRunId, next);
       }
-      const reducerAppliedAt = telemetry.length ? monotonicNow() : null;
       changed.forEach((_, agentRunId) => {
         streamRenderRevisions.set(agentRunId, (streamRenderRevisions.get(agentRunId) || 0) + 1);
       });
-      telemetry.forEach((item, index) => {
-        if (!item || item.entry !== entries[index]) throw new Error("stream telemetry entry mismatch");
-        if (!changed.has(item.agentRunId)) throw new Error("stream telemetry AgentRun mismatch");
-        cancelRenderTelemetry(item.agentRunId);
-        pendingRenderTelemetry.set(item.agentRunId, {
-          ...item,
-          renderRevision: streamRenderRevisions.get(item.agentRunId),
-          reducerAppliedAt,
+      if (telemetry.length) {
+        const reducerAppliedAt = monotonicNow();
+        telemetry.forEach((item, index) => {
+          if (!item || item.entry !== entries[index]) throw new Error("stream telemetry entry mismatch");
+          if (!changed.has(item.agentRunId)) throw new Error("stream telemetry AgentRun mismatch");
+          cancelRenderTelemetry(item.agentRunId);
+          pendingRenderTelemetry.set(item.agentRunId, {
+            ...item,
+            renderRevision: streamRenderRevisions.get(item.agentRunId) ?? 0,
+            reducerAppliedAt,
+          });
         });
-      });
+      }
       changed.forEach((agentRun, agentRunId) => {
         agentRunsById.set(agentRunId, agentRun);
         rebuildMessages(agentRun);
@@ -288,8 +397,9 @@ export function createChatViewStore({
     markDomCommit(agentRunId, renderRevision) {
       const telemetry = pendingRenderTelemetry.get(agentRunId);
       if (!telemetry || telemetry.renderRevision !== renderRevision) return undefined;
-      telemetry.domCommitAt = monotonicNow();
-      const schedule = (callback) => {
+      const domCommitAt = monotonicNow();
+      telemetry.domCommitAt = domCommitAt;
+      const schedule = (callback: () => void) => {
         const frameId = scheduleFrame(callback);
         renderTelemetryFrames.set(agentRunId, { frameId, telemetry });
       };
@@ -300,18 +410,18 @@ export function createChatViewStore({
           const domPaintBoundaryAt = monotonicNow();
           pendingRenderTelemetry.delete(agentRunId);
           renderTelemetryFrames.delete(agentRunId);
-          const metric = Object.freeze({
+          const metric: RenderTelemetryMetric = Object.freeze({
             schema: "workspace.chat_render_telemetry.v1",
             agentRunId,
             acceptedOrdinal: telemetry.acceptedOrdinal,
             streamItemKind: telemetry.streamItemKind,
             acceptedAt: telemetry.acceptedAt,
             reducerAppliedAt: telemetry.reducerAppliedAt,
-            domCommitAt: telemetry.domCommitAt,
+            domCommitAt,
             domPaintBoundaryAt,
             acceptedToReducerMs: telemetry.reducerAppliedAt - telemetry.acceptedAt,
-            reducerToDomCommitMs: telemetry.domCommitAt - telemetry.reducerAppliedAt,
-            domCommitToPaintBoundaryMs: domPaintBoundaryAt - telemetry.domCommitAt,
+            reducerToDomCommitMs: domCommitAt - telemetry.reducerAppliedAt,
+            domCommitToPaintBoundaryMs: domPaintBoundaryAt - domCommitAt,
             acceptedToDomPaintBoundaryMs: domPaintBoundaryAt - telemetry.acceptedAt,
           });
           try {
@@ -324,4 +434,5 @@ export function createChatViewStore({
       return () => cancelRenderTelemetry(agentRunId, telemetry);
     },
   };
+  return store;
 }

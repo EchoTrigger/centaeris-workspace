@@ -106,7 +106,6 @@ function LibraryPageContent() {
   if (!LIBRARY_VIEWS.has(libraryView)) throw new Error(`unsupported library view: ${libraryView}`);
 
   const selectedItems = objects.filter((item) => selectedIds.includes(item.id));
-  const selectedItem = selectedItems.length === 1 ? selectedItems[0] : null;
 
   function libraryUrl(nextFolderId = "") {
     return nextFolderId ? `${base}/library?folder=${encodeURIComponent(nextFolderId)}` : `${base}/library`;
