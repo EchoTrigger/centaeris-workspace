@@ -6,6 +6,7 @@ import {
   Search, Trash2, Upload, X,
 } from "lucide-react";
 import { apiJson as api, apiUrl, jsonOptions } from "../api";
+import { MarkdownContent } from "../chat/MarkdownContent";
 import { useModalDialog } from "../components/useModalDialog";
 import { AgentMark } from "../shell/AgentMark";
 import { ShellPage } from "../shell/ShellPage";
@@ -49,22 +50,7 @@ const LIBRARY_TABS = [
 
 function SkillMarkdown({ content }) {
   const source = content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
-  const blocks = source.trim().split(/\r?\n\r?\n/);
-  const inline = (text) => text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g).filter(Boolean).map((part, index) => part.startsWith("`")
-    ? <code key={index}>{part.slice(1, -1)}</code>
-    : part.startsWith("**") ? <strong key={index}>{part.slice(2, -2)}</strong> : part);
-  return blocks.map((block, index) => {
-    const heading = block.match(/^(#{1,3})\s+(.+)$/);
-    if (heading) {
-      const Heading = `h${heading[1].length}`;
-      return <Heading key={index}>{inline(heading[2])}</Heading>;
-    }
-    const lines = block.split(/\r?\n/);
-    if (lines.every((line) => /^[-*]\s+/.test(line))) return <ul key={index}>{lines.map((line, lineIndex) => <li key={lineIndex}>{inline(line.replace(/^[-*]\s+/, ""))}</li>)}</ul>;
-    if (lines.every((line) => /^\d+\.\s+/.test(line))) return <ol key={index}>{lines.map((line, lineIndex) => <li key={lineIndex}>{inline(line.replace(/^\d+\.\s+/, ""))}</li>)}</ol>;
-    if (block.startsWith("```") && block.endsWith("```")) return <pre key={index}><code>{block.replace(/^```[^\n]*\n?/, "").replace(/\n?```$/, "")}</code></pre>;
-    return <p key={index}>{inline(block)}</p>;
-  });
+  return <MarkdownContent text={source} />;
 }
 
 function LibraryPageContent() {

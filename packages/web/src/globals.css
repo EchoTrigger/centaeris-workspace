@@ -19,7 +19,8 @@
 
 :root {
   color-scheme: light;
-  --font-family: "Noto Sans CJK SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-content: "Noto Sans CJK SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   --font-mono: "Google Sans Code", "Noto Sans CJK SC", "Cascadia Code", "SFMono-Regular", Consolas, monospace;
   --surface-color: #fcfdfd;
   --surface-variant: #f5f7f7;
@@ -203,6 +204,7 @@ svg { width: 16px; height: 16px; stroke-width: 1.9; }
 .librarySkillTable { min-width: 0; border-top: 1px solid var(--border); }
 .librarySkillRow { display: grid; min-height: 48px; grid-template-columns: minmax(180px, 1.15fr) minmax(220px, 1.7fr) minmax(110px, .75fr) 86px; align-items: center; gap: 14px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 12px; }
 .librarySkillRow { width: 100%; border-top: 0; border-right: 0; border-left: 0; background: transparent; padding: 0; font-family: inherit; text-align: left; }
+.librarySkillRow strong { font-family: var(--font-content); }
 .librarySkillRow:not(.isHead):hover, .librarySkillRow.isSelected { background: #f7f7f5; }
 .librarySkillRow.isHead { min-height: 36px; color: var(--muted); font-size: 11px; }
 .librarySkillRow > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -397,6 +399,7 @@ button.attachmentCardContent:hover { border-color: #c4cfdd; background: #f5f8fb;
 .markdownContent ul, .markdownContent ol { margin: 7px 0 15px; padding-left: 24px; }
 .markdownContent li + li { margin-top: 4px; }
 .markdownContent a { color: #315f96; text-underline-offset: 3px; }
+.markdownContent { font-family: var(--font-content); }
 .markdownContent code { border-radius: 5px; background: #f2f4f7; padding: 2px 5px; font-family: var(--font-mono); font-size: .9em; line-height: 1.5; }
 .markdownCode { max-width: 100%; overflow: auto; border: 1px solid var(--border); border-radius: 10px; background: #f7f9fb; padding: 13px 14px; }
 .markdownCode code { background: transparent; padding: 0; }
