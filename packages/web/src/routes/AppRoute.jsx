@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useRouteLoaderData } from "react-router";
 import { apiResponse } from "../api";
 import { WorkspaceContextPanel } from "../components/WorkspaceContextPanel";
@@ -223,6 +223,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       models: providerModels,
     }));
   }, [models]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Model identity resets a user override when defaults match.
   useEffect(() => {
     setThinkingMode(currentModel?.thinkingMode || "");
   }, [currentModel?.id, currentModel?.thinkingMode]);
@@ -253,6 +254,27 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     ));
   }, []);
 
+  const clearContextPanel = useCallback(() => {
+    previewRequestIdRef.current += 1;
+    setContextPanel(CLOSED_CONTEXT_PANEL);
+  }, []);
+  const clearConversationProjection = useCallback(() => {
+    chatStore.clear();
+    setHistoryCursor(null);
+    setHasMoreHistory(false);
+    setAssets([]);
+    setPendingAttachmentIds([]);
+    setPendingUploadFiles([]);
+  }, [chatStore]);
+  const stopActiveStream = useCallback(() => {
+    streamAbortRef.current?.abort();
+    chatControllerRef.current?.dispose();
+  }, []);
+  const markSelectedSessionRead = useEffectEvent(markSessionRead);
+  const connectLoadedAgentRun = useEffectEvent(connectAgentRun);
+  const handleLoadedAgentRunStreamFailure = useEffectEvent(handleAgentRunStreamFailure);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: The version is an explicit refresh signal from retained settings routes.
   useEffect(() => {
     const controller = new AbortController();
     async function load() {
@@ -280,16 +302,15 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [contextPanel.mode]);
+  }, [contextPanel.mode, clearContextPanel]);
 
   useEffect(() => {
     requestScopeRef.current.active = true;
     return () => {
       requestScopeRef.current.active = false;
-      streamAbortRef.current?.abort();
-      chatControllerRef.current?.dispose();
+      stopActiveStream();
     };
-  }, []);
+  }, [stopActiveStream]);
 
   useEffect(() => {
     if (!startFresh && requestedSessionId && acceptedRouteSessionIdRef.current === requestedSessionId) {
@@ -298,17 +319,13 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       return undefined;
     }
     let active = true;
+    const navigationScopeKey = requestScopeKey;
     setLoadingHistory(!workspaceDraft);
     acceptedSessionRef.current = null;
     acceptedRouteSessionIdRef.current = "";
     setSessions([]);
     setSessionId("");
-    chatStore.clear();
-    setHistoryCursor(null);
-    setHasMoreHistory(false);
-    setAssets([]);
-    setPendingAttachmentIds([]);
-    setPendingUploadFiles([]);
+    clearConversationProjection();
     setDraft("");
     setSending(false);
     setEditingTail(null);
@@ -320,7 +337,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       apiResponse(`/api/workspaces/${workspace.id}/session-projects?agentId=${encodeURIComponent(activeAgent.id)}`).then((response) => response.json()),
     ])
       .then(([data, projectData]) => {
-        if (!active) return;
+        if (!active || requestScopeRef.current.key !== navigationScopeKey) return;
         if (!Array.isArray(data.sessions) || !Array.isArray(projectData.projects)) throw new Error("session_navigation_response_invalid");
         setSessions(data.sessions);
         setProjects(projectData.projects);
@@ -331,16 +348,16 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
             || null;
         const selectedSessionId = selectedSession?.id || "";
         setSessionId(selectedSessionId);
-        if (selectedSession?.isUnread) markSessionRead(selectedSession);
+        if (selectedSession?.isUnread) markSelectedSessionRead(selectedSession);
         if (!selectedSessionId) setLoadingHistory(false);
       })
       .catch(() => {
-        if (!active) return;
+        if (!active || requestScopeRef.current.key !== navigationScopeKey) return;
         setError("无法读取会话列表，请刷新后重试。");
         setLoadingHistory(false);
       });
     return () => { active = false; };
-  }, [workspace.id, workspaceDraft, requestedSessionId, requestedProjectId, startFresh, activeAgent.id]);
+  }, [workspace.id, workspaceDraft, requestedSessionId, requestScopeKey, startFresh, activeAgent.id, clearConversationProjection, clearContextPanel]);
 
   useEffect(() => {
     if (requestedPrompt) setDraft(requestedPrompt);
@@ -354,13 +371,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   useEffect(() => {
     setEditingTail(null);
     if (!sessionId) {
-      chatStore.clear();
-      setHistoryCursor(null);
-      setHasMoreHistory(false);
-      setAssets([]);
-      setPendingAttachmentIds([]);
-      setPendingUploadFiles([]);
-      setEditingTail(null);
+      clearConversationProjection();
       return;
     }
     const acceptedSession = acceptedSessionRef.current;
@@ -379,16 +390,15 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         .catch(() => {
           if (activeSessionIdRef.current === sessionId) setError("无法刷新会话材料");
         });
-      connectAgentRun(acceptedSession.agentRunId, workspace.id, sessionId, controller).catch((streamError) => {
-        handleAgentRunStreamFailure(streamError, acceptedSession.agentRunId);
+      connectLoadedAgentRun(acceptedSession.agentRunId, workspace.id, sessionId, controller).catch((streamError) => {
+        handleLoadedAgentRunStreamFailure(streamError, acceptedSession.agentRunId);
       });
       return () => {
         controller.abort();
         chatControllerRef.current?.dispose();
       };
     }
-    streamAbortRef.current?.abort();
-    chatControllerRef.current?.dispose();
+    stopActiveStream();
     const controller = new AbortController();
     streamAbortRef.current = controller;
     let active = true;
@@ -407,10 +417,10 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         setPendingUploadFiles([]);
         const runningAgentRun = [...history.agentRuns].reverse().find((agentRun) => ["queued", "running"].includes(agentRun.status) && !agentRun.projectionError);
         if (runningAgentRun) {
-          connectAgentRun(runningAgentRun.id, workspace.id, sessionId, controller, {
+          connectLoadedAgentRun(runningAgentRun.id, workspace.id, sessionId, controller, {
             cursor: runningAgentRun.streamCursor,
           }).catch((streamError) => {
-            handleAgentRunStreamFailure(streamError, runningAgentRun.id);
+            handleLoadedAgentRunStreamFailure(streamError, runningAgentRun.id);
           });
         }
       })
@@ -421,7 +431,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       controller.abort();
       chatControllerRef.current?.dispose();
     };
-  }, [sessionId, workspace?.id]);
+  }, [sessionId, workspace?.id, clearConversationProjection, stopActiveStream, chatStore.replaceAll]);
 
   function showStreamError(errorValue) {
     if (errorValue?.name === "AbortError") return;
@@ -451,8 +461,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     try {
       const resumed = await refreshAgentRunResumeState(agentRunId, workspace.id, sessionId);
       if (resumed.projectionError || !["queued", "running"].includes(resumed.status)) return;
-      streamAbortRef.current?.abort();
-      chatControllerRef.current?.dispose();
+      stopActiveStream();
       const controller = new AbortController();
       streamAbortRef.current = controller;
       connectAgentRun(agentRunId, workspace.id, sessionId, controller, {
@@ -537,16 +546,10 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     if (sending) return;
     acceptedSessionRef.current = null;
     acceptedRouteSessionIdRef.current = "";
-    streamAbortRef.current?.abort();
-    chatControllerRef.current?.dispose();
+    stopActiveStream();
     setSessionId("");
     setLoadingHistory(false);
-    chatStore.clear();
-    setHistoryCursor(null);
-    setHasMoreHistory(false);
-    setAssets([]);
-    setPendingAttachmentIds([]);
-    setPendingUploadFiles([]);
+    clearConversationProjection();
     setEditingTail(null);
     setDraft("");
     setError("");
@@ -612,12 +615,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       if (targetSessionId === sessionId) {
         acceptedSessionRef.current = null;
         acceptedRouteSessionIdRef.current = "";
-        chatStore.clear();
-        setHistoryCursor(null);
-        setHasMoreHistory(false);
-        setAssets([]);
-        setPendingAttachmentIds([]);
-        setPendingUploadFiles([]);
+        clearConversationProjection();
         setDraft("");
         setLoadingHistory(true);
         const next = remainingSessions[0];
@@ -946,15 +944,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     setPendingUploadFiles((items) => items.filter((_file, itemIndex) => itemIndex !== index));
   }
 
-  function closeContextPanel() {
-    clearContextPanel();
-  }
-
-  function clearContextPanel() {
-    previewRequestIdRef.current += 1;
-    setContextPanel(CLOSED_CONTEXT_PANEL);
-  }
-
   function returnFromFilePreview() {
     if (contextPanel.mode !== "filePreview") return;
     const { origin } = contextPanel;
@@ -1036,14 +1025,17 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   async function showArtifact(artifact, origin) {
     const requestId = previewRequestIdRef.current + 1;
     previewRequestIdRef.current = requestId;
-    setError("");
-    setContextPanel({
-      mode: "filePreview",
+    const panelIdentity = {
       artifactRef: artifact.artifactRef,
       displayName: artifact.filename,
       downloadUrl: artifact.downloadUrl,
       origin,
       originLabel: "Artifact",
+    };
+    setError("");
+    setContextPanel({
+      mode: "filePreview",
+      ...panelIdentity,
       status: "loading",
     });
     try {
@@ -1071,11 +1063,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       }
       setContextPanel({
         mode: "filePreview",
-        artifactRef: artifact.artifactRef,
-        displayName: artifact.filename,
-        downloadUrl: artifact.downloadUrl,
-        origin,
-        originLabel: "Artifact",
+        ...panelIdentity,
         status: "ready",
         preview,
         objectUrl: preview.objectUrl || "",
@@ -1084,11 +1072,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       if (previewRequestIdRef.current !== requestId) return;
       setContextPanel({
         mode: "filePreview",
-        artifactRef: artifact.artifactRef,
-        displayName: artifact.filename,
-        downloadUrl: artifact.downloadUrl,
-        origin,
-        originLabel: "Artifact",
+        ...panelIdentity,
         status: "error",
         error: "无法读取该文件。",
       });
@@ -1282,7 +1266,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         <div className={`workspaceConversationPlane ${isHome ? "isEmpty" : ""}`}>
           <VirtualAgentRunList
             store={chatStore}
-            sessionId={sessionId}
+            sessionId={sessionId || null}
             loadingHistory={loadingHistory}
             hasMoreHistory={hasMoreHistory}
             loadingOlderHistory={loadingOlderHistory}
@@ -1400,7 +1384,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         panel={contextPanel}
         browserWidthPx={browserPanelWidthPx}
         onBrowserWidthChange={updateBrowserPanelWidth}
-        onClose={closeContextPanel}
+        onClose={clearContextPanel}
         onReturn={returnFromFilePreview}
       />
       <ConfirmDialog

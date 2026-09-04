@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const biomeEntry = resolve(repoRoot, "node_modules/@biomejs/biome/bin/biome");
+const ciScriptPath = resolve(repoRoot, "scripts/ci.ps1");
 
 function runFixture(source) {
   const fixturePath = resolve(repoRoot, "packages/web/src/.lint-contract-test.tsx");
@@ -21,7 +22,7 @@ function runFixture(source) {
   }
 }
 
-test("missing React dependencies are reported without blocking the gate", () => {
+test("missing React dependencies block the gate", () => {
   const result = runFixture(`
     import { useEffect } from "react";
     export function LintContract({ value }) {
@@ -30,8 +31,27 @@ test("missing React dependencies are reported without blocking the gate", () => 
     }
   `);
   const output = `${result.stdout}${result.stderr}`;
-  assert.equal(result.status, 0);
+  assert.notEqual(result.status, 0);
   assert.match(output, /lint\/correctness\/useExhaustiveDependencies/);
+});
+
+test("unused imports and variables block the gate", () => {
+  const result = runFixture(`
+    import { useEffect } from "react";
+    export function readIdentity(value: { id: string }) {
+      const unusedValue = value.id;
+      return null;
+    }
+  `);
+  const output = `${result.stdout}${result.stderr}`;
+  assert.notEqual(result.status, 0);
+  assert.match(output, /lint\/correctness\/noUnusedImports/);
+  assert.match(output, /lint\/correctness\/noUnusedVariables/);
+});
+
+test("local CI runs the repository lint gate", () => {
+  const ciScript = readFileSync(ciScriptPath, "utf8");
+  assert.match(ciScript, /Run "Web lint" \{ npm run lint \}/);
 });
 
 test("conditional React hooks block the gate", () => {

@@ -105,6 +105,7 @@ export default function ModelSettings({ onClose, onModelsChanged }) {
       : current);
   }
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Initial catalog loading is mount-only; successful mutations refresh explicitly.
   useEffect(() => {
     setBusyAction("load");
     load().catch((loadError) => setError(`model_configuration_load_failed: ${errorText(loadError)}`)).finally(() => setBusyAction(""));

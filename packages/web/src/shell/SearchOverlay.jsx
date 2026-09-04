@@ -68,6 +68,7 @@ export function SearchOverlay({ sessions, workspace, agents, agentId, onClose })
   const results = groups.flatMap((group) => group.results.map((result) => ({ ...result, icon: group.icon })));
   const selected = results[Math.min(selectedIndex, Math.max(0, results.length - 1))];
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Search-source changes intentionally reset keyboard selection to the first result.
   useEffect(() => setSelectedIndex(0), [query, library, loadedSessions]);
 
   useEffect(() => {

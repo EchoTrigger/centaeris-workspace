@@ -142,6 +142,7 @@ function formatMessageTime(createdAtMs) {
 
 const LiveStatus = memo(function LiveStatus({ Icon, label, startedAtMs }) {
   const [nowMs, setNowMs] = useState(() => Date.now());
+  // biome-ignore lint/correctness/useExhaustiveDependencies: A new phase resets the elapsed clock immediately, before the next interval tick.
   useEffect(() => {
     setNowMs(Date.now());
     const intervalId = window.setInterval(() => setNowMs(Date.now()), 1000);
@@ -178,6 +179,7 @@ export const AgentRunRow = memo(function AgentRunRow({
   onRetryAgentRun,
 }) {
   const agentRun = useAgentRun(store, agentRunId);
+  const hasAgentRun = agentRun !== null;
   const streamRenderRevision = store.getStreamRenderRevision(agentRunId);
   const active = agentRun ? isAgentRunActive(agentRun) : false;
   const expandedActivities = useActivityDisclosures(store, agentRunId);
@@ -193,9 +195,9 @@ export const AgentRunRow = memo(function AgentRunRow({
   }, [agentRun?.activities, agentRun?.messages]);
   const references = useMemo(() => referenceCitations(agentRun?.citations || []), [agentRun?.citations]);
   useLayoutEffect(() => {
-    if (!agentRun) return undefined;
+    if (!hasAgentRun) return undefined;
     return store.markDomCommit(agentRunId, streamRenderRevision);
-  }, [agentRunId, store, streamRenderRevision]);
+  }, [agentRunId, hasAgentRun, store, streamRenderRevision]);
   useEffect(() => {
     agentRun?.messages
       .filter((message) => message.phase === "active")

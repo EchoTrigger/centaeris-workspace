@@ -292,7 +292,7 @@ export function ShellSidebar({ workspace, agents, activeAgent, sessionProps, onS
       })
       .catch(() => active && setPrivateNotesError(true));
     return () => { active = false; };
-  }, [location.pathname]);
+  }, []);
 
   useEffect(() => {
     const onKeyDown = (event) => {

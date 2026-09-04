@@ -88,6 +88,7 @@ function LibraryPreviewPageContent() {
     }
   }
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Object identity is the load trigger; the render-local command must not retrigger itself.
   useEffect(() => {
     load();
   }, [libraryObjectId]);

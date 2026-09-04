@@ -163,6 +163,10 @@ export const VirtualAgentRunList = memo(function VirtualAgentRunList({
   const scrollRef = useRef<HTMLDivElement>(null);
   const [isFollowingLatest, setIsFollowingLatest] = useState(true);
   const isFollowingLatestRef = useRef(true);
+  const followingScopeRef = useRef<{
+    sessionId: string | null;
+    loadingHistory: boolean;
+  } | null>(null);
   const lastScrollTopRef = useRef(0);
   const loadingOlderRef = useRef(false);
   const virtualizer = useVirtualizer({
@@ -182,19 +186,29 @@ export const VirtualAgentRunList = memo(function VirtualAgentRunList({
       && instance.scrollDirection !== "backward";
   };
   useLayoutEffect(() => {
+    const previousScope = followingScopeRef.current;
+    if (previousScope?.sessionId === sessionId && previousScope.loadingHistory === loadingHistory) return;
+    followingScopeRef.current = { sessionId, loadingHistory };
     isFollowingLatestRef.current = true;
     setIsFollowingLatest(true);
     virtualizer.scrollToEnd();
     lastScrollTopRef.current = scrollRef.current?.scrollTop || 0;
-  }, [sessionId, virtualizer]);
+  }, [sessionId, loadingHistory, virtualizer]);
 
   const totalSize = virtualizer.getTotalSize();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Measured content growth must reconcile and preserve the end anchor.
   useLayoutEffect(() => {
-    if (!isFollowingLatestRef.current) return;
     const element = scrollRef.current;
     if (!element) return;
     const distanceFromEnd = element.scrollHeight - element.clientHeight - element.scrollTop;
-    if (distanceFromEnd <= END_TOLERANCE_PX) return;
+    if (distanceFromEnd <= END_TOLERANCE_PX) {
+      if (!isFollowingLatestRef.current) {
+        isFollowingLatestRef.current = true;
+        setIsFollowingLatest(true);
+      }
+      return;
+    }
+    if (!isFollowingLatestRef.current) return;
     virtualizer.scrollToEnd();
     lastScrollTopRef.current = element.scrollTop;
   }, [totalSize, virtualizer]);

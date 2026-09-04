@@ -303,6 +303,8 @@ for (const failedPart of ["mcpServers", "hooks", "credentials"]) {
   test(`Plugin management isolates ${failedPart} failure and keeps recovery available`, async ({ page }) => {
     let kiwiEnabled = true;
     let credential = failedPart === "mcpServers" ? null : { id: "kiwi-credential", pluginName: "kiwi", credentialRef: "kiwi-token", displayName: "Kiwi token", version: 1 };
+    let credentialStoreUnavailable = failedPart === "credentials";
+    let credentialReads = 0;
     const pageErrors = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
     const base = (name) => ({
@@ -338,7 +340,11 @@ for (const failedPart of ["mcpServers", "hooks", "credentials"]) {
         return route.fulfill({ json: { plugin: detail } });
       }
       if (path === "/api/admin/mcp-bearer-credentials") {
-        if (failedPart === "credentials") return route.fulfill({ status: 503, json: { error: "credential_store_unavailable" } });
+        if (request.method() === "GET") {
+          credentialReads += 1;
+          if (credentialStoreUnavailable) return route.fulfill({ status: 503, json: { error: "credential_store_unavailable" } });
+          return route.fulfill({ json: { credentials: credential ? [credential] : [] } });
+        }
         if (request.method() === "POST") {
           const body = request.postDataJSON();
           expect(body.pluginName).toBe("kiwi");
@@ -347,7 +353,6 @@ for (const failedPart of ["mcpServers", "hooks", "credentials"]) {
           credential = { id: "kiwi-credential", pluginName: "kiwi", credentialRef: body.credentialRef, displayName: body.displayName, version: 1 };
           return route.fulfill({ status: 201, json: { credential } });
         }
-        return route.fulfill({ json: { credentials: credential ? [credential] : [] } });
       }
       if (path === "/api/admin/mcp-bearer-credentials/kiwi-credential/rotate") {
         credential = { ...credential, version: 2 };
@@ -372,6 +377,13 @@ for (const failedPart of ["mcpServers", "hooks", "credentials"]) {
     if (failedPart === "credentials") {
       await expect(page.getByRole("alert").filter({ hasText: "凭据操作失败" })).toBeVisible();
       await expect(page.getByRole("button", { name: "保存", exact: true })).toBeDisabled();
+      expect(credentialReads).toBe(1);
+      credentialStoreUnavailable = false;
+      await page.getByRole("button", { name: "重新读取凭据", exact: true }).click();
+      await expect.poll(() => credentialReads).toBe(2);
+      await expect(page.getByRole("alert").filter({ hasText: "凭据操作失败" })).toHaveCount(0);
+      await page.getByRole("button", { name: "查看 Kiwi 详细信息" }).click();
+      await expect(page.getByText("已配置 · v1", { exact: true })).toBeVisible();
     } else {
       if (failedPart === "mcpServers") {
         await page.getByLabel("kiwi-token Bearer Token", { exact: true }).fill("Bearer synthetic-created-token");

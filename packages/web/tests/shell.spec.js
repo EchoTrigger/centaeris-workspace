@@ -30,9 +30,14 @@ async function expectViewportOverlay(page, backdropSelector, dialog) {
 async function installShellFixture(page, { workspaces = [{ id: "ws_1", name: "Default", status: "active", role: "owner" }] } = {}) {
   let authenticated = true;
   let agentCreateAttempts = 0;
+  let libraryReads = 0;
   const deletedAgentIds = [];
   const passwordChangePayloads = [];
   const agents = [{ id: "centaeris", workspaceId: "ws_1", name: "Centaeris", description: "私人 Agent", instructions: "保持判断清晰。", avatarKind: "centaeris", status: "active", deletedAt: null, createdAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:00:00Z" }];
+  let libraryObjects = [
+    { id: "note_reference", displayName: "项目参考", objectKind: "note", contentType: "text/markdown", status: "ready" },
+    { id: "note_welcome", displayName: "个人笔记", objectKind: "note", contentType: "text/markdown", status: "ready" },
+  ];
 
   await page.route("http://localhost:8000/api/**", async (route) => {
     const request = route.request();
@@ -84,6 +89,10 @@ async function installShellFixture(page, { workspaces = [{ id: "ws_1", name: "De
     if (path === "/api/library/note_reference/note") return route.fulfill({ json: { object: { id: "note_reference", displayName: "项目参考", objectKind: "note" }, markdown: "# 项目参考\n\n这是搜索预览正文。" } });
     if (path === "/api/library/note_welcome/note") return route.fulfill({ json: { object: { id: "note_welcome", displayName: "个人笔记", objectKind: "note" }, markdown: "# 欢迎来到 Centaeris\n\n这是你的第一份私人文档。" } });
     if (path === "/api/library/note_welcome") return route.fulfill({ json: { object: { id: "note_welcome", displayName: "个人笔记", objectKind: "note", contentType: "text/markdown", status: "ready" } } });
+    if (path === "/api/library") {
+      libraryReads += 1;
+      return route.fulfill({ json: { objects: libraryObjects } });
+    }
     const responses = {
       "/api/me": { user: { id: "user_1", email: "member@example.com", isStaff: false, isSuperuser: false } },
       "/api/workspaces": { workspaces },
@@ -91,10 +100,6 @@ async function installShellFixture(page, { workspaces = [{ id: "ws_1", name: "De
       "/api/workspaces/ws_1/plugins": { plugins: [{ name: "banana", displayName: "banana", shortDescription: "合成扩展能力", version: "1.0.0", enabled: true, capabilities: ["Skills", "CLI"], skills: [{ path: "skills/banana/SKILL.md" }], cli: [{ path: "bin/banana" }], mcpServers: [], mcpCredentialRefs: [], hooks: [], errors: [] }] },
       "/api/workspaces/ws_1/skills": { schema: "workspace.skill.catalog.result.v1", skills: [{ skillId: "plugin-banana-0:banana", name: "banana", description: "合成扩展说明", enabled: true, allowImplicitInvocation: true, allowedTools: ["read", "bash"] }] },
       "/api/workspaces/ws_1/trash": { items: [], filterOptions: { deletedBy: [], locations: [] }, nextCursor: null, hasMore: false },
-      "/api/library": { objects: [
-        { id: "note_reference", displayName: "项目参考", objectKind: "note", contentType: "text/markdown", status: "ready" },
-        { id: "note_welcome", displayName: "个人笔记", objectKind: "note", contentType: "text/markdown", status: "ready" },
-      ] },
     };
     if (path === "/api/workspaces/ws_1/session-projects") return route.fulfill({ json: { projects: [] } });
     if (path === "/api/workspaces/ws_1/sessions") {
@@ -107,6 +112,8 @@ async function installShellFixture(page, { workspaces = [{ id: "ws_1", name: "De
   return {
     expireSession: () => { authenticated = false; },
     agentCreateAttempts: () => agentCreateAttempts,
+    libraryReads: () => libraryReads,
+    replaceLibraryObjects: (objects) => { libraryObjects = objects; },
     deletedAgentIds,
     passwordChangePayloads,
   };
@@ -128,6 +135,28 @@ test("renders the Notion-like home and split search preview", async ({ page }) =
   await expect(dialog.getByRole("complementary", { name: "搜索结果预览" })).toContainText("这是搜索预览正文。");
   await dialog.getByRole("option", { name: /Lisp 与人工智能/ }).hover();
   await expect(dialog.getByRole("complementary", { name: "搜索结果预览" }).getByRole("heading", { name: "Lisp 与人工智能" })).toBeVisible();
+  const searchInput = dialog.getByRole("textbox", { name: "搜索会话和笔记" });
+  await searchInput.hover();
+  await searchInput.fill("Lisp");
+  await expect(dialog.getByRole("option", { name: /Lisp 与人工智能/ })).toHaveAttribute("aria-selected", "true");
+  await searchInput.fill("");
+  await expect(dialog.getByRole("option", { name: /项目参考/ })).toHaveAttribute("aria-selected", "true");
+});
+
+test("refreshes private notes after client-side navigation", async ({ page }) => {
+  const fixture = await installShellFixture(page);
+  await page.goto("/w/ws_1/app");
+  await expect(page.getByRole("link", { name: "个人笔记", exact: true })).toBeVisible();
+  const readsBeforeNavigation = fixture.libraryReads();
+  fixture.replaceLibraryObjects([
+    { id: "note_refreshed", displayName: "导航后新增", objectKind: "note", contentType: "text/markdown", status: "ready" },
+  ]);
+  const sidebar = page.getByRole("complementary", { name: "会话导航", exact: true });
+
+  await sidebar.getByRole("link", { name: "库", exact: true }).click();
+
+  await expect.poll(fixture.libraryReads).toBeGreaterThan(readsBeforeNavigation);
+  await expect(sidebar.getByRole("link", { name: "导航后新增", exact: true })).toBeVisible();
 });
 
 test("uses the default Agent draft at the workspace URL and exposes creation surfaces", async ({ page }) => {
@@ -205,7 +234,9 @@ test("opens the real library without a second management page", async ({ page })
 
   await expect(page.getByRole("tab", { name: "代理", exact: true }).locator("svg.lucide-bot")).toBeVisible();
   await expect(page.getByRole("tab", { name: "Skills", exact: true }).locator("svg.lucide-layers")).toBeVisible();
+  await page.getByRole("textbox", { name: "搜索当前库", exact: true }).fill("不会匹配代理");
   await page.getByRole("tab", { name: "代理", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "搜索当前库", exact: true })).toHaveValue("");
   await expect(page.getByRole("link", { name: /Centaeris/ })).toBeVisible();
   await expect(page.getByRole("tab", { name: "插件", exact: true })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "插件", exact: true })).toHaveCount(0);
