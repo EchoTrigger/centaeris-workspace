@@ -95,7 +95,6 @@ function WorkspaceLayout() {
 function RootLayout() {
   const [sessionExpired, setSessionExpired] = useState(false);
   const auth = useRouteLoaderData("authenticated") as AuthLoaderData | undefined;
-  const location = useLocation();
   const revalidator = useRevalidator();
 
   useEffect(() => {
@@ -105,7 +104,7 @@ function RootLayout() {
 
   useEffect(() => {
     if (!auth?.user) setSessionExpired(false);
-  }, [auth?.user, location.pathname]);
+  }, [auth?.user]);
 
   return <>
     <Outlet />

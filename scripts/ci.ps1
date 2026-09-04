@@ -33,6 +33,7 @@ if ($InstallPlaywright) {
     }
 }
 Run "Performance artifact validation" { node --test scripts/performance-eval-artifact.test.mjs }
+Run "Web lint" { npm run lint }
 Run "Web typecheck" { npm run typecheck }
 Run "Web unit tests" { npm run test:unit --workspace packages/web }
 Run "Web browser interactions" { npm run test:e2e --workspace packages/web }

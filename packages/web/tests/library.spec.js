@@ -44,17 +44,22 @@ test("does not persist an untouched note draft", async ({ page }) => {
 
 test("keeps the flat note identity visible when the sidebar is closed", async ({ page }) => {
   const reads = { object: 0, note: 0 };
+  const firstNote = { id: "note_1", objectKind: "note", contentType: "text/markdown", displayName: "需求.md", status: "ready" };
+  const secondNote = { id: "note_2", objectKind: "note", contentType: "text/markdown", displayName: "第二份", status: "ready" };
   await page.route("http://localhost:8000/api/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     const responses = {
       "/api/me": { user: { id: "user_1", email: "member@example.com" } },
       "/api/workspaces": { workspaces: [{ id: "ws_1", name: "Default", role: "owner" }] },
       "/api/workspaces/ws_1/agents": { agents: [{ id: "centaeris", name: "Centaeris", description: "", workspaceId: "ws_1", avatarKind: "centaeris", status: "active" }] },
-      "/api/library/note_1": { object: { id: "note_1", objectKind: "note", contentType: "text/markdown", displayName: "需求.md", status: "ready" } },
-      "/api/library/note_1/note": { object: { id: "note_1", objectKind: "note", contentType: "text/markdown", displayName: "需求.md", status: "ready" }, markdown: "# 需求" },
+      "/api/library": { objects: [firstNote, secondNote] },
+      "/api/library/note_1": { object: firstNote },
+      "/api/library/note_1/note": { object: firstNote, markdown: "# 需求" },
+      "/api/library/note_2": { object: secondNote },
+      "/api/library/note_2/note": { object: secondNote, markdown: "# 第二份\n\n新的正文" },
     };
-    if (path === "/api/library/note_1") reads.object += 1;
-    if (path === "/api/library/note_1/note") reads.note += 1;
+    if (path === "/api/library/note_1" || path === "/api/library/note_2") reads.object += 1;
+    if (path === "/api/library/note_1/note" || path === "/api/library/note_2/note") reads.note += 1;
     return responses[path] ? route.fulfill({ json: responses[path] }) : route.fulfill({ status: 404, json: { error: "not_found" } });
   });
 
@@ -75,6 +80,12 @@ test("keeps the flat note identity visible when the sidebar is closed", async ({
   await page.waitForTimeout(400);
   expect(reads).toEqual({ object: 1, note: 1 });
   expect((await page.locator(".libraryPreviewMain").boundingBox())?.width).toBeGreaterThan(previewWidth);
+
+  await showSidebar.click();
+  await page.getByRole("complementary", { name: "会话导航", exact: true }).getByRole("link", { name: "第二份", exact: true }).click();
+  await expect(page).toHaveURL(/\/w\/ws_1\/library\/note_2$/);
+  await expect(page.getByRole("textbox", { name: "笔记正文", exact: true })).toHaveValue("新的正文");
+  expect(reads).toEqual({ object: 2, note: 2 });
 });
 
 test("loads each library folder once and ignores selection-only rerenders", async ({ page }) => {

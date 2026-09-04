@@ -180,9 +180,15 @@ test("running input queues without inventing a committed session message", async
   await expect(composer).toHaveValue("");
 });
 
-async function installChatFixture(page, { deferUpload = false, deferMessage = false, deferEvents = false, staleSessionAfterFinal = false } = {}) {
+async function installChatFixture(page, {
+  deferUpload = false,
+  deferMessage = false,
+  deferEvents = false,
+  staleSessionAfterFinal = false,
+  models: fixtureModels = null,
+} = {}) {
   const workspace = { id: "ws_1", name: "默认工作区", status: "active", role: "owner" };
-  const models = [{ id: "model_1", displayName: "Clinical", provider: "fake", modelName: "fake-model", thinkingMode: "high", thinkingModes: ["low", "high"] }];
+  const models = fixtureModels || [{ id: "model_1", displayName: "Clinical", provider: "fake", modelName: "fake-model", thinkingMode: "high", thinkingModes: ["low", "high"] }];
   const projects = [];
   const sessions = [{ id: "sess_1", workspaceId: workspace.id, agentId: "centaeris", projectId: null, title: "New chat", origin: "user", status: "active", isPinned: false, isUnread: false, updatedAt: "2026-07-14T00:00:00Z" }];
   const agentRunsBySession = new Map();
@@ -440,6 +446,46 @@ test("keeps live status at the latest progress and tool disclosures stable acros
   await expect(second).toHaveAttribute("aria-expanded", "true");
 });
 
+test("resets live elapsed time immediately when the active phase changes", async ({ page }) => {
+  const initialNowMs = Date.parse("2026-09-04T00:00:20Z");
+  await page.clock.install({ time: initialNowMs });
+  await page.clock.pauseAt(initialNowMs);
+  const fixture = await installChatFixture(page);
+  fixture.setAgentRuns("sess_1", [{
+    id: "agent_run_phase_clock", turnId: "turn_1", status: "running", model: { id: "model_1", displayName: "Clinical" },
+    createdAt: "2026-09-04T00:00:10Z", startedAt: "2026-09-04T00:00:10Z", completedAt: null,
+    messages: [{ messageId: "user_1", role: "user", text: "inspect phase timing" }],
+    records: [{ type: "tool_call", payload: {
+      callId: "read_first", toolName: "read", toolContractDigest: `sha256:${"a".repeat(64)}`, providerId: "centaeris.builtin", normalizedInput: { path: "first.txt" }, displayTarget: "first.txt",
+    } }],
+  }]);
+  await page.addInitScript(() => {
+    const originalFetch = window.fetch;
+    window.fetch = (input, init) => {
+      if (!String(input).endsWith("/agent-runs/agent_run_phase_clock/events")) return originalFetch(input, init);
+      const body = new ReadableStream({ start(controller) {
+        window.__pushPhaseClockEvent = (text) => controller.enqueue(new TextEncoder().encode(text));
+      } });
+      return Promise.resolve(new Response(body, { headers: { "Content-Type": "text/event-stream" } }));
+    };
+  });
+  await page.goto("/w/ws_1/agents/centaeris?sessionId=sess_1");
+  const run = page.locator('[data-agent-run-id="agent_run_phase_clock"]');
+  await expect(run.locator(".workspaceLiveStatusText")).toHaveText("Reading first.txt");
+  await run.locator(".workspaceLiveStatus").evaluate((element) => { window.__phaseClockStatus = element; });
+  await page.clock.setSystemTime(Date.parse("2026-09-04T00:00:40Z"));
+  const item = committedStreamItem("sess_1", "agent_run_phase_clock", 4, "tool_call", {
+    callId: "read_phase", toolName: "read", toolContractDigest: `sha256:${"a".repeat(64)}`, providerId: "centaeris.builtin", normalizedInput: { path: "phase.txt" }, displayTarget: "phase.txt",
+  }, "turn_1");
+  item.event.createdAtMs = Date.parse("2026-09-04T00:00:35Z");
+  await page.evaluate((text) => window.__pushPhaseClockEvent(text), `id: 4-0\ndata: ${JSON.stringify(item)}\n\n`);
+  await page.clock.runFor(20);
+
+  await expect(run.locator(".workspaceLiveStatusText")).toHaveText("Reading phase.txt");
+  expect(await run.locator(".workspaceLiveStatus").evaluate((element) => element === window.__phaseClockStatus)).toBe(true);
+  await expect(run.locator(".workspaceLiveStatusElapsed")).toHaveText("5s");
+});
+
 test("keeps route-intended layouts while session navigation is loading", async ({ page }) => {
   const fixture = await installChatFixture(page);
   let releaseHomeSessions;
@@ -553,6 +599,28 @@ test("composer reverses Enter behavior when the preference is enabled", async ({
 
   await composer.press("Control+Enter");
   await expect.poll(() => fixture.messageBody?.text).toBe("检查发送快捷键");
+});
+
+test("switching models resets a user override even when both defaults match", async ({ page }) => {
+  await installChatFixture(page, {
+    models: [
+      { id: "model_1", displayName: "Alpha", provider: "fake", modelName: "alpha", thinkingMode: "high", thinkingModes: ["low", "high"] },
+      { id: "model_2", displayName: "Beta", provider: "fake", modelName: "beta", thinkingMode: "high", thinkingModes: ["low", "high"] },
+    ],
+  });
+  await page.goto("/w/ws_1/agents/centaeris");
+
+  await page.getByRole("button", { name: "思考力度", exact: true }).click();
+  let thinkingPicker = page.getByLabel("选择思考力度", { exact: true });
+  await thinkingPicker.getByRole("button", { name: "低", exact: true }).click();
+
+  await page.getByRole("button", { name: "AI 模型", exact: true }).click();
+  await page.getByLabel("选择 AI 模型", { exact: true }).getByRole("button", { name: "Beta", exact: true }).click();
+
+  await page.getByRole("button", { name: "思考力度", exact: true }).click();
+  thinkingPicker = page.getByLabel("选择思考力度", { exact: true });
+  await expect(thinkingPicker.getByRole("button", { name: "高", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(thinkingPicker.getByRole("button", { name: "低", exact: true })).toHaveAttribute("aria-pressed", "false");
 });
 
 test("composer uploads multiple materials in one request", async ({ page }) => {
@@ -1528,6 +1596,8 @@ test("clears a deleted transcript before the next session history resolves", asy
     { id: "sess_1", workspaceId: "ws_1", title: "旧会话", origin: "user", status: "active", isPinned: false, isUnread: false, updatedAt: "2026-07-14T00:00:00Z" },
     { id: "sess_2", workspaceId: "ws_1", title: "新会话", origin: "user", status: "active", isPinned: false, isUnread: false, updatedAt: "2026-07-13T00:00:00Z" },
   ];
+  const oldAnswer = Array.from({ length: 80 }, (_, index) => `旧回答段落 ${index + 1}`).join("\n\n");
+  const newAnswer = Array.from({ length: 80 }, (_, index) => `新回答段落 ${index + 1}`).join("\n\n");
   let releaseNextHistory;
   const nextHistory = new Promise((resolve) => { releaseNextHistory = resolve; });
   await page.route("http://localhost:8000/api/**", async (route) => {
@@ -1541,24 +1611,33 @@ test("clears a deleted transcript before the next session history resolves", asy
     if (path === "/api/workspaces/ws_1/session-projects") return route.fulfill({ json: { projects: [] } });
     if (path === "/api/workspaces/ws_1/sessions") return route.fulfill({ json: { sessions } });
     if (path === "/api/sessions/sess_1/assets" || path === "/api/sessions/sess_2/assets") return route.fulfill({ json: { assets: [] } });
-    if (path === "/api/sessions/sess_1/history") return route.fulfill({ json: historyPage(sessions[0], [{ id: "agent_run_1", turnId: "turn_1", status: "completed", createdAt: "2026-07-14T00:00:00Z", startedAt: "2026-07-14T00:00:00Z", completedAt: "2026-07-14T00:00:01Z", model: { id: "model_1", displayName: "Clinical" }, messages: [{ messageId: "user_1", role: "user", status: "done", text: "旧问题" }, { messageId: "assistant_1", role: "assistant", status: "done", text: "旧回答" }] }]) });
+    if (path === "/api/sessions/sess_1/history") return route.fulfill({ json: historyPage(sessions[0], [{ id: "agent_run_1", turnId: "turn_1", status: "completed", createdAt: "2026-07-14T00:00:00Z", startedAt: "2026-07-14T00:00:00Z", completedAt: "2026-07-14T00:00:01Z", model: { id: "model_1", displayName: "Clinical" }, messages: [{ messageId: "user_1", role: "user", status: "done", text: "旧问题" }, { messageId: "assistant_1", role: "assistant", status: "done", text: oldAnswer }] }]) });
     if (path === "/api/sessions/sess_2/history") {
       await nextHistory;
-      return route.fulfill({ json: historyPage(sessions[1], [{ id: "agent_run_2", turnId: "turn_2", status: "completed", createdAt: "2026-07-13T00:00:00Z", startedAt: "2026-07-13T00:00:00Z", completedAt: "2026-07-13T00:00:01Z", model: { id: "model_1", displayName: "Clinical" }, messages: [{ messageId: "user_2", role: "user", status: "done", text: "新问题" }, { messageId: "assistant_2", role: "assistant", status: "done", text: "新回答" }] }]) });
+      return route.fulfill({ json: historyPage(sessions[1], [{ id: "agent_run_2", turnId: "turn_2", status: "completed", createdAt: "2026-07-13T00:00:00Z", startedAt: "2026-07-13T00:00:00Z", completedAt: "2026-07-13T00:00:01Z", model: { id: "model_1", displayName: "Clinical" }, messages: [{ messageId: "user_2", role: "user", status: "done", text: "新问题" }, { messageId: "assistant_2", role: "assistant", status: "done", text: newAnswer }] }]) });
     }
     if (path === "/api/sessions/sess_1" && request.method() === "DELETE") return route.fulfill({ json: { deleted: true } });
     return route.fulfill({ status: 404, json: { error: "not_found" } });
   });
 
   await page.goto("/w/ws_1/agents/centaeris");
-  await expect(page.getByText("旧回答", { exact: true })).toBeVisible();
+  await expect(page.getByText("旧回答段落 80", { exact: true })).toBeVisible();
+  const list = page.getByTestId("virtual-agent-run-list");
+  await expect.poll(() => list.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(2);
+  await list.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await expect(page.getByRole("button", { name: "回到最新", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "会话操作 旧会话", exact: true }).click();
   await page.getByRole("menuitem", { name: "删除", exact: true }).click();
   await page.getByRole("dialog", { name: "确定要删除此对话？", exact: true }).getByRole("button", { name: "确认", exact: true }).click();
-  await expect(page.getByText("旧回答", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("旧回答段落 80", { exact: true })).toHaveCount(0);
   await expect(page.getByText("正在读取会话…", { exact: true })).toBeVisible();
   releaseNextHistory();
-  await expect(page.getByText("新回答", { exact: true })).toBeVisible();
+  await expect(page.getByText("新回答段落 80", { exact: true })).toBeVisible();
+  await expect.poll(() => list.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(2);
+  await expect(page.getByRole("button", { name: "回到最新", exact: true })).toHaveCount(0);
 });
 
 test("uses the URL workspace when the user has multiple memberships", async ({ page }) => {

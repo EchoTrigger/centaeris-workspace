@@ -81,6 +81,7 @@ export default function PluginSettings({ workspace, isSuperuser }) {
     return () => { active = false; };
   }, [workspace?.id]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: The revision is the retry button's explicit credential refresh signal.
   useEffect(() => {
     let active = true;
     setCredentials(null);

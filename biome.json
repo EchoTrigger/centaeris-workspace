@@ -15,9 +15,9 @@
       "preset": "none",
       "correctness": {
         "noUnreachable": "error",
-        "noUnusedImports": "warn",
-        "noUnusedVariables": "warn",
-        "useExhaustiveDependencies": "warn",
+        "noUnusedImports": "error",
+        "noUnusedVariables": "error",
+        "useExhaustiveDependencies": "error",
         "useHookAtTopLevel": "error"
       },
       "suspicious": {

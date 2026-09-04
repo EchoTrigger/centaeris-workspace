@@ -131,10 +131,12 @@ function LibraryPageContent() {
     }
   }
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: The primitive folder route is the load trigger; the render-local command must not retrigger itself.
   useEffect(() => {
     loadLibrary();
   }, [folderId]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Changing catalogs intentionally clears view-local search and selection state.
   useEffect(() => {
     setQuery("");
     setSelectedIds([]);
