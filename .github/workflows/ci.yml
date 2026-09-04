@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CENTAERIS_CORE_REVISION: d2a09f68db660647d632a8d8a210e2f1f28dff38
+
+jobs:
+  source-browser:
+    name: Source and browser gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: centaeris-workspace
+    steps:
+      - name: Check out Workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: centaeris-workspace
+          persist-credentials: false
+
+      - name: Check out exact Core revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: EchoTrigger/centaeris
+          ref: ${{ env.CENTAERIS_CORE_REVISION }}
+          path: centaeris
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.21.0
+          cache: npm
+          cache-dependency-path: centaeris-workspace/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: 3.12.10
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: 0.11.6
+          enable-cache: true
+          cache-dependency-glob: centaeris-workspace/uv.lock
+
+      - name: Set up Rust
+        shell: bash
+        run: |
+          rustup toolchain install 1.94.1 --profile minimal
+          rustup override set 1.94.1
+
+      - name: Run source and browser gate
+        shell: pwsh
+        run: ./scripts/ci.ps1 -InstallPlaywright
+
+  docker-fresh-start:
+    name: Docker fresh-start gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: centaeris-workspace
+    steps:
+      - name: Check out Workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: centaeris-workspace
+          persist-credentials: false
+
+      - name: Check out exact Core revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: EchoTrigger/centaeris
+          ref: ${{ env.CENTAERIS_CORE_REVISION }}
+          path: centaeris
+          persist-credentials: false
+
+      - name: Build and start the complete stack from empty volumes
+        shell: bash
+        env:
+          CENTAERIS_CI_DESTRUCTIVE_DOCKER: "1"
+          CENTAERIS_WORKSPACE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: ./scripts/docker-release-gate.sh

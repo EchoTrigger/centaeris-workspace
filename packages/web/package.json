@@ -1,0 +1,29 @@
+{
+  "name": "web",
+  "version": "1.0.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "build": "npm run typecheck && vite build",
+    "dev": "vite --host 0.0.0.0 --port 3000",
+    "test:unit": "node --test tests/unit/chat-runtime.test.mjs",
+    "typecheck": "tsc -p tsconfig.json --pretty false",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@tanstack/react-virtual": "3.14.2",
+    "lucide-react": "1.24.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "react-router": "7.18.2"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "@types/node": "24.12.2",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "5.2.0",
+    "typescript": "7.0.2",
+    "vite": "8.1.5"
+  }
+}

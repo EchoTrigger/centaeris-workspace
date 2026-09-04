@@ -1,0 +1,28 @@
+{
+  "name": "centaeris-workspace",
+  "version": "1.0.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "build": "npm run build --workspace packages/web",
+    "typecheck": "npm run typecheck --workspace packages/web",
+    "test": "npm run test:unit --workspace packages/web"
+  },
+  "workspaces": [
+    "packages/web"
+  ],
+  "engines": {
+    "node": "22.21.0",
+    "npm": "10.9.4"
+  },
+  "packageManager": "npm@10.9.4",
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "vite": "8.1.5"
+  },
+  "overrides": {
+    "nanoid": "3.3.18",
+    "typescript": "7.0.2",
+    "vite": "8.1.5"
+  }
+}

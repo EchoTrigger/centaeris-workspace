@@ -1,0 +1,76 @@
+name: Performance
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/performance.yml
+      - Cargo.lock
+      - Cargo.toml
+      - rust-toolchain.toml
+      - docs/eval/fixtures/performance-repair-v1.json
+      - packages/runtime_server/Cargo.toml
+      - packages/runtime_server/src/postgres_store.rs
+      - packages/runtime_server/src/postgres_store/**
+      - scripts/performance-eval*.mjs
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/performance.yml
+      - Cargo.lock
+      - Cargo.toml
+      - rust-toolchain.toml
+      - docs/eval/fixtures/performance-repair-v1.json
+      - packages/runtime_server/Cargo.toml
+      - packages/runtime_server/src/postgres_store.rs
+      - packages/runtime_server/src/postgres_store/**
+      - scripts/performance-eval*.mjs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CENTAERIS_CORE_REVISION: d2a09f68db660647d632a8d8a210e2f1f28dff38
+
+jobs:
+  observation-storage:
+    name: Observation storage evaluation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: centaeris-workspace
+    steps:
+      - name: Check out Workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: centaeris-workspace
+          persist-credentials: false
+
+      - name: Check out exact Core revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: EchoTrigger/centaeris
+          ref: ${{ env.CENTAERIS_CORE_REVISION }}
+          path: centaeris
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.21.0
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install 1.94.1 --profile minimal
+          rustup override set 1.94.1
+
+      - name: Run observation storage evaluation
+        shell: bash
+        run: node scripts/performance-eval.mjs
