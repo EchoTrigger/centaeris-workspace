@@ -46,8 +46,14 @@ included in the deployed web artifact.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Every contribution commit requires
-certification under the [Developer's Certificate of Origin 1.1](DCO).
+Issues are welcome for bug reports, natural-language reproduction steps,
+redacted logs, feature requests, and high-level design suggestions. External
+code, patches, documentation drafts, and other works for incorporation into
+the project are temporarily not accepted. Pull requests are limited to
+collaborators for maintainer development.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the temporary policy and plans for
+future contributions and commercial licensing.
 
 ## License
 
