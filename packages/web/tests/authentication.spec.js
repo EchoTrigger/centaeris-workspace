@@ -66,9 +66,15 @@ test("requests a reset link without revealing whether the account exists", async
   await page.goto("/login");
   await page.getByRole("link", { name: "忘记密码？" }).click();
   await expect(page).toHaveURL(/\/forgot-password$/);
+  await expect(page.getByRole("heading", { name: "重置密码" })).toBeVisible();
   await page.getByLabel("邮箱").fill("member@example.com");
-  await page.getByRole("button", { name: "发送重置链接" }).click();
+  const [response] = await Promise.all([
+    page.waitForResponse((item) => item.request().method() === "POST"
+      && new URL(item.url()).pathname === "/api/account/password-reset-requests"),
+    page.getByRole("button", { name: "发送重置链接" }).click(),
+  ]);
 
+  expect(response.status()).toBe(202);
   await expect(page.getByRole("heading", { name: "检查邮箱" })).toBeVisible();
   await expect(page.getByRole("status")).toContainText("如果该邮箱对应可用账号");
   expect(requestBody).toEqual({ email: "member@example.com" });
