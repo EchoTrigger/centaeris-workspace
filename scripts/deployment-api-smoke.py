@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import uuid
 
@@ -43,6 +44,17 @@ with tempfile.TemporaryDirectory(prefix=project) as temporary:
         run("up", "--detach", "--no-build", "--no-deps", "--force-recreate", "--wait", "api")
         run("exec", "-T", "api", "python", "/app/scripts/verify-api-deployment.py", "read")
     finally:
-        run("down", "--volumes", "--remove-orphans")
-        subprocess.run(["docker", "image", "rm", image], check=True, capture_output=True)
+        original_error = sys.exception()
+        cleanup_errors = []
+        for command in (
+            [*compose, "down", "--volumes", "--remove-orphans"],
+            ["docker", "image", "rm", image],
+        ):
+            try:
+                subprocess.run(command, cwd=ROOT, env=env, check=True)
+            except (OSError, subprocess.CalledProcessError) as error:
+                cleanup_errors.append(error)
+                print(f"Deployment smoke cleanup failed: {error}", file=sys.stderr)
+        if cleanup_errors and original_error is None:
+            raise cleanup_errors[0]
 print("API fresh-volume and container-replacement deployment smoke passed.")
