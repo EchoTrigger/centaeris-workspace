@@ -86,6 +86,7 @@ for key, value in config["volumes"].items():
 '
 
 "${compose[@]}" build --pull document-processor workspace-general runtime api worker web
+"${compose[@]}" config --format json | python3 scripts/verify-deployment-images.py
 "${compose[@]}" up -d --wait --wait-timeout 420 postgres redis api runtime worker web
 
 for service in postgres redis api runtime worker web; do
@@ -95,6 +96,10 @@ done
 "${compose[@]}" exec -T api python manage.py showmigrations app_core | grep -Eq '^[[:space:]]*\[X\][[:space:]]+0001_initial$'
 "${compose[@]}" exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"
 "${compose[@]}" exec -T web wget -qO- http://127.0.0.1:3000/ >/dev/null
+
+"${compose[@]}" exec -T api python /app/scripts/verify-api-deployment.py write
+"${compose[@]}" up -d --no-build --no-deps --force-recreate --wait api
+"${compose[@]}" exec -T api python /app/scripts/verify-api-deployment.py read
 
 for service in document-processor workspace-general runtime api worker web; do
   image_id="$("${compose[@]}" images -q "$service" | head -n 1)"

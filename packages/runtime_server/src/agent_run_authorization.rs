@@ -13,6 +13,9 @@ pub const AGENT_RUN_AUTHORIZATION_SCHEMA: &str = "workspace.agent_run_authorizat
 const AGENT_RUN_AUTHORIZATION_SIGNATURE_DOMAIN: &str = "workspace:agent-run-authorization:v1\0";
 const MAX_DECLARED_INPUTS: usize = 64;
 
+#[cfg(test)]
+mod parity;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceAgentRunAuthorization {
@@ -293,53 +296,12 @@ fn canonical_json(value: Value) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use centaeris_core::tool::inputs::{DeclaredInput, InputIdentityV1, DECLARED_INPUT_SCHEMA};
 
-    fn authorization() -> WorkspaceAgentRunAuthorization {
-        WorkspaceAgentRunAuthorization {
-            schema: AGENT_RUN_AUTHORIZATION_SCHEMA.to_string(),
-            id: "authorization_1".to_string(),
-            organization_id: "org_1".to_string(),
-            workspace_id: "ws_1".to_string(),
-            user_id: "user_1".to_string(),
-            agent_id: "centaeris".to_string(),
-            session_id: "sess_1".to_string(),
-            agent_run_id: "agent_run_1".to_string(),
-            session_workspace: SessionWorkspace {
-                generation: 7,
-                snapshot_sha256: format!("sha256:{}", "c".repeat(64)),
-                snapshot_size_bytes: 13,
-                expanded_size_bytes: 7,
-                file_count: 1,
-            },
-            model_config_ref: "model_1".to_string(),
-            thinking_mode: Some("high".to_string()),
-            artifact_scope_ref: "artifact_scope_1".to_string(),
-            asset_refs: vec![DeclaredInput {
-                schema: DECLARED_INPUT_SCHEMA.to_string(),
-                input_ref: "input_1".to_string(),
-                display_name: "notice.pdf".to_string(),
-                content_type: "application/pdf".to_string(),
-                input_identity: InputIdentityV1 {
-                    owner_kind: "sourceObject".to_string(),
-                    owner_id: "object_1".to_string(),
-                    generation: 1,
-                    sha256: format!("sha256:{}", "b".repeat(64)),
-                },
-                size_bytes: 1,
-            }],
-            message_asset_refs: vec!["input_1".to_string()],
-            image_capability: "workspace_general_v1".to_string(),
-            image_digest: format!("sha256:{}", "a".repeat(64)),
-            plugin_activation: centaeris_core::extension::build_plugin_activation_snapshot(&[])
-                .expect("empty plugin activation"),
-            resources: SandboxResources {
-                memory_bytes: 2 * 1024 * 1024 * 1024,
-                cpu_milli: 2_000,
-                pids_limit: 512,
-                data_tmpfs_bytes: 4 * 1024 * 1024 * 1024,
-            },
-        }
+    pub(super) fn authorization() -> WorkspaceAgentRunAuthorization {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/agent_run_authorization/v1/valid.json"
+        ))
+        .expect("shared authorization fixture")
     }
 
     #[test]

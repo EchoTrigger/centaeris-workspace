@@ -11,6 +11,13 @@ x-api-build: &api-build
     io.centaeris.core.source: https://github.com/EchoTrigger/centaeris
     io.centaeris.core.revision: ${CENTAERIS_CORE_REVISION:-local}
 
+x-document-processor-image: &document-processor-image centaeris-document-processor:local
+x-processor-device: &processor-device ${KNOWLEDGE_PROCESSOR_DEVICE:?KNOWLEDGE_PROCESSOR_DEVICE is required}
+x-storage-root: &storage-root /var/lib/centaeris-storage
+x-plugin-root: &plugin-root /opt/centaeris/plugins
+x-api-internal-url: &api-internal-url http://api:8000
+x-redis-url: &redis-url redis://redis:6379/0
+
 x-workspace-general-image: &workspace-general-image centaeris-workspace-general:local
 
 services:
@@ -67,14 +74,13 @@ services:
       retries: 20
 
   document-processor:
-    image: centaeris-document-processor:1.0.0-cpu8
+    image: *document-processor-image
     build:
       context: .
       dockerfile: packages/document_processor/Dockerfile
       labels: *release-image-labels
       args:
-        PROCESSOR_EXTRA: cpu
-        PROCESSOR_DEVICE: cpu
+        PROCESSOR_DEVICE: *processor-device
     command: ["spec"]
     network_mode: none
     read_only: true
@@ -98,18 +104,18 @@ services:
     environment:
       RUNTIME_BIND_ADDRESS: 0.0.0.0
       RUNTIME_PORT: ${RUNTIME_PORT}
-      API_INTERNAL_URL: ${API_INTERNAL_URL}
+      API_INTERNAL_URL: *api-internal-url
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN}
       AGENT_RUN_AUTHORIZATION_SIGNING_KEY: ${AGENT_RUN_AUTHORIZATION_SIGNING_KEY}
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       RUNTIME_STATE_ROOT: /var/lib/centaeris-runtime/state
-      REDIS_URL: ${REDIS_URL}
+      REDIS_URL: *redis-url
       RUNTIME_STREAM_TTL_SECONDS: ${RUNTIME_STREAM_TTL_SECONDS}
       RUNTIME_LIVE_STATE_TTL_SECONDS: ${RUNTIME_LIVE_STATE_TTL_SECONDS}
       OCI_RUNTIME: ${OCI_RUNTIME}
       WORKSPACE_GENERAL_IMAGE: *workspace-general-image
-      KNOWLEDGE_PROCESSOR_IMAGE: ${KNOWLEDGE_PROCESSOR_IMAGE}
-      KNOWLEDGE_PROCESSOR_DEVICE: ${KNOWLEDGE_PROCESSOR_DEVICE}
+      KNOWLEDGE_PROCESSOR_IMAGE: *document-processor-image
+      KNOWLEDGE_PROCESSOR_DEVICE: *processor-device
       PLUGIN_VOLUME_NAME: ${COMPOSE_PROJECT_NAME:-centaeris-workspace}_plugin-data
       AGENT_MEMORY_VOLUME_NAME: ${COMPOSE_PROJECT_NAME:-centaeris-workspace}_agent-memory
     entrypoint:
@@ -121,7 +127,10 @@ services:
     volumes:
       - runtime-data:/var/lib/centaeris-runtime
       - agent-memory:/var/lib/centaeris-agent-memory
-      - plugin-data:/opt/centaeris/plugins:ro
+      - type: volume
+        source: plugin-data
+        target: *plugin-root
+        read_only: true
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       document-processor:
@@ -146,7 +155,7 @@ services:
     command: ["python", "worker.py", "serve"]
     environment: &worker-environment
       RUNTIME_INTERNAL_URL: http://runtime:${RUNTIME_PORT}
-      API_INTERNAL_URL: ${API_INTERNAL_URL}
+      API_INTERNAL_URL: *api-internal-url
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN}
       WORKER_LEASE_MS: ${WORKER_LEASE_MS}
     depends_on:
@@ -194,13 +203,13 @@ services:
         POSTGRES_DB: ${POSTGRES_DB}
         POSTGRES_USER: ${POSTGRES_USER}
         POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-        POSTGRES_HOST: ${POSTGRES_HOST}
-        POSTGRES_PORT: ${POSTGRES_PORT}
-        STORAGE_ROOT: ${STORAGE_ROOT}
+        POSTGRES_HOST: postgres
+        POSTGRES_PORT: "5432"
+        STORAGE_ROOT: *storage-root
         STORAGE_STREAM_LANES: ${STORAGE_STREAM_LANES}
         STORAGE_STREAM_CHUNK_BYTES: ${STORAGE_STREAM_CHUNK_BYTES}
         REDIS_BROWSER_MAX_CONNECTIONS: ${REDIS_BROWSER_MAX_CONNECTIONS}
-        RUNTIME_URL: ${RUNTIME_URL}
+        RUNTIME_URL: http://runtime:${RUNTIME_PORT}
         RUNTIME_START_TIMEOUT_SECONDS: ${RUNTIME_START_TIMEOUT_SECONDS}
         WEB_ORIGIN: ${WEB_ORIGIN}
         PASSWORD_RESET_ENABLED: ${PASSWORD_RESET_ENABLED:-0}
@@ -214,25 +223,35 @@ services:
         SANDBOX_DATA_TMPFS_BYTES: ${SANDBOX_DATA_TMPFS_BYTES}
         CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY}
         MODEL_PROVIDER_TIMEOUT_SECONDS: ${MODEL_PROVIDER_TIMEOUT_SECONDS}
-        PLUGIN_CATALOG_ROOT: ${PLUGIN_CATALOG_ROOT}
-        REDIS_URL: ${REDIS_URL}
+        PLUGIN_CATALOG_ROOT: *plugin-root
+        REDIS_URL: *redis-url
       BOOTSTRAP_SUPERADMIN_EMAIL: ${BOOTSTRAP_SUPERADMIN_EMAIL}
       BOOTSTRAP_SUPERADMIN_PASSWORD: ${BOOTSTRAP_SUPERADMIN_PASSWORD}
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
-      - plugin-data:/opt/centaeris/plugins
+      - type: volume
+        source: plugin-data
+        target: *plugin-root
 
   api:
     image: centaeris-workspace-agent-api
     build: *api-build
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment: *api-environment
     ports:
       - "${API_HOST_PORT:-8000}:8000"
     volumes:
-      - storage-data:/var/lib/centaeris-storage
-      - plugin-data:/opt/centaeris/plugins
+      - type: volume
+        source: storage-data
+        target: *storage-root
+      - type: volume
+        source: plugin-data
+        target: *plugin-root
     depends_on:
       api-init:
         condition: service_completed_successfully
@@ -274,7 +293,9 @@ services:
     restart: unless-stopped
     environment: *api-environment
     volumes:
-      - storage-data:/var/lib/centaeris-storage
+      - type: volume
+        source: storage-data
+        target: *storage-root
     depends_on:
       api-init:
         condition: service_completed_successfully

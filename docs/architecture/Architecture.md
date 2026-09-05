@@ -69,6 +69,38 @@ Runtime controls Docker through the host socket and is therefore a privileged
 infrastructure component even when individual AgentRun containers drop
 capabilities.
 
+## Deployment trust boundary
+
+Only Runtime mounts the Docker socket in the bundled Compose configuration.
+That socket makes Runtime part of the host's trusted infrastructure; container
+mount separation does not isolate other container secrets from a compromised
+Docker controller. The deployment contract gate protects against accidentally
+adding socket access to another service.
+
+API owns credential storage, authorization decisions and credential release.
+This does not mean it is the only process holding secrets: the shared API
+environment also supplies the signing/encryption keys and database credentials
+to api-init, gc and mail-sender. Runtime shares the HMAC authorization key and
+receives authorized MCP bearer tokens for HTTP connections. Worker receives the
+internal API token, not the HMAC key through Compose. Narrowing those inherited
+credentials is a separate design and test task, not a guarantee of the current
+layout.
+
+The API service drops all Linux capabilities and enables no-new-privileges.
+It still runs as the image's default user and retains access to its mounted data
+and configured credentials. This limits process privileges; it does not defend
+all data against API compromise. The production override removes the API host
+port and exposes the Web service on loopback for a reverse proxy.
+
+The Docker gate verifies actual process capabilities, fresh-volume startup,
+upload storage and Plugin lifecycle writes, then replaces the API container and
+checks persistence. Only Runtime inspection of a synthetic Plugin is mocked in
+that probe; filesystem operations, catalog validation and database locking run
+normally. Runtime `main()` already resolves the general image with
+`docker image inspect` before binding its listener. Direct Runtime startup with
+a missing image fails before listening; this does not depend on the Compose
+entrypoint. No duplicate entrypoint check is needed.
+
 ## Plugins
 
 Superusers install a validated package directory through a bounded ZIP carrier.
