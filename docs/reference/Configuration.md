@@ -19,14 +19,25 @@ layers, browser responses, Session logs, Plugin packages, or test artifacts.
 
 ## Service addresses
 
-`POSTGRES_*`, `REDIS_URL`, `RUNTIME_URL`, `API_INTERNAL_URL`, `API_BASE_URL`, and
-`WEB_ORIGIN` describe service connectivity and browser origin. Production uses
-internal container addresses plus one external HTTPS reverse proxy. Do not
-expose internal service tokens or database ports through that proxy.
+The bundled Compose deployment owns internal service addresses: PostgreSQL is
+`postgres:5432`, Redis is `redis:6379`, and API is `api:8000`. Both API and worker
+Runtime URLs derive from `RUNTIME_PORT`. These internal addresses are not `.env`
+knobs. `POSTGRES_DB`, `POSTGRES_USER`, published host ports, `API_BASE_URL`, and
+`WEB_ORIGIN` remain deployment inputs.
+
+Standalone processes still accept the application environment variables
+`POSTGRES_HOST`, `POSTGRES_PORT`, `REDIS_URL`, `RUNTIME_URL`, and
+`API_INTERNAL_URL`. External databases or custom network layouts require an
+explicit Compose override updating every affected consumer; the bundled topology
+gate does not certify those custom overrides. Production uses an external HTTPS
+reverse proxy. Do not expose internal service tokens or database ports through it.
 
 ## Storage and concurrency
 
-- `STORAGE_ROOT` selects the API file-storage root.
+- Compose shares one storage-root anchor between API/GC configuration and their
+  named-volume targets, and one Plugin-root anchor between API/init configuration
+  and API/init/Runtime mounts. They are not independently configurable in `.env`.
+  Standalone API processes still require `STORAGE_ROOT` and `PLUGIN_CATALOG_ROOT`.
 - `STORAGE_STREAM_LANES` and `STORAGE_STREAM_CHUNK_BYTES` bound file streaming.
 - `REDIS_BROWSER_MAX_CONNECTIONS` bounds browser streaming connections per API
   process.
@@ -42,9 +53,21 @@ Invalid or unsafe budgets fail instead of falling back to an unbounded value.
 `SANDBOX_DATA_TMPFS_BYTES` define the authorized AgentRun profile.
 `OCI_RUNTIME` selects the configured container runtime.
 
-`KNOWLEDGE_PROCESSOR_IMAGE` and `KNOWLEDGE_PROCESSOR_DEVICE` must describe the
-image actually built and available to Runtime. The processor and general
-execution images are required services.
+Compose owns the processor image reference through one YAML anchor shared by
+the build service and Runtime, just as it does for the general execution image.
+`KNOWLEDGE_PROCESSOR_IMAGE` is not a Compose `.env` input. Both images are required
+services and must be built before Runtime starts.
+
+`KNOWLEDGE_PROCESSOR_DEVICE` is exactly `cpu` or `gpu:0`. One value configures
+both the build and Runtime. The Dockerfile derives the installation extra from
+that device (`cpu` or `gpu`); do not supply a separate `PROCESSOR_EXTRA`.
+The shared `local` image tag deliberately does not encode `gpu:0`. Rebuild after
+a device change. GPU deployment additionally requires compatible host hardware
+and drivers, and a Compose override granting exactly one visible GPU to the
+processor spec service. Configuration checks alone are not a GPU execution
+certification.
+The Docker release gate compares actual built/runtime image IDs and the image's
+embedded device, so an existing stale image cannot satisfy the check.
 
 ## Email
 

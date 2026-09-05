@@ -20,7 +20,6 @@ RUN apt-get update \
         libreoffice-writer \
     && rm -rf /var/lib/apt/lists/*
 
-ARG PROCESSOR_EXTRA=cpu
 ARG PROCESSOR_DEVICE=cpu
 ENV CENTAERIS_PROCESSOR_DEVICE=${PROCESSOR_DEVICE}
 
@@ -30,9 +29,9 @@ COPY pyproject.toml uv.lock ./
 COPY packages/api/pyproject.toml packages/api/pyproject.toml
 COPY packages/hosted_execution/pyproject.toml packages/hosted_execution/pyproject.toml
 COPY packages/worker/pyproject.toml packages/worker/pyproject.toml
-COPY packages/document_processor/pyproject.toml packages/document_processor/document_processor.py packages/document_processor/
+COPY packages/document_processor/pyproject.toml packages/document_processor/document_processor.py packages/document_processor/processor_build_extra.py packages/document_processor/
 RUN --mount=type=cache,target=/root/.cache/uv \
-        case "$PROCESSOR_EXTRA:$PROCESSOR_DEVICE" in cpu:cpu|gpu:gpu:0) ;; *) exit 64 ;; esac \
+        PROCESSOR_EXTRA="$(python packages/document_processor/processor_build_extra.py "$PROCESSOR_DEVICE")" \
     && UV_CONCURRENT_DOWNLOADS=2 uv sync --frozen --no-dev --package centaeris-document-processor --extra "$PROCESSOR_EXTRA" \
     && python packages/document_processor/document_processor.py fetch-models \
     && groupadd --gid 10001 processor \

@@ -25,6 +25,20 @@ jobs:
       CENTAERIS_CORE_REVISION: ${{ needs.resolve-core.outputs.revision }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    services:
+      postgres-test:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: centaeris
+          POSTGRES_USER: centaeris
+          POSTGRES_PASSWORD: centaeris
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U centaeris -d centaeris"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     defaults:
       run:
         working-directory: centaeris-workspace

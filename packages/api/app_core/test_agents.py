@@ -19,6 +19,34 @@ from app_core.models import (
 
 
 class PrivateAgentTests(TestCase):
+    def test_unavailable_sessions_do_not_require_runtime(self):
+        agent = Agent.objects.create(workspace=self.workspace, owner=self.member, name="Agent")
+        deleted = Session.objects.create(workspace=self.workspace, owner=self.member, agent=agent, status="deleted", deletedAt=timezone.now())
+        foreign_agent = Agent.objects.create(workspace=self.workspace, owner=self.owner, name="Other")
+        foreign = Session.objects.create(workspace=self.workspace, owner=self.owner, agent=foreign_agent)
+        active = Session.objects.create(workspace=self.workspace, owner=self.member, agent=agent)
+        model = ModelConfig.objects.create(displayName="Test model")
+        self.client.force_login(self.member)
+        with patch("app_core.http.workspaces.request_execution_profile", side_effect=RuntimeError("offline")) as profile:
+            for session_id in (deleted.id, foreign.id, "session_missing"):
+                with self.subTest(session_id=session_id):
+                    response = self.client.post(
+                        f"/api/workspaces/{self.workspace.id}/sessions/{session_id}/messages",
+                        data=json.dumps({"text": "hello", "modelConfigRef": model.id}),
+                        content_type="application/json",
+                    )
+                    self.assertEqual(response.status_code, 404)
+                    self.assertEqual(response.json()["error"], "session_not_found")
+            profile.assert_not_called()
+            response = self.client.post(
+                f"/api/workspaces/{self.workspace.id}/sessions/{active.id}/messages",
+                data=json.dumps({"text": "hello", "modelConfigRef": model.id}),
+                content_type="application/json",
+            )
+            self.assertEqual(response.status_code, 503)
+            profile.assert_called_once()
+        self.assertFalse(AgentRun.objects.exists())
+
     def setUp(self):
         User = get_user_model()
         self.owner = User.objects.create_user(username="owner@example.test")

@@ -976,6 +976,16 @@ def create_session_message(
             agent=requested_agent,
         ).exists():
             return Status(404, {"error": "session_project_not_found"})
+    else:
+        # Reject inaccessible sessions before contacting Runtime; the transaction
+        # below still revalidates the session under a row lock before any write.
+        requested_session = Session.objects.select_related("agent").filter(
+            id=session_id, workspace=workspace, owner=request.user, status="active"
+        ).first()
+        if requested_session is None:
+            return Status(404, {"error": "session_not_found"})
+        if requested_session.agent.status == "deleted":
+            return Status(410, {"error": "agent_deleted"})
     try:
         execution_profile = request_execution_profile()
     except RuntimeError:

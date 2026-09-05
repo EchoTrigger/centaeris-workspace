@@ -207,6 +207,14 @@ def validate_agent_run_authorization_payload(payload: dict) -> None:
         for name in resources
     ):
         raise ValueError("sandbox resources must be positive integers")
+    for name, maximum in (
+        ("memoryBytes", 2**64 - 1),
+        ("cpuMilli", 2**32 - 1),
+        ("pidsLimit", 2**32 - 1),
+        ("dataTmpfsBytes", 2**64 - 1),
+    ):
+        if resources[name] > maximum:
+            raise ValueError(f"sandbox resources.{name} exceeds transport range")
     if sum(item["sizeBytes"] for item in asset_refs) > resources["dataTmpfsBytes"] // 2:
         raise ValueError("declared inputs must fit within half of dataTmpfsBytes")
 

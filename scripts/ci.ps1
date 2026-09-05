@@ -16,14 +16,14 @@ function Run([string]$Name, [scriptblock]$Command) {
 Run "Public Core revision" { node --test scripts/core-revision.test.mjs }
 Run "Rust check" { cargo check --workspace --locked }
 Run "Rust tests" { cargo test --workspace --locked }
-Run "Worker tests" { python packages/worker/test_worker.py }
-Run "Document processor tests" { uv run --frozen --package centaeris-document-processor python packages/document_processor/test_document_processor.py }
+Run "AgentRun authorization parity" { pwsh -NoProfile -File scripts/agent-run-authorization-gate.ps1 }
+Run "Deployment identity contracts" { uv run --frozen --package api python scripts/deployment-contract.test.py }
+Run "Python discovery gate regressions" { python scripts/python_test_gate.py gate }
+Run "Worker tests" { python scripts/python_test_gate.py worker }
+Run "Document processor tests" { uv run --frozen --package centaeris-document-processor python scripts/python_test_gate.py document_processor }
 Run "Django fresh migration" { uv run --frozen --package api python packages/api/manage.py migrate --noinput --settings=api.migration_test_settings }
 Run "Django migration drift" { uv run --frozen --package api python packages/api/manage.py makemigrations --check --dry-run --settings=api.migration_test_settings --skip-checks }
-Run "Django Runtime client" { uv run --frozen --package api python packages/api/manage.py test app_core.test_http_modernization.ModelCatalogRuntimeClientTests --noinput --settings=api.migration_test_settings }
-Run "Knowledge streaming validation" { uv run --frozen --package api python packages/api/manage.py test app_core.test_knowledge_streaming app_core.tests.WorkspaceAssetAcceptanceTests.test_knowledge_processor_device_identity_is_exact --noinput --settings=api.migration_test_settings }
-Run "Plugin management and upload isolation" { uv run --frozen --package api python packages/api/manage.py test app_core.test_plugin_isolation app_core.test_plugin_upload --noinput --settings=api.migration_test_settings }
-Run "Resource IDs and ownership" { uv run --frozen --package api python packages/api/manage.py test app_core.test_resource_ids app_core.test_bootstrap_superadmin.BootstrapSuperadminTests --noinput --settings=api.migration_test_settings }
+Run "Full Django PostgreSQL suite" { uv run --frozen --package api python scripts/python_test_gate.py api }
 Run "Node install" { npm ci }
 if ($InstallPlaywright) {
     if ($IsLinux) {

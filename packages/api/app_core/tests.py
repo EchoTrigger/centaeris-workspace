@@ -3345,55 +3345,10 @@ class ApiVerticalSliceTests(TransactionTestCase):
             validate_agent_run_authorization_payload(authorization.payload)
 
     def test_agent_run_authorization_digest_is_stable(self):
-        payload = {
-            "schema": "workspace.agent_run_authorization.v1",
-            "id": "authorization_1",
-            "organizationId": "org_1",
-            "workspaceId": "ws_1",
-            "userId": "user_1",
-            "agentId": "centaeris",
-            "sessionId": "sess_1",
-            "agentRunId": "agent_run_1",
-            "sessionWorkspace": {
-                "generation": 7,
-                "snapshotSha256": f"sha256:{'c' * 64}",
-                "snapshotSizeBytes": 13,
-                "expandedSizeBytes": 7,
-                "fileCount": 1,
-            },
-            "modelConfigRef": "model_1",
-            "thinkingMode": "high",
-            "artifactScopeRef": "artifact_scope_1",
-            "assetRefs": [
-                {
-                    "schema": "runtime.declared_input.v1",
-                    "inputRef": "input_1",
-                    "displayName": "notice.pdf",
-                    "contentType": "application/pdf",
-                    "inputIdentity": {
-                        "ownerKind": "sourceObject",
-                        "ownerId": "object_1",
-                        "generation": 1,
-                        "sha256": f"sha256:{'b' * 64}",
-                    },
-                    "sizeBytes": 1,
-                }
-            ],
-            "messageAssetRefs": ["input_1"],
-            "imageCapability": "workspace_general_v1",
-            "imageDigest": f"sha256:{'a' * 64}",
-            "pluginActivation": {
-                "schema": "plugin_activation_snapshot_v1",
-                "digest": activation_digest([]),
-                "packages": [],
-            },
-            "resources": {
-                "memoryBytes": 2147483648,
-                "cpuMilli": 2000,
-                "pidsLimit": 512,
-                "dataTmpfsBytes": 4294967296,
-            },
-        }
+        payload = json.loads(
+            (Path(__file__).resolve().parents[3]
+             / "tests/fixtures/agent_run_authorization/v1/valid.json").read_text(encoding="utf-8")
+        )
         digest = authorization_digest(payload)
         self.assertEqual(
             digest,
