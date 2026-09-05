@@ -13,6 +13,7 @@ function Run([string]$Name, [scriptblock]$Command) {
     if ($LASTEXITCODE -ne 0) { throw "$Name failed with exit code $LASTEXITCODE" }
 }
 
+Run "Public Core revision" { node --test scripts/core-revision.test.mjs }
 Run "Rust check" { cargo check --workspace --locked }
 Run "Rust tests" { cargo test --workspace --locked }
 Run "Worker tests" { python packages/worker/test_worker.py }

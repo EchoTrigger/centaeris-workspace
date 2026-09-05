@@ -31,6 +31,20 @@ covered. It uses synthetic events and isolated API fixtures without model calls.
 Gates must not read production data, real Plugin content, or developer secrets.
 Sibling Rust paths must become exact Git revisions before distribution.
 
+CI and Performance use the shared `Resolve public Core revision` workflow.
+At the start of each workflow run it resolves the public Core `main` once;
+all dependent jobs check out that full SHA. The run summary records a link to
+the resolved commit, and Docker image labels retain the same SHA. A missing or
+unavailable ref stops resolution without a fallback. Separate runs (including
+full reruns) may resolve different Core revisions as `main` advances.
+
+The local gate tests strict resolution, output recording, and public fetchability
+with `node --test scripts/core-revision.test.mjs`; this requires network access.
+In GitHub Actions, the live smoke test is skipped because the shared resolver
+and downstream checkouts exercise it; unit tests run without resolving main again.
+Local Rust checks still use the sibling Core checkout. To reproduce a CI run,
+check out the Core SHA recorded in that run alongside the tested Workspace SHA.
+
 The checked-in CI workflow runs the source, browser, and Compose gates from a
 clean checkout. Required status checks must be enabled on the public `main`
 branch before external pull requests are accepted.

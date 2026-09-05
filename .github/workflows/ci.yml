@@ -14,12 +14,15 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
-env:
-  CENTAERIS_CORE_REVISION: d2a09f68db660647d632a8d8a210e2f1f28dff38
-
 jobs:
+  resolve-core:
+    uses: ./.github/workflows/resolve-core-revision.yml
+
   source-browser:
     name: Source and browser gate
+    needs: resolve-core
+    env:
+      CENTAERIS_CORE_REVISION: ${{ needs.resolve-core.outputs.revision }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     defaults:
@@ -71,6 +74,9 @@ jobs:
 
   docker-fresh-start:
     name: Docker fresh-start gate
+    needs: resolve-core
+    env:
+      CENTAERIS_CORE_REVISION: ${{ needs.resolve-core.outputs.revision }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     defaults:
