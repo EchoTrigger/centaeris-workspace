@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useRouteLoaderData } from "react-router";
+import { Link, matchPath, useNavigate, useRouteLoaderData } from "react-router";
 import { apiResponse } from "../api";
 import { WorkspaceContextPanel } from "../components/WorkspaceContextPanel";
 import { ContextUsagePicker } from "../components/ContextUsagePicker";
@@ -160,6 +160,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   const startFresh = searchParams.get("new") === "1";
   const activeAgent = agents.find((agent) => agent.id === agentId);
   if (!activeAgent) throw new Error("agent_not_found");
+  const workspaceBase = `/w/${encodeURIComponent(workspace.id)}`;
   const requestScopeKey = JSON.stringify([workspace.id, activeAgent.id, workspaceDraft, requestedSessionId, startFresh, requestedProjectId]);
   const requestScopeRef = useRef({ key: requestScopeKey, active: true });
   if (requestScopeRef.current.key !== requestScopeKey) requestScopeRef.current = { key: requestScopeKey, active: true };
@@ -665,7 +666,14 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     const text = (inlineEdit?.text ?? draft).trim();
     if (!workspace || !text || sending || loadingHistory) return;
     const requestScope = requestScopeRef.current;
-    const isCurrentRequest = () => requestScope.active && requestScopeRef.current === requestScope;
+    const isCurrentRequest = () => {
+      const pathname = window.location.pathname;
+      const currentAgentId = matchPath(`${workspaceBase}/agents/:agentId`, pathname)?.params.agentId;
+      const locationOwnsRequest = pathname === `${workspaceBase}/app`
+        || currentAgentId === activeAgent.id
+        || pathname.startsWith(`${workspaceBase}/settings/`);
+      return locationOwnsRequest && requestScope.active && requestScopeRef.current === requestScope;
+    };
     if (hasActiveAgentRun) {
       if (!sessionId || !activeAgentRunId) return;
       if (pendingAttachmentIds.length || pendingUploadFiles.length) {
