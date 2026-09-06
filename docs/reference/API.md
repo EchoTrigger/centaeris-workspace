@@ -22,6 +22,32 @@ specifications use the immutable Centaeris processor version `1.0.0`.
 
 Secrets never belong in responses, logs, documentation, or checked-in examples.
 
+Model completion results carry optional `reasoningContent` for display and
+`continuationReasoningContent` for provider-approved plain-text continuation.
+These fields are independent; Runtime must not reconstruct continuation from
+display text. OpenAI-compatible adapters preserve their existing continuation
+text, while Responses summaries and Anthropic thinking text are display only.
+Neither field carries opaque reasoning, encrypted data, or provider signatures.
+Both the ordinary result and `api.model.stream.v1` terminal `result` use these
+exact camelCase names; unknown result fields and non-string, non-null reasoning
+values fail. The stream emits answer `delta`, full-attempt `reasoning` snapshots
+(`schema`, `type`, `text`), and terminal `result`. Runtime submits Core-owned
+`reasoning_block` records on success (`done`), failure, or cancellation
+(`interrupted`), keeping each retry under a separate Core request identity.
+Postgres history and committed SSE carry these records through the existing
+Session transport; Web reconstructs reasoning blocks in source sequence order.
+The payload is exactly `blockId`, `requestId`, `text`, and `status`, with identity
+and lifecycle validation owned by Core. No duration field is added.
+Schema identifiers remain v1.
+
+Redis live snapshots and SSE signals carry optional `reasoning` alongside the
+answer under one monotonic revision. Its exact fields are `blockId`, `requestId`,
+and `text`. Atomic Redis writes update the cached snapshot and signal together;
+browser restoration reads both body and reasoning from that snapshot. Committed
+seals replace matching live blocks without changing their disclosure identity.
+Runtime restart recovers available cached partial reasoning through Core before
+settling the interrupted run. Missing or expired cache does not fabricate text.
+
 Workspace, Agent, and Session creation generates `ws_`, `agent_`, and `session_`
 identifiers followed by 16 case-sensitive Base64url characters (`A-Z`, `a-z`,
 `0-9`, `-`, `_`), encoding 12 cryptographically random bytes without padding.

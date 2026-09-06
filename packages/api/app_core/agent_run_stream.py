@@ -138,7 +138,7 @@ def require_cursor_not_future(agent_run: AgentRun, source_sequence: int) -> None
 def _live_state(meta: dict, text: str | None) -> dict | None:
     if not meta:
         return None
-    if set(meta) != {"messageId", "turnId", "afterSequence", "revision"}:
+    if set(meta) - {"reasoning"} != {"messageId", "turnId", "afterSequence", "revision"}:
         raise ValueError("agent_run_live_state_invalid")
     try:
         after_sequence = int(meta["afterSequence"])
@@ -160,7 +160,18 @@ def _live_state(meta: dict, text: str | None) -> dict | None:
         "afterSequence": after_sequence,
         "revision": revision,
         "text": text if isinstance(text, str) else "",
+        **({"reasoning": _validate_reasoning(json.loads(meta["reasoning"]))} if "reasoning" in meta else {}),
     }
+
+
+def _validate_reasoning(value):
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"blockId", "requestId", "text"}:
+        raise ValueError("agent_run_live_reasoning_invalid")
+    if not isinstance(value["requestId"], str) or not value["requestId"].strip() or value["blockId"] != "reasoning:" + value["requestId"] or not isinstance(value["text"], str):
+        raise ValueError("agent_run_live_reasoning_invalid")
+    return value
 
 
 def load_live_text_state(agent_run_id: str) -> dict | None:
@@ -203,7 +214,7 @@ def _decode_signal(agent_run: AgentRun, fields: dict) -> dict:
         raise RuntimeError("Redis AgentRun signal is invalid JSON") from error
     if not isinstance(signal, dict) or signal.get("kind") not in SIGNAL_FIELDS:
         raise RuntimeError("Redis AgentRun signal kind is unsupported")
-    if set(signal) != SIGNAL_FIELDS[signal["kind"]]:
+    if set(signal) - ({"reasoning"} if signal["kind"] == "live" else set()) != SIGNAL_FIELDS[signal["kind"]]:
         raise RuntimeError("Redis AgentRun signal fields mismatch")
     if signal["schema"] != SIGNAL_SCHEMA or signal["agentRunId"] != agent_run.id:
         raise RuntimeError("Redis AgentRun signal binding mismatch")
@@ -219,6 +230,8 @@ def _decode_signal(agent_run: AgentRun, fields: dict) -> dict:
     for field in ("turnId", "messageId", "text"):
         if not isinstance(signal[field], str) or (field != "text" and not signal[field]):
             raise RuntimeError(f"Redis live signal {field} is invalid")
+    if "reasoning" in signal:
+        _validate_reasoning(signal["reasoning"])
     return signal
 
 

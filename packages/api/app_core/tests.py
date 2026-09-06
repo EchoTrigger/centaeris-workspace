@@ -4741,7 +4741,7 @@ class ModelProtocolAdapterTests(TestCase):
     def test_thinking_mode_uses_each_provider_protocol_shape_and_omits_when_unset(self):
         cases = [
             ("openai-completions", build_open_ai_completions_request, "reasoning_effort", "vendor-high"),
-            ("openai-responses", build_open_ai_responses_request, "reasoning", {"effort": "vendor-high"}),
+            ("openai-responses", build_open_ai_responses_request, "reasoning", {"effort": "vendor-high", "summary": "auto"}),
             ("anthropic-messages", build_anthropic_messages_request, "output_config", {"effort": "vendor-high"}),
         ]
         for api, builder, field, expected in cases:
@@ -4806,7 +4806,7 @@ class ModelProtocolAdapterTests(TestCase):
                     model,
                     {"preparedPrompt": prepared_prompt_for_test(model)},
                     {},
-                    lambda _type, payload: payload["delta"].encode(),
+                    lambda event_type, payload: json.dumps({"type": event_type, **payload}).encode(),
                 )
             )
 

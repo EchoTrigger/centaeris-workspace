@@ -25,6 +25,7 @@ pub struct TransientAgentRunStream {
     live_revision: u64,
     live_after_sequence: u64,
     live_text: String,
+    live_reasoning: Option<serde_json::Value>,
     pending_live: Option<PendingLiveText>,
     last_live_flush: Option<Instant>,
 }
@@ -85,7 +86,7 @@ fn parse_live_meta(
     if map.is_empty() {
         return Ok(None);
     }
-    if map.len() != 4 {
+    if map.len() != 4 && !(map.len() == 5 && map.contains_key("reasoning")) {
         return Err("live meta fields mismatch".to_string());
     }
     let message_id = map
@@ -114,7 +115,7 @@ fn classify_live_error(error: redis::RedisError) -> LiveTextError {
 
 // KEYS: [1] live:text [2] live:meta [3] signals
 // open:    ARGV = ["open", turnId, messageId, afterSequence, initialText, ttl]
-// replace: ARGV = ["replace", fullText, turnId, messageId, expectedRevision, newRevision, signalJson, maxLen, ttl]
+// replace: ARGV = ["replace", fullText, turnId, messageId, expectedRevision, newRevision, signalJson, maxLen, reasoningJson, ttl]
 // seal:        ARGV = ["seal", turnId, messageId, expectedRevision, ttl]
 // seal_before: ARGV = ["seal_before", turnId, messageId, expectedRevision, committedSequence, ttl]
 const LIVE_TEXT_MUTATE_SCRIPT: &str = r#"
@@ -127,6 +128,7 @@ if kind == "open" then
     return redis.error_reply("live open durable position is not newer")
   end
   redis.call("SET", KEYS[1], ARGV[5])
+  redis.call("HDEL", KEYS[2], "reasoning")
   redis.call("HSET", KEYS[2], "turnId", ARGV[2], "messageId", ARGV[3], "afterSequence", ARGV[4], "revision", "0")
   redis.call("EXPIRE", KEYS[1], ttl)
   redis.call("EXPIRE", KEYS[2], ttl)
@@ -142,6 +144,7 @@ elseif kind == "replace" then
   end
   redis.call("SET", KEYS[1], ARGV[2])
   redis.call("HSET", KEYS[2], "revision", ARGV[6])
+  redis.call("HSET", KEYS[2], "reasoning", ARGV[9])
   local cursor = redis.call("XADD", KEYS[3], "MAXLEN", "~", ARGV[8], "*", "signal", ARGV[7])
   redis.call("EXPIRE", KEYS[1], ttl)
   redis.call("EXPIRE", KEYS[2], ttl)
@@ -217,6 +220,7 @@ impl TransientAgentRunStream {
             live_revision: 0,
             live_after_sequence: 0,
             live_text: String::new(),
+            live_reasoning: None,
             pending_live: None,
             last_live_flush: None,
         })
@@ -276,6 +280,7 @@ impl TransientAgentRunStream {
         self.live_revision = 0;
         self.live_after_sequence = after_sequence;
         self.live_text = initial_text.to_string();
+        self.live_reasoning = None;
         self.pending_live = None;
         self.last_live_flush = None;
         Ok(())
@@ -327,6 +332,34 @@ impl TransientAgentRunStream {
         Ok(())
     }
 
+    pub fn live_reasoning(
+        &mut self,
+        turn_id: &str,
+        request_id: &str,
+        text: &str,
+    ) -> Result<(), LiveTextError> {
+        self.live_reasoning = Some(
+            serde_json::json!({"blockId":format!("reasoning:{request_id}"),"requestId":request_id,"text":text}),
+        );
+        self.pending_live = Some(PendingLiveText {
+            turn_id: turn_id.to_string(),
+            message_id: format!("message:{turn_id}:assistant"),
+        });
+        self.flush_live_if_due()
+    }
+
+    pub fn read_live_reasoning(&mut self) -> Result<Option<serde_json::Value>, String> {
+        let text: Option<String> = self
+            .connection
+            .hget(live_meta_key(&self.agent_run_id), "reasoning")
+            .map_err(|error| format!("read live reasoning failed: {error}"))?;
+        text.map(|text| {
+            serde_json::from_str(&text).map_err(|error| format!("invalid live reasoning: {error}"))
+        })
+        .transpose()
+        .map(Option::flatten)
+    }
+
     pub fn live_flush(&mut self) -> Result<(), LiveTextError> {
         let Some(pending) = self.pending_live.as_ref() else {
             return Ok(());
@@ -344,6 +377,7 @@ impl TransientAgentRunStream {
             "turnId": pending.turn_id,
             "messageId": pending.message_id,
             "text": self.live_text,
+            "reasoning": self.live_reasoning,
         }))
         .map_err(|error| {
             LiveTextError::Fatal(format!("encode live stream event failed: {error}"))
@@ -360,6 +394,10 @@ impl TransientAgentRunStream {
             .arg(new_revision)
             .arg(encoded)
             .arg(STREAM_MAX_LENGTH)
+            .arg(
+                serde_json::to_string(&self.live_reasoning)
+                    .map_err(|error| LiveTextError::Fatal(error.to_string()))?,
+            )
             .arg(self.live_ttl_seconds)
             .invoke::<String>(&mut self.connection);
         if let Err(error) = result {
@@ -464,6 +502,45 @@ fn live_flush_is_due(last_flush: Option<Instant>, now: Instant) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires isolated TEST_REASONING_REDIS_URL Docker service"]
+    fn redis_reasoning_snapshot_survives_reconnect_and_seals_with_answer() {
+        let url = std::env::var("TEST_REASONING_REDIS_URL").expect("isolated test Redis URL");
+        let run = format!("reasoning-test-{}", std::process::id());
+        let mut stream = TransientAgentRunStream::connect(&url, &run, 60, 60).unwrap();
+        stream
+            .live_open("turn-1", "message:turn-1:assistant", 1, "")
+            .unwrap();
+        stream
+            .live_reasoning("turn-1", "request-1", "first")
+            .unwrap();
+        stream
+            .live_reasoning("turn-1", "request-1", "first second")
+            .unwrap();
+        stream
+            .live_append_delta("turn-1", "message:turn-1:assistant", "answer")
+            .unwrap();
+        stream.live_flush().unwrap();
+        let mut restored = TransientAgentRunStream::connect(&url, &run, 60, 60).unwrap();
+        let thinking = restored.read_live_reasoning().unwrap().unwrap();
+        assert_eq!(thinking["text"], "first second");
+        let text: String = restored.connection.get(live_text_key(&run)).unwrap();
+        assert_eq!(text, "answer");
+        let records: redis::streams::StreamRangeReply = restored
+            .connection
+            .xrevrange_count(signal_stream_key(&run), "+", "-", 1)
+            .unwrap();
+        let signal: String = records.ids[0].get("signal").unwrap();
+        let signal: serde_json::Value = serde_json::from_str(&signal).unwrap();
+        assert_eq!(signal["reasoning"], thinking);
+        assert_eq!(signal["text"], text);
+        assert!(stream
+            .live_seal_before_sequence("turn-1", "message:turn-1:assistant", 2)
+            .unwrap());
+        assert!(restored.read_live_reasoning().unwrap().is_none());
+        let _: usize = restored.connection.del(signal_stream_key(&run)).unwrap();
+    }
     use std::collections::HashMap;
 
     fn live_meta_is_superseded(

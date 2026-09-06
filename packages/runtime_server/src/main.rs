@@ -895,6 +895,7 @@ fn persist_hosted_subagent_tool_safe_point(
             }
         }
         ToolSafePoint::ModelRequestStarted(_)
+        | ToolSafePoint::ReasoningCompleted { .. }
         | ToolSafePoint::ProviderUsage { .. }
         | ToolSafePoint::CompletedTurn(_) => return Ok(()),
     };
@@ -2492,7 +2493,42 @@ fn execute_agent_run(
             ))?;
         }
     }
-    // Redis live state is a disposable display projection, never AgentRun lifecycle evidence.
+    // Recover display text only after Core verifies its durable request identity.
+    // Redis remains disposable and cannot establish AgentRun lifecycle or model history.
+    if has_started_fact {
+        let recovered = session_stream_guard(&session_stream)?
+            .as_mut()
+            .map(|stream| {
+                let meta = stream.read_live_meta()?;
+                let reasoning = stream.read_live_reasoning()?;
+                Ok::<_, String>(meta.zip(reasoning))
+            })
+            .transpose();
+        match recovered {
+            Ok(Some(Some((meta, reasoning)))) => {
+                let mut sequence = sequence_guard(&session_record_sequence)?.clone();
+                if let Some(event) =
+                    sequence.recover_reasoning_snapshot(&meta.turn_id, &reasoning, now_ms()?)?
+                {
+                    let receipt = append_agent_run_session_records(
+                        runtime.as_ref(),
+                        &session_log,
+                        &agent_run_start,
+                        &[event],
+                        &terminal_lease_fence,
+                    )?;
+                    accept_session_commit(
+                        &mut sequence,
+                        &mut *session_stream_guard(&session_stream)?,
+                        &receipt,
+                    )?;
+                    *sequence_guard(&session_record_sequence)? = sequence;
+                }
+            }
+            Err(error) => eprintln!("cached reasoning recovery unavailable: {error}"),
+            _ => {}
+        }
+    }
     settle_existing_live_or_log(&mut *session_stream_guard(&session_stream)?);
     let message_input_states =
         preproject_message_inputs(&agent_run_start, resolved_inputs.as_ref())?;
@@ -2682,6 +2718,21 @@ fn execute_agent_run(
             .clone();
         let mut recovery_checkpoint = None;
         let events = match safe_point {
+            ToolSafePoint::ReasoningCompleted {
+                session_id,
+                turn_id,
+                request_id,
+                text,
+                status,
+            } => {
+                if session_id != committed_sequence.session_id() {
+                    return Err("reasoning safe point Session identity mismatch".to_string());
+                }
+                committed_sequence
+                    .record_reasoning_block(&turn_id, &request_id, &text, &status, now)?
+                    .into_iter()
+                    .collect()
+            }
             ToolSafePoint::ModelRequestStarted(started) => {
                 let mut events = committed_sequence.record_model_request_started(&started, now)?;
                 if !committed_sequence.open_tool_call_ids().is_empty() {
@@ -2890,6 +2941,16 @@ fn execute_agent_run(
                 &model_client,
                 &model_config_store,
                 &mut |event| match event {
+                    TurnUpdate::Reasoning { turn_id, request_id, text, .. } => {
+                        if !live_degraded.load(Ordering::Relaxed) {
+                            match session_stream.lock() {
+                                Ok(mut guard) => if let Some(stream) = guard.as_mut() {
+                                    if let Err(error) = stream.live_reasoning(&turn_id, &request_id, &text) { latch_live_error(&live_degraded, error); }
+                                },
+                                Err(_) => { stream_error = Some("session stream lock poisoned".to_string()); }
+                            }
+                        }
+                    }
                     TurnUpdate::ModelRequestStart {
                         turn_id,
                         initial_content,

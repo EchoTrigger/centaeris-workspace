@@ -112,6 +112,8 @@ async def stream_open_ai_completions(
                     raise RuntimeError("provider stream changed reasoning field names")
                 reasoning_field = chunk_reasoning_field
                 reasoning_parts.append(chunk_reasoning)
+                if chunk_reasoning:
+                    yield encode_event("reasoning", {"text": "".join(reasoning_parts)})
             content = delta.get("content")
             if content:
                 if not isinstance(content, str):
@@ -153,6 +155,7 @@ async def stream_open_ai_completions(
     result_holder["result"] = {
         "text": "".join(text_parts),
         "reasoningContent": "".join(reasoning_parts) if reasoning_field is not None else None,
+        "continuationReasoningContent": "".join(reasoning_parts) if reasoning_field is not None else None,
         "toolCalls": parsed_calls,
         "usage": validated_usage(usage),
     }
@@ -168,6 +171,7 @@ def parse_open_ai_completions_response(payload: dict) -> dict:
     return {
         "text": text,
         "reasoningContent": reasoning_content,
+        "continuationReasoningContent": reasoning_content,
         "toolCalls": parse_tool_calls(message.get("tool_calls")),
         "usage": validated_usage(payload.get("usage")),
     }

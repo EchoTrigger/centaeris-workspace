@@ -27,6 +27,7 @@ export type CommittedStreamItem = UnknownRecord & {
 };
 
 export type LiveStreamItem = UnknownRecord & {
+  reasoning?: { blockId: string; requestId: string; text: string } | null;
   schema: "session.stream.item.v1";
   kind: "live";
   agentRunId: string;

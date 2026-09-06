@@ -16,14 +16,14 @@ function getToolActivityDefinition(toolName) {
 }
 
 const TOOL_ICONS = {
-  agent: "agent", command: "code", edit: "edit", publishArtifact: "file",
-  read: "file", taskOutput: "file", webSearch: "search",
+  agent: "agent", command: "terminal", edit: "edit", publishArtifact: "fileOutput",
+  read: "search", taskOutput: "listChecks", webSearch: "globe",
 };
 
 const DYNAMIC_TOOL_ATOM = Object.freeze({
   kind: "dynamicTool", title: "Used tools", detailRendererKind: "none",
   runningVerb: "Using", completedVerb: "Used", failedVerb: "Tool failed",
-  pathOpenable: false, expandable: false, icon: "code", detail: "none",
+  pathOpenable: false, expandable: false, icon: "plug", detail: "none",
 });
 
 function webToolAtom(atom) {
@@ -115,10 +115,11 @@ export function groupActivities(activities) {
   }];
 }
 
-export function buildAgentRunSections(messages, activities) {
+export function buildAgentRunSections(messages, activities, reasoningBlocks = []) {
   const displayEntries = [
     ...messages.filter((item) => item.role === "assistant").map((message) => ({ kind: "assistant", sequence: message.sequence, message })),
     ...activities.map((activity) => ({ kind: "tool", sequence: activity.sequence, activity })),
+    ...reasoningBlocks.map((block) => ({ kind: "reasoning", sequence: block.sequence, block })),
   ].sort((left, right) => left.sequence - right.sequence);
   const processItems = [];
   let pendingActivities = [];
@@ -134,7 +135,9 @@ export function buildAgentRunSections(messages, activities) {
       continue;
     }
     flushActivities();
-    processItems.push({ kind: "assistant", message: entry.message });
+    processItems.push(entry.kind === "reasoning"
+      ? { kind: "reasoning", block: entry.block }
+      : { kind: "assistant", message: entry.message });
   }
   flushActivities();
 
@@ -152,20 +155,20 @@ export function buildAgentRunSections(messages, activities) {
         turnId: item.message.turnId,
         sequence: item.message.sequence,
         message: item.message,
-        toolGroups: [],
+        items: [],
       };
       continue;
     }
     if (!current) {
       current = {
-        sectionId: `tools:${item.group.activityIds[0]}`,
-        turnId: item.group.turnId,
-        sequence: item.group.sequence,
+        sectionId: item.kind === "reasoning" ? `reasoning:${item.block.id}` : `tools:${item.group.activityIds[0]}`,
+        turnId: item.kind === "reasoning" ? item.block.turnId : item.group.turnId,
+        sequence: item.kind === "reasoning" ? item.block.sequence : item.group.sequence,
         message: null,
-        toolGroups: [],
+        items: [],
       };
     }
-    current.toolGroups.push(item.group);
+    current.items.push(item);
   }
   flushSection();
   return sections;

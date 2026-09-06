@@ -98,7 +98,7 @@ export function updateMarkdownBlockProjection(previous, text, finalize = false) 
   };
 }
 
-export const MarkdownContent = memo(function MarkdownContent({ text }) {
+export const MarkdownContent = memo(function MarkdownContent(/** @type {{ text: string }} */ { text }) {
   const lines = text.trim().split(/\r?\n/);
   const nodes = [];
   let index = 0;

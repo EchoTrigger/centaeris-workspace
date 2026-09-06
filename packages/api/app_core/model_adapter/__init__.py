@@ -72,6 +72,7 @@ def run_model(agent_run_id: str, model_config_ref: str, request_body: dict) -> d
         return {
             "text": result["text"],
             "reasoningContent": result.get("reasoningContent"),
+            "continuationReasoningContent": result.get("continuationReasoningContent"),
             "toolCalls": result.get("toolCalls", []),
             "usage": usage,
         }
@@ -116,6 +117,7 @@ async def stream_model_async(agent_run_id: str, model_config_ref: str, request_b
             {
                 "text": result["text"],
                 "reasoningContent": result.get("reasoningContent"),
+                "continuationReasoningContent": result.get("continuationReasoningContent"),
                 "toolCalls": result.get("toolCalls", []),
                 "usage": usage,
             },

@@ -144,6 +144,7 @@ async def stream_anthropic_messages(
     encode_event,
 ):
     text_parts = []
+    reasoning_blocks = {}
     tool_calls = {}
     usage = {}
     saw_stop = False
@@ -166,6 +167,10 @@ async def stream_anthropic_messages(
             elif event_type == "content_block_start":
                 block = event.get("content_block")
                 index = event.get("index")
+                if isinstance(index, int) and isinstance(block, dict) and block.get("type") == "thinking":
+                    reasoning_blocks[index] = thinking_text(block)
+                    if reasoning_blocks[index]:
+                        yield encode_event("reasoning", {"text": "\n".join(value for _, value in sorted(reasoning_blocks.items()) if value)})
                 if isinstance(index, int) and isinstance(block, dict) and block.get("type") == "tool_use":
                     tool_calls[index] = {
                         "id": block.get("id"),
@@ -187,6 +192,11 @@ async def stream_anthropic_messages(
                         raise RuntimeError("provider text delta is invalid")
                     text_parts.append(text)
                     yield encode_event("delta", {"delta": text})
+                elif delta.get("type") == "thinking_delta":
+                    if not isinstance(index, int) or index not in reasoning_blocks:
+                        raise RuntimeError("provider thinking delta has no matching block")
+                    reasoning_blocks[index] += thinking_text(delta)
+                    yield encode_event("reasoning", {"text": "\n".join(value for _, value in sorted(reasoning_blocks.items()) if value)})
                 elif delta.get("type") == "input_json_delta":
                     if not isinstance(index, int) or index not in tool_calls:
                         raise RuntimeError("provider tool call delta is invalid")
@@ -217,6 +227,7 @@ async def stream_anthropic_messages(
         parsed_calls.append(call)
     result_holder["result"] = {
         "text": "".join(text_parts),
+        "reasoningContent": "\n".join(reasoning_blocks[index] for index in sorted(reasoning_blocks) if reasoning_blocks[index]) or None,
         "toolCalls": parsed_calls,
         "usage": anthropic_usage(usage),
     }
@@ -224,6 +235,7 @@ async def stream_anthropic_messages(
 
 def parse_anthropic_message(payload: dict) -> dict:
     text_parts = []
+    reasoning_parts = []
     tool_calls = []
     for block in payload.get("content") or []:
         if not isinstance(block, dict):
@@ -233,6 +245,10 @@ def parse_anthropic_message(payload: dict) -> dict:
             if not isinstance(text, str):
                 raise RuntimeError("provider response text is invalid")
             text_parts.append(text)
+        elif block.get("type") == "thinking":
+            text = thinking_text(block)
+            if text:
+                reasoning_parts.append(text)
         elif block.get("type") == "tool_use":
             call_id = block.get("id")
             name = block.get("name")
@@ -242,9 +258,17 @@ def parse_anthropic_message(payload: dict) -> dict:
             tool_calls.append({"id": call_id, "name": name, "argsJson": json.dumps(arguments)})
     return {
         "text": "".join(text_parts),
+        "reasoningContent": "\n".join(reasoning_parts) or None,
         "toolCalls": tool_calls,
         "usage": anthropic_usage(payload.get("usage")),
     }
+
+
+def thinking_text(block: dict) -> str:
+    text = block.get("thinking")
+    if not isinstance(text, str):
+        raise RuntimeError("provider thinking text is invalid")
+    return text
 
 
 def anthropic_usage(raw_usage) -> dict:

@@ -80,6 +80,8 @@ def build_open_ai_responses_request(model: ModelConfig, request_body: dict) -> d
     thinking_mode = request_thinking_mode(model, request_body)
     if thinking_mode is not None:
         payload["reasoning"] = {"effort": thinking_mode}
+        if thinking_mode != "none":
+            payload["reasoning"]["summary"] = "auto"
     if instructions:
         payload["instructions"] = instructions
     tools = build_tools(prepared_prompt.get("toolDefinitions", []))
@@ -129,6 +131,7 @@ async def stream_open_ai_responses(
     text_parts = []
     tool_calls = []
     completed_response = None
+    reasoning_parts = {}
     client = await async_open_ai_responses_client(model)
     try:
         stream = await client.responses.create(
@@ -137,6 +140,16 @@ async def stream_open_ai_responses(
         async for raw_event in stream:
             event = model_payload(raw_event)
             event_type = event.get("type")
+            if event_type in {"response.reasoning_summary_text.delta", "response.reasoning_summary_text.done"}:
+                index = (event.get("output_index"), event.get("summary_index"))
+                if any(type(value) is not int or value < 0 for value in index):
+                    raise RuntimeError("provider reasoning summary indices are invalid")
+                delta = event_type.endswith(".delta")
+                text = event.get("delta" if delta else "text")
+                if not isinstance(text, str):
+                    raise RuntimeError("provider reasoning summary text is invalid")
+                reasoning_parts[index] = reasoning_parts.get(index, "") + text if delta else text
+                yield encode_event("reasoning", {"text": "\n".join(value for _, value in sorted(reasoning_parts.items()) if value)})
             if event_type == "response.output_text.delta":
                 delta = event.get("delta")
                 if not isinstance(delta, str):
@@ -149,6 +162,9 @@ async def stream_open_ai_responses(
                     tool_calls.append(parse_response_tool_call(item))
             elif event_type == "response.completed":
                 completed_response = event.get("response")
+                text = parse_open_ai_responses_response(completed_response)["reasoningContent"]
+                if text:
+                    yield encode_event("reasoning", {"text": text})
     except asyncio.CancelledError:
         raise
     except Exception as error:
@@ -163,6 +179,7 @@ async def stream_open_ai_responses(
     terminal = parse_open_ai_responses_response(completed_response)
     result_holder["result"] = {
         "text": "".join(text_parts) if text_parts else terminal["text"],
+        "reasoningContent": terminal["reasoningContent"],
         "toolCalls": tool_calls or terminal["toolCalls"],
         "usage": terminal["usage"],
     }
@@ -170,12 +187,22 @@ async def stream_open_ai_responses(
 
 def parse_open_ai_responses_response(payload: dict) -> dict:
     text_parts = []
+    reasoning_parts = []
     tool_calls = []
     for item in payload.get("output") or []:
         if not isinstance(item, dict):
             continue
         if item.get("type") == "function_call":
             tool_calls.append(parse_response_tool_call(item))
+        if item.get("type") == "reasoning":
+            for summary in item.get("summary") or []:
+                if not isinstance(summary, dict) or summary.get("type") != "summary_text":
+                    continue
+                text = summary.get("text")
+                if not isinstance(text, str):
+                    raise RuntimeError("provider reasoning summary text is invalid")
+                if text:
+                    reasoning_parts.append(text)
         if item.get("type") != "message":
             continue
         for content in item.get("content") or []:
@@ -189,6 +216,7 @@ def parse_open_ai_responses_response(payload: dict) -> dict:
         text_parts.append(output_text)
     return {
         "text": "".join(text_parts),
+        "reasoningContent": "\n".join(reasoning_parts) or None,
         "toolCalls": tool_calls,
         "usage": response_usage(payload.get("usage")),
     }

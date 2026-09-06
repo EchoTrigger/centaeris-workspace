@@ -1,13 +1,76 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import { WorkspaceChatController } from "../../src/chat/workspaceChatController.ts";
 
 import { createChatViewStore } from "../../src/chat/chatViewStore.ts";
-import { isAgentRunActive, validateHistoryPage } from "../../src/chat/sessionEvents.ts";
+import { isAgentRunActive, validateHistoryPage, applyStreamEntry } from "../../src/chat/sessionEvents.ts";
+import { reasoningPreview } from "../../src/chat/reasoningPreview.ts";
 import { buildAgentRunSections, formatPhaseElapsed, runningActivityPresentation, toolAtom } from "../../src/chat/agentRunPresentation.mjs";
-import { WorkspaceChatController } from "../../src/chat/workspaceChatController.ts";
+
+test("action icons follow the agreed cross-client vocabulary", () => {
+  for (const [tool, icon] of Object.entries({ read: "search", web_search: "globe", bash: "terminal", write: "edit", edit: "edit", agent: "agent", task_output: "listChecks", publish_artifact: "fileOutput" })) {
+    assert.equal(toolAtom(tool).icon, icon);
+  }
+});
+
+test("reasoning separates tool groups in sequence order with stable identities", () => {
+  const tool = (id, sequence) => ({ activityId: id, sequence, toolName: "read", status: "completed", call: {} });
+  const activities = [tool("c", 4), tool("a", 1), tool("b", 2)];
+  const reasoning = [
+    { id: "r2", sequence: 5, text: "Check", status: "done" },
+    { id: "r1", sequence: 3, text: "Inspect", status: "streaming" },
+  ];
+  const before = structuredClone({ activities, reasoning });
+  const sections = buildAgentRunSections([], activities, reasoning);
+  const items = sections.flatMap((section) => section.items);
+  assert.deepEqual(items.map((item) => item.kind), ["toolGroup", "reasoning", "toolGroup", "reasoning"]);
+  assert.deepEqual(items[0].group.activityIds, ["a", "b"]);
+  assert.deepEqual(items[2].group.activityIds, ["c"]);
+  const updated = buildAgentRunSections([], activities, reasoning.map((block) => ({ ...block, text: `${block.text} more`, status: "done" })));
+  assert.deepEqual(updated.flatMap((section) => section.items).map((item) => item.kind === "reasoning" ? item.block.id : item.group.activityIds[0]), ["a", "r1", "c", "r2"]);
+  assert.deepEqual({ activities, reasoning }, before);
+});
 
 const sessionId = "session_1";
 const agentRunId = "agent_run_1";
+
+test("live snapshots recover from history, ignore stale revisions and transition to one sealed block", () => {
+  const reasoning = JSON.parse(readFileSync(new URL("../../../../../centaeris/packages/core/tests/fixtures/live_reasoning.json", import.meta.url), "utf8"));
+  assert.equal(reasoningPreview(reasoning.text), "核对 input 保留 code 与 来源");
+  const live = (revision, text) => liveEntry(revision, text, null, { turnId: "turn_1", messageId: "answer", reasoning });
+  let view = validateHistoryPage(page(historyAgentRun([]))).agentRuns[0];
+  view = applyStreamEntry(view, live(2, "answer"));
+  assert.equal(view.reasoningBlocks[0].text, reasoning.text);
+  assert.equal(view.reasoningBlocks[0].status, "streaming");
+  assert.ok(view.reasoningBlocks[0].sequence < view.messages[0].sequence);
+  assert.equal(applyStreamEntry(view, live(1, "old")).messages[0].text, "answer");
+  const restored = validateHistoryPage(page(historyAgentRun([], { live: view.live }))).agentRuns[0];
+  assert.deepEqual(restored.reasoningBlocks, view.reasoningBlocks);
+  view = applyStreamEntry(view, committedEntry(event("reasoning_block", 3, { ...reasoning, status: "interrupted" })));
+  assert.equal(view.reasoningBlocks.length, 1);
+  assert.equal(view.reasoningBlocks[0].status, "interrupted");
+  view = applyStreamEntry(view, live(3, "answer"));
+  assert.equal(view.reasoningBlocks[0].status, "interrupted");
+  assert.equal(view.reasoningBlocks.length, 1);
+  const invalid = live(4, "answer"); invalid.item.reasoning = { ...reasoning, durationMs: 1 };
+  assert.throws(() => applyStreamEntry(view, invalid));
+});
+
+test("committed reasoning survives history reconstruction and separates tools", () => {
+  const payload = JSON.parse(readFileSync(new URL("../../../../../centaeris/packages/core/tests/fixtures/reasoning_block.json", import.meta.url), "utf8"));
+  const reasoning = event("reasoning_block", 3, payload);
+  const history = page(historyAgentRun([reasoning]));
+  const view = validateHistoryPage(history).agentRuns[0];
+  assert.deepEqual(view.reasoningBlocks, [{ id: payload.blockId, turnId: "turn_1", sequence: 3, text: " inspect\n", status: "done" }]);
+  assert.deepEqual(validateHistoryPage(history).agentRuns[0].reasoningBlocks, view.reasoningBlocks);
+  const liveView = validateHistoryPage(page(historyAgentRun([reasoning], { live: { messageId: "message:turn_1:assistant", turnId: "turn_1", afterSequence: 2, revision: 1, text: "Answer" } }))).agentRuns[0];
+  assert.ok(liveView.messages[0].sequence > liveView.reasoningBlocks[0].sequence, "the same call's live answer follows its committed reasoning");
+  assert.equal(validateHistoryPage(page(historyAgentRun([reasoning, event("reasoning_block", 4, reasoning.event.payload)]))).agentRuns[0].projectionError, "session_projection_invalid");
+  for (const payload of [{ ...reasoning.event.payload, status: "streaming" }, { ...reasoning.event.payload, durationMs: 10 }, { ...reasoning.event.payload, blockId: "other" }]) {
+    assert.equal(validateHistoryPage(page(historyAgentRun([event("reasoning_block", 3, payload)]))).agentRuns[0].projectionError, "session_projection_invalid");
+  }
+});
 
 function event(type, sequence, payload, turnId = "turn_1") {
   return {
@@ -96,8 +159,8 @@ test("history keeps assistant, tools, and final answer in source order", () => {
 
   const sections = buildAgentRunSections(agentRun.messages, agentRun.activities);
   assert.deepEqual(sections.map((section) => section.turnId), ["turn_1", "turn_2"]);
-  assert.equal(sections[0].toolGroups[0].presentation.title, "Read files · Edited files");
-  assert.equal(sections[0].toolGroups[0].presentation.icon, "file");
+  assert.equal(sections[0].items[0].group.presentation.title, "Read files · Edited files");
+  assert.equal(sections[0].items[0].group.presentation.icon, "search");
   assert.deepEqual(agentRun.activities.map((activity) => activity.toolName), ["read", "edit"]);
   assert.equal(Object.hasOwn(agentRun.activities[0], "action"), false);
   assert.equal(agentRun.activities[0].call.normalizedInput.path, "a.txt");
@@ -116,15 +179,15 @@ test("tool projection keeps one group while a tool is running", () => {
 
   const sections = buildAgentRunSections(agentRun.messages, agentRun.activities);
   assert.equal(sections.length, 1);
-  assert.equal(sections[0].toolGroups[0].presentation.title, "Read files · Ran commands");
-  assert.equal(sections[0].toolGroups[0].status, "running");
-  assert.equal(sections[0].toolGroups[0].activities.length, 2);
+  assert.equal(sections[0].items[0].group.presentation.title, "Read files · Ran commands");
+  assert.equal(sections[0].items[0].group.status, "running");
+  assert.equal(sections[0].items[0].group.activities.length, 2);
   assert.equal(sections[0].sectionId, buildAgentRunSections(agentRun.messages, agentRun.activities.slice(0, 1))[0].sectionId);
-  assert.deepEqual(runningActivityPresentation(agentRun.activities[1]), { icon: "code", label: "Running a command" });
+  assert.deepEqual(runningActivityPresentation(agentRun.activities[1]), { icon: "terminal", label: "Running a command" });
   assert.deepEqual(runningActivityPresentation({
     ...agentRun.activities[1],
     call: { normalizedInput: { command: "pwd", description: "Inspect workspace" }, displayTarget: "Inspect workspace" },
-  }), { icon: "code", label: "Inspect workspace" });
+  }), { icon: "terminal", label: "Inspect workspace" });
   assert.throws(() => toolAtom("banana"), /unsupported tool activity: banana/);
 });
 
@@ -172,10 +235,10 @@ test("contracted dynamic tools use generic presentation without weakening built-
     }),
   ]))).agentRuns[0];
 
-  const group = buildAgentRunSections(agentRun.messages, agentRun.activities)[0].toolGroups[0];
+  const group = buildAgentRunSections(agentRun.messages, agentRun.activities)[0].items[0].group;
   assert.equal(group.presentation.title, "Used tools");
   assert.deepEqual(runningActivityPresentation(agentRun.activities[0]), {
-    icon: "code",
+    icon: "plug",
     label: "Using 上海市中小学手机管理规范",
   });
   assert.throws(() => runningActivityPresentation({
@@ -238,12 +301,12 @@ test("display state machine groups only consecutive tools between assistant text
   ]))).agentRuns[0];
 
   const sections = buildAgentRunSections(agentRun.messages, agentRun.activities);
-  assert.deepEqual(sections.map((section) => [section.message?.text || null, section.toolGroups.map((group) => group.activities.length)]), [
+  assert.deepEqual(sections.map((section) => [section.message?.text || null, section.items.map((item) => item.group.activities.length)]), [
     [null, [2]],
     ["先看完这两处。", [1]],
     ["完成。", []],
   ]);
-  assert.equal(sections[1].toolGroups[0].presentation.title, "Ran a command");
+  assert.equal(sections[1].items[0].group.presentation.title, "Ran a command");
 });
 
 test("all settled supported tool activity remains in history", () => {
@@ -251,13 +314,13 @@ test("all settled supported tool activity remains in history", () => {
     activityId: "activity:publish_1", callId: "publish_1", toolName: "publish_artifact",
     turnId: "turn_1", sequence: 1, status: "completed", call: { normalizedInput: { path: "report.md" } }, result: {},
   };
-  assert.equal(buildAgentRunSections([], [publish])[0].toolGroups[0].presentation.title, "Published artifacts");
+  assert.equal(buildAgentRunSections([], [publish])[0].items[0].group.presentation.title, "Published artifacts");
 
   const failedRead = {
     activityId: "activity:read_1", callId: "read_1", toolName: "read",
     turnId: "turn_3", sequence: 3, status: "failed", call: { normalizedInput: { path: "banana" } }, result: {},
   };
-  assert.equal(buildAgentRunSections([], [failedRead])[0].toolGroups[0].presentation.title, "Read files");
+  assert.equal(buildAgentRunSections([], [failedRead])[0].items[0].group.presentation.title, "Read files");
 });
 
 test("committed compaction restores one lightweight timeline marker", () => {

@@ -1,4 +1,5 @@
 @import "./assets/fonts/noto-sans-cjk-sc.css";
+@import "./styles/typography.css";
 @import "./shell/shell.css";
 
 @font-face {
@@ -19,9 +20,6 @@
 
 :root {
   color-scheme: light;
-  --font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
-  --font-content: "Noto Sans CJK SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
-  --font-mono: "Google Sans Code", "Noto Sans CJK SC", "Cascadia Code", "SFMono-Regular", Consolas, monospace;
   --surface-color: #fcfdfd;
   --surface-variant: #f5f7f7;
   --surface-container: #f0f3f3;
@@ -385,24 +383,24 @@ button.attachmentCardContent:hover { border-color: #c4cfdd; background: #f5f8fb;
 .workspaceUserEditActions button:disabled { opacity: .45; }
 .workspaceAnswer { position: relative; display: grid; min-width: 0; gap: 12px; }
 .workspaceProcessSection { display: grid; min-width: 0; gap: 7px; }
-.workspaceStageSummary .markdownContent { color: #555c64; font-size: 14px; }
+.workspaceStageSummary .markdownContent { color: #555c64; font-size: var(--font-size-stage); }
 .workspaceAnswerText { font-size: 14px; line-height: 1.68; white-space: pre-wrap; }
 .workspaceAnswerText.isStreaming { overflow-wrap: anywhere; }
-.markdownContent { min-width: 0; color: var(--text); font-size: 15px; line-height: 1.72; overflow-wrap: anywhere; }
+.markdownContent { min-width: 0; color: var(--text); font-size: var(--font-size-chat); line-height: var(--line-height-chat); overflow-wrap: anywhere; }
 .markdownContent > :first-child { margin-top: 0; }
 .markdownContent > :last-child { margin-bottom: 0; }
 .markdownContent p { margin: 0 0 13px; white-space: pre-wrap; }
-.markdownContent h1, .markdownContent h2, .markdownContent h3 { margin: 22px 0 9px; line-height: 1.35; letter-spacing: -.02em; }
-.markdownContent h1 { font-size: 22px; }
-.markdownContent h2 { font-size: 18px; }
-.markdownContent h3 { font-size: 16px; }
+.markdownContent h1, .markdownContent h2, .markdownContent h3 { margin: 22px 0 9px; font-weight: 650; line-height: 1.35; letter-spacing: 0; }
+.markdownContent h1 { font-size: var(--font-size-chat-h1); }
+.markdownContent h2 { font-size: var(--font-size-chat-h2); }
+.markdownContent h3 { font-size: var(--font-size-chat-h3); }
 .markdownContent ul, .markdownContent ol { margin: 7px 0 15px; padding-left: 24px; }
 .markdownContent li + li { margin-top: 4px; }
 .markdownContent a { color: #315f96; text-underline-offset: 3px; }
 .markdownContent { font-family: var(--font-content); }
-.markdownContent code { border-radius: 5px; background: #f2f4f7; padding: 2px 5px; font-family: var(--font-mono); font-size: .9em; line-height: 1.5; }
+.markdownContent code { border-radius: 5px; background: #f2f4f7; padding: 2px 5px; font-family: var(--font-mono); font-size: var(--font-size-inline-code); line-height: 1.5; }
 .markdownCode { max-width: 100%; overflow: auto; border: 1px solid var(--border); border-radius: 10px; background: #f7f9fb; padding: 13px 14px; }
-.markdownCode code { background: transparent; padding: 0; }
+.markdownCode code { background: transparent; padding: 0; font-size: var(--font-size-code); line-height: var(--line-height-code); }
 .markdownTable { max-width: 100%; margin: 12px 0 16px; overflow: auto; border: 1px solid var(--border); border-radius: 10px; }
 .markdownTable table { width: 100%; border-collapse: collapse; }
 .markdownTable th, .markdownTable td { border-bottom: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
@@ -424,6 +422,16 @@ button.attachmentCardContent:hover { border-color: #c4cfdd; background: #f5f8fb;
 .workspaceLiveStatusElapsed { font-variant-numeric: tabular-nums; }
 .workspaceComposerIconButton .statusIcon, .workspaceSendButton .statusIcon { animation: quietPulse 1500ms var(--motion-emphasized) infinite alternate; }
 .workspaceActivityGroups { display: grid; width: 100%; gap: 4px; }
+.workspaceReasoning { min-width: 0; }
+.workspaceReasoning > .workspaceActivityGroup { width: 100%; }
+.workspaceReasoning > .workspaceActivityGroup > .reasoningPreview { display: flex; text-overflow: clip; }
+.workspaceReasoning > .workspaceActivityGroup { color: var(--reasoning-label); font-size: var(--font-size-process); }
+.workspaceReasoningBody { margin: 8px 0 8px 7px; padding-left: 16px; border-left: 1px solid var(--outline-variant); overflow-wrap: anywhere; max-height: min(360px, 50vh); overflow: auto; scrollbar-gutter: stable; }
+.workspaceReasoningBody, .workspaceReasoningBody * { scrollbar-width: thin; scrollbar-color: var(--reasoning-scroll-thumb) transparent; }
+.workspaceReasoningBody:focus-visible { outline: 1px solid var(--outline); outline-offset: 3px; }
+.workspaceReasoningBody .markdownContent { color: var(--reasoning-text); }
+.workspaceReasoningBody .markdownContent :is(code, a) { color: inherit; }
+.workspaceReasoning > button:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
 .workspaceActivityGroupRecord { display: grid; min-width: 0; gap: 5px; }
 .workspaceActivityGroup { display: inline-flex; width: fit-content; max-width: 100%; align-items: center; gap: 6px; border: 0; background: transparent; color: #777d84; padding: 2px 0; font-size: 12px; text-align: left; }
 .workspaceActivityGroup svg { width: 14px; height: 14px; flex: none; }

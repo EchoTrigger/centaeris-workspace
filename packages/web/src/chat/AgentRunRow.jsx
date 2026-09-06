@@ -1,12 +1,13 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Bot, Check, ChevronDown, Code2, Copy, FileText, Pencil, Search } from "lucide-react";
+import { Bot, Check, ChevronDown, Copy, FileOutput, FileText, Globe, ListChecks, Pencil, Plug, Search, SquareTerminal } from "lucide-react";
 import { useActivityDisclosures, useAgentRun } from "./chatStoreHooks";
 import { isAgentRunActive } from "./sessionEvents";
 import { activityTarget, activityToolAtom, buildAgentRunSections, formatPhaseElapsed, referenceCitations, runningActivityPresentation } from "./agentRunPresentation.mjs";
 import { MarkdownContent, StreamingMarkdownContent } from "./MarkdownContent";
 import { AttachmentCard } from "./AttachmentCard";
+import { ReasoningBlock } from "./ReasoningBlock";
 
-const TOOL_ICONS = { agent: Bot, code: Code2, edit: Pencil, file: FileText, search: Search };
+const TOOL_ICONS = { agent: Bot, terminal: SquareTerminal, edit: Pencil, search: Search, globe: Globe, listChecks: ListChecks, plug: Plug, fileOutput: FileOutput };
 
 function operationLabel(operation) {
   return activityToolAtom(operation.toolName, operation.providerId).title;
@@ -188,11 +189,11 @@ export const AgentRunRow = memo(function AgentRunRow({
   const assetByInputRef = useMemo(() => new Map((assets || []).map((asset) => [asset.id, asset])), [assets]);
   const sections = useMemo(() => {
     try {
-      return buildAgentRunSections(agentRun?.messages || [], agentRun?.activities || []);
+      return buildAgentRunSections(agentRun?.messages || [], agentRun?.activities || [], agentRun?.reasoningBlocks || []);
     } catch {
       return null;
     }
-  }, [agentRun?.activities, agentRun?.messages]);
+  }, [agentRun?.activities, agentRun?.messages, agentRun?.reasoningBlocks]);
   const references = useMemo(() => referenceCitations(agentRun?.citations || []), [agentRun?.citations]);
   useLayoutEffect(() => {
     if (!hasAgentRun) return undefined;
@@ -216,8 +217,10 @@ export const AgentRunRow = memo(function AgentRunRow({
     ? { label: "Reconnecting" }
     : !projectionFailed && runningActivity ? runningActivityPresentation(runningActivity) : { label: "Thinking" };
   const LiveIcon = TOOL_ICONS[livePresentation.icon];
+  const hasLiveReasoning = agentRun.reasoningBlocks.some((block) => block.status === "streaming");
   const showLiveStatus = active
     && userMessages.length > 0
+    && (!hasLiveReasoning || agentRun.connection === "reconnecting" || Boolean(runningActivity))
     && (!assistantIsOutputting || agentRun.connection === "reconnecting" || Boolean(runningActivity));
   const toggleDisclosure = (identity) => store.toggleActivityDisclosure(agentRunId, identity);
 
@@ -234,8 +237,8 @@ export const AgentRunRow = memo(function AgentRunRow({
   function renderSection(section) {
     const message = section.message;
     const messageVisible = message?.text && (agentRun.status !== "failed" || message !== assistant || partialAnswer);
-    const toolGroups = section.toolGroups;
-    if (!messageVisible && !toolGroups.length) return null;
+    const items = section.items;
+    if (!messageVisible && !items.length) return null;
     const sealed = message && (message.phase !== "active" || !active);
     const smoothMarkdown = message && (!sealed || streamedMessageIdsRef.current.has(message.messageId));
     const answerMarkdown = !message
@@ -256,7 +259,12 @@ export const AgentRunRow = memo(function AgentRunRow({
           </div>
         ) : <div className="workspaceAnswerText isStreaming">{answerMarkdown}</div> : null}
         {messageVisible && sealed && message.phase === "final" ? <div className={`workspaceAssistantMessageMeta ${copiedMessageId === message.messageId ? "isCopied" : ""}`}><time>{formatMessageTime(message.createdAtMs)}</time><button type="button" onClick={() => void copyMessage(message)} aria-label="复制回答" title="复制回答">{copiedMessageId === message.messageId ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}</button></div> : null}
-        {toolGroups.length ? <div className="workspaceActivityGroups" aria-label="Tool activity">{toolGroups.map((group) => {
+        {items.length ? <div className="workspaceActivityGroups" aria-label="过程记录">{items.map((item) => {
+          if (item.kind === "reasoning") {
+            const identity = `reasoning:${item.block.id}`;
+            return <ReasoningBlock block={item.block} expanded={expandedActivities.has(identity)} onToggle={() => toggleDisclosure(identity)} key={identity} />;
+          }
+          const group = item.group;
           const groupId = group.activityIds[0];
           return <ActivityGroup group={group} expanded={expandedActivities.has(groupId)} onToggle={() => toggleDisclosure(groupId)} expandedOperations={expandedActivities} onToggleOperation={toggleDisclosure} key={groupId} />;
         })}</div> : null}

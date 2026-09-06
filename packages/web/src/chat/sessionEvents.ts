@@ -5,6 +5,15 @@ import type {
   UnknownRecord,
 } from "./streamTypes.ts";
 
+// Frontend view data, separate from model-visible messages and wire schemas.
+export type ReasoningBlockView = {
+  id: string;
+  turnId?: string;
+  sequence: number;
+  text: string;
+  status: "streaming" | "done" | "interrupted";
+};
+
 export type AgentRunStatus =
   | "queued"
   | "running"
@@ -24,6 +33,7 @@ export type StoredSessionEvent = {
 };
 
 export type LiveAssistant = {
+  reasoning?: { blockId: string; requestId: string; text: string } | null;
   afterSequence: number;
   messageId: string;
   revision: number;
@@ -83,6 +93,7 @@ type RawAgentRun = UnknownRecord & {
 };
 
 type AgentRunViewState = RawAgentRun & {
+  reasoningBlocks: ReasoningBlockView[];
   messages: ChatMessage[];
   activities: ToolActivity[];
   citations: Citation[];
@@ -118,6 +129,7 @@ const VISIBLE_EVENT_TYPES = new Set([
   "tool_result", "phase_event", "external_evidence_ref", "citation_recorded",
   "artifact_published", "compaction", "tombstone", "agent_run_completed", "agent_run_failed",
   "agent_run_interrupted",
+  "reasoning_block",
 ]);
 const TERMINAL_EVENT_TYPES = new Set(["agent_run_completed", "agent_run_failed", "agent_run_interrupted"]);
 const STREAM_ITEM_FIELDS = {
@@ -260,6 +272,17 @@ function applySessionEvent(
   sequence: number,
 ): AgentRunViewState {
   const payload = event.payload;
+  if (event.type === "reasoning_block") {
+    if (!hasExactFields(payload, ["blockId", "requestId", "text", "status"])) throw new Error("reasoning block fields mismatch");
+    requireString(event.turnId, "reasoning turnId");
+    requireString(payload.requestId, "reasoning requestId");
+    requireString(payload.text, "reasoning text");
+    if (payload.blockId !== `reasoning:${payload.requestId}` || (payload.status !== "done" && payload.status !== "interrupted")) throw new Error("reasoning block identity or status is invalid");
+    if (view.reasoningBlocks.some((block) => block.id === payload.blockId)) throw new Error("reasoning block is already sealed");
+    return { ...view, reasoningBlocks: [...view.reasoningBlocks, {
+      id: payload.blockId as string, turnId: event.turnId, sequence, text: payload.text, status: payload.status,
+    }] };
+  }
   if (event.type === "agent_run_started") {
     return { ...view, startedAtMs: event.createdAtMs };
   }
@@ -445,9 +468,9 @@ function applyLive(
   view: AgentRunViewState,
   live: unknown,
 ): AgentRunViewState {
-  if (live === null) return view;
+  if (live === null || !isAgentRunActive(view)) return view;
   requireObject(live, "live assistant");
-  if (!hasExactFields(live, ["afterSequence", "messageId", "revision", "text", "turnId"])) throw new Error("live assistant fields mismatch");
+  if (!hasExactFields(live, ["afterSequence", "messageId", "revision", "text", "turnId", ...(Object.hasOwn(live, "reasoning") ? ["reasoning"] : [])])) throw new Error("live assistant fields mismatch");
   for (const field of ["messageId", "turnId"]) requireString(live[field], `live ${field}`);
   requireString(live.text, "live text", true);
   if (!isInteger(live.afterSequence) || live.afterSequence < 0 || !isInteger(live.revision) || live.revision <= 0) {
@@ -463,22 +486,43 @@ function applyLive(
   const barrier = Object.hasOwn(view.overlayBarrierByTurnId, turnId)
     ? view.overlayBarrierByTurnId[turnId]
     : 0;
-  const liveAssistant: LiveAssistant = { messageId, turnId, text, afterSequence, revision };
+  const reasoning = validateLiveReasoning(live.reasoning);
+  const liveAssistant: LiveAssistant = { messageId, turnId, text, afterSequence, revision, ...(reasoning !== undefined ? { reasoning } : {}) };
   if (afterSequence < barrier) return view;
+  if (reasoning?.text.trim()) {
+    const existing = view.reasoningBlocks.find((block) => block.id === reasoning.blockId);
+    if (existing && existing.turnId !== turnId) throw new Error("live reasoning turn identity conflict");
+    if (!existing) {
+      const anchor = view.reasoningBlocks.reduce((value, block) => block.turnId === turnId ? Math.max(value, block.sequence) : value, afterSequence);
+      view = { ...view, reasoningBlocks: [...view.reasoningBlocks, { id: reasoning.blockId, turnId, sequence: anchor + 0.25, text: reasoning.text, status: "streaming" }] };
+    }
+  }
   if (!text) return { ...view, live: liveAssistant };
   const messages = view.messages.filter((message) => message.messageId !== messageId);
+  const answerAnchor = view.reasoningBlocks.reduce((anchor, block) => block.turnId === turnId ? Math.max(anchor, block.sequence) : anchor, afterSequence);
   messages.push({
-    messageId, turnId, sequence: afterSequence + 0.5,
+    messageId, turnId, sequence: answerAnchor + 0.5,
     role: "assistant", phase: "active", status: "streaming", text,
     attachments: [], artifacts: [],
   });
   return { ...view, messages, live: liveAssistant };
 }
 
+function validateLiveReasoning(value: unknown): LiveAssistant["reasoning"] {
+  if (value === undefined || value === null) return value;
+  requireObject(value, "live reasoning");
+  if (!hasExactFields(value, ["blockId", "requestId", "text"])) throw new Error("live reasoning fields mismatch");
+  requireString(value.requestId, "live reasoning requestId");
+  requireString(value.text, "live reasoning text", true);
+  if (value.blockId !== `reasoning:${value.requestId}`) throw new Error("live reasoning identity mismatch");
+  return { blockId: value.blockId as string, requestId: value.requestId, text: value.text };
+}
+
 function projectAgentRun(agentRun: RawAgentRun): ProjectedAgentRun {
   const initialStartedAtMs = Date.parse(agentRun.startedAt || agentRun.createdAt || "");
   let view: AgentRunViewState = {
     ...agentRun,
+    reasoningBlocks: [],
     messages: [],
     activities: [],
     citations: [],
@@ -558,6 +602,7 @@ function quarantineAgentRun(
     events: [],
     messages: [],
     activities: [],
+    reasoningBlocks: [],
     citations: [],
     artifacts: [],
     agentWaits: {},
@@ -604,7 +649,7 @@ function validateStreamItem(item: unknown, agentRunId: string): StreamItem {
   if (item.kind !== "committed" && item.kind !== "live") {
     throw new Error("session stream item fields or binding are invalid");
   }
-  const fields = STREAM_ITEM_FIELDS[item.kind];
+  const fields = [...STREAM_ITEM_FIELDS[item.kind], ...(item.kind === "live" && Object.hasOwn(item, "reasoning") ? ["reasoning"] : [])];
   if (!fields || !hasExactFields(item, fields) || item.schema !== "session.stream.item.v1" || item.agentRunId !== agentRunId) {
     throw new Error("session stream item fields or binding are invalid");
   }
@@ -616,6 +661,7 @@ function validateStreamItem(item: unknown, agentRunId: string): StreamItem {
     if (!isInteger(item.afterSequence) || item.afterSequence < 0 || !isInteger(item.revision) || item.revision <= 0) throw new Error("live stream sequence is invalid");
     for (const field of ["messageId", "turnId"]) requireString(item[field], `live ${field}`);
     requireString(item.text, "live text", true);
+    validateLiveReasoning(item.reasoning);
   }
   return item as StreamItem;
 }
@@ -695,6 +741,7 @@ export function applyStreamEntry(
       afterSequence: item.afterSequence,
       revision: item.revision,
       text: item.text,
+      ...(item.reasoning !== undefined ? { reasoning: item.reasoning } : {}),
     },
     streamCursor: cursor || agentRun.streamCursor,
   });

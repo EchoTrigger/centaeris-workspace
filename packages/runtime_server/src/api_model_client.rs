@@ -294,6 +294,28 @@ impl ApiModelClient {
                     ));
                 }
                 match event.get("type").and_then(serde_json::Value::as_str) {
+                    Some("reasoning") => {
+                        if event.as_object().is_none_or(|fields| fields.len() != 3) {
+                            return Err(ModelClientError::new(
+                                ModelClientErrorKind::ProviderResponseInterrupted,
+                                "api reasoning fields mismatch",
+                                false,
+                            ));
+                        }
+                        let text = event
+                            .get("text")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| {
+                                ModelClientError::new(
+                                    ModelClientErrorKind::ProviderResponseInterrupted,
+                                    "api reasoning text is invalid",
+                                    false,
+                                )
+                            })?;
+                        sink(ModelClientStreamEvent::Reasoning {
+                            text: text.to_string(),
+                        });
+                    }
                     Some("delta") => {
                         let delta = event
                             .get("delta")
@@ -311,6 +333,10 @@ impl ApiModelClient {
                         });
                     }
                     Some("result") => {
+                        let mut event = event;
+                        let fields = event.as_object_mut().expect("validated result object");
+                        fields.remove("schema");
+                        fields.remove("type");
                         result = Some(serde_json::from_value::<ModelRunResponse>(event).map_err(
                             |error| {
                                 ModelClientError::new(
@@ -374,8 +400,13 @@ impl ApiModelClient {
         let max_retries = request.session_config.max_retries;
         for retry in 0..=max_retries {
             let mut attempt_has_visible_content = false;
+            let mut attempt_has_reasoning = false;
             let result = {
                 let mut attempt_sink = |event| {
+                    if matches!(&event, ModelClientStreamEvent::Reasoning { text } if !text.is_empty())
+                    {
+                        attempt_has_reasoning = true;
+                    }
                     if matches!(&event, ModelClientStreamEvent::Token { content } if !content.is_empty())
                     {
                         attempt_has_visible_content = true;
@@ -400,6 +431,11 @@ impl ApiModelClient {
                     if attempt_has_visible_content {
                         sink(ModelClientStreamEvent::ReplaceContent {
                             content: String::new(),
+                        });
+                    }
+                    if attempt_has_reasoning {
+                        sink(ModelClientStreamEvent::Reasoning {
+                            text: String::new(),
                         });
                     }
                     sink(ModelClientStreamEvent::Status {
@@ -471,6 +507,7 @@ fn model_response(payload: ModelRunResponse) -> Result<ModelClientResponse, Mode
         generate_result: GenerateResult {
             content: payload.text,
             tool_calls,
+            continuation_reasoning_content: payload.continuation_reasoning_content,
             reasoning_content: payload.reasoning_content,
             input_tokens: payload.usage.as_ref().and_then(|usage| usage.prompt_tokens),
             total_tokens: payload.usage.as_ref().and_then(|usage| usage.total_tokens),
@@ -504,10 +541,11 @@ struct ModelRunRequest<'a> {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ModelRunResponse {
     text: String,
     reasoning_content: Option<String>,
+    continuation_reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Vec<ModelRunToolCall>,
     usage: Option<ModelRunUsage>,
@@ -729,6 +767,7 @@ mod tests {
     fn model_response_rejects_malformed_tool_arguments_before_commit() {
         let error = model_response(ModelRunResponse {
             text: String::new(),
+            continuation_reasoning_content: None,
             reasoning_content: None,
             tool_calls: vec![ModelRunToolCall {
                 id: "call-1".to_string(),
@@ -762,6 +801,43 @@ mod tests {
             response.generate_result.reasoning_content.as_deref(),
             Some("inspect request")
         );
+        assert!(response
+            .generate_result
+            .continuation_reasoning_content
+            .is_none());
+        let payload = serde_json::from_value::<ModelRunResponse>(serde_json::json!({
+            "text": "answer", "reasoningContent": "display", "continuationReasoningContent": "provider continuation", "toolCalls": [], "usage": null
+        })).unwrap();
+        let result = model_response(payload).unwrap().generate_result;
+        assert_eq!(result.reasoning_content.as_deref(), Some("display"));
+        assert_eq!(
+            result.continuation_reasoning_content.as_deref(),
+            Some("provider continuation")
+        );
+    }
+
+    #[test]
+    fn model_response_rejects_reasoning_field_aliases_and_wrong_types() {
+        for field in [
+            "reasoning_content",
+            "continuation_reasoning_content",
+            "unknown",
+        ] {
+            let mut payload = serde_json::json!({"text":"done", "toolCalls":[], "usage":null});
+            payload[field] = serde_json::json!("not canonical");
+            assert!(
+                serde_json::from_value::<ModelRunResponse>(payload).is_err(),
+                "accepted {field}"
+            );
+        }
+        for field in ["reasoningContent", "continuationReasoningContent"] {
+            let mut payload = serde_json::json!({"text":"done", "toolCalls":[], "usage":null});
+            payload[field] = serde_json::json!(42);
+            assert!(
+                serde_json::from_value::<ModelRunResponse>(payload).is_err(),
+                "accepted wrong type for {field}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -773,7 +849,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut first, _) = listener.accept().await.expect("first request");
             read_http_request(&mut first).await;
-            let partial = b"data: {\"schema\":\"api.model.stream.v1\",\"type\":\"delta\",\"delta\":\"partial\"}\n\n";
+            let partial = b"data: {\"schema\":\"api.model.stream.v1\",\"type\":\"reasoning\",\"text\":\"first attempt\"}\n\ndata: {\"schema\":\"api.model.stream.v1\",\"type\":\"delta\",\"delta\":\"partial\"}\n\n";
             first
                 .write_all(
                     b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
@@ -791,6 +867,7 @@ mod tests {
             let (mut second, _) = listener.accept().await.expect("retry request");
             read_http_request(&mut second).await;
             let body = concat!(
+                "data: {\"schema\":\"api.model.stream.v1\",\"type\":\"reasoning\",\"text\":\"second attempt\"}\n\n",
                 "data: {\"schema\":\"api.model.stream.v1\",\"type\":\"delta\",\"delta\":\"recovered\"}\n\n",
                 "data: {\"schema\":\"api.model.stream.v1\",\"type\":\"result\",\"text\":\"recovered\",\"reasoningContent\":null,\"toolCalls\":[],\"usage\":null}\n\n"
             );
@@ -819,6 +896,18 @@ mod tests {
         server.await.expect("test server");
 
         assert_eq!(response.provider_attempts, 2);
+        let reasoning: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ModelClientStreamEvent::Reasoning { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasoning, ["first attempt", "", "second attempt"]);
+        let events: Vec<_> = events
+            .iter()
+            .filter(|event| !matches!(event, ModelClientStreamEvent::Reasoning { .. }))
+            .collect();
         assert!(
             matches!(&events[0], ModelClientStreamEvent::Token { content } if content == "partial")
         );

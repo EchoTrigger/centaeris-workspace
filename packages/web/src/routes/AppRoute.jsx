@@ -747,6 +747,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       model: currentModel,
       messages: [{ messageId: `message:${pendingTurnId}:user`, turnId: pendingTurnId, sequence: 0, role: "user", phase: "user", status: "done", text, createdAtMs: Date.now(), attachments: messageAttachments, artifacts: [], entryMotion: targetSessionId === "new" ? "conversation" : "" }],
       activities: [],
+      reasoningBlocks: [],
       citations: [],
       startedAtMs: Date.now(),
       finishedAtMs: null,

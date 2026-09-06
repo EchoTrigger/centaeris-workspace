@@ -95,6 +95,7 @@ function displayPhaseKey(agentRun: ProjectedAgentRun) {
 function cloneAgentRun(agentRun: ProjectedAgentRun): ProjectedAgentRun {
   return {
     ...agentRun,
+    reasoningBlocks: agentRun.reasoningBlocks.map((block) => ({ ...block })),
     events: (agentRun.events || []).map((stored) => ({ ...stored, event: { ...stored.event, payload: { ...stored.event.payload } } })),
     eventIds: [...(agentRun.eventIds || [])],
     live: agentRun.live ? { ...agentRun.live } : null,
