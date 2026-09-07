@@ -23,8 +23,17 @@ JOB_WAIT_FAILURE_BACKOFF_SECONDS = 1
 OUTBOX_POLL_INTERVAL_SECONDS = 1
 RECONCILE_INTERVAL_SECONDS = 5
 WORKER_JOB_KINDS = ("agent_run.lifecycle", "knowledge.process", "worker.noop")
-WORKER_SLOT_COUNT = 2
+CONTROL_HTTP_TIMEOUT_SECONDS = int(os.environ.get("RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS", "5"))
+if not 1 <= CONTROL_HTTP_TIMEOUT_SECONDS <= 1_000_000:
+    raise ValueError("RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS must be between 1 and 1000000")
+try:
+    WORKER_SLOT_COUNT = int(os.environ.get("WORKER_SLOT_COUNT", "8"))
+except ValueError:
+    raise ValueError("WORKER_SLOT_COUNT must be an integer between 1 and 16") from None
+if not 1 <= WORKER_SLOT_COUNT <= 16:
+    raise ValueError("WORKER_SLOT_COUNT must be an integer between 1 and 16")
 AGENT_RUN_WAITING_TRANSITION_REASONS = {
+    "execution_recovery_checkpoint_committed",
     "question_wait",
     "runtime_job_wait",
     "session_workspace_commit_unavailable",
@@ -54,6 +63,8 @@ def runtime_request(path, body=None):
         "X-Internal-Token",
         INTERNAL_API_TOKEN,
         "runtime_job_request_failed",
+        timeout=(CONTROL_HTTP_TIMEOUT_SECONDS
+                 if path == "/internal/jobs/heartbeat" or body is None else 10),
     )
 
 
@@ -152,6 +163,7 @@ def json_request(url, body, token_header, token, default_reason, timeout=10):
         raise RuntimeError(reason) from error
     except (
         urllib.error.URLError,
+        TimeoutError,
         http.client.RemoteDisconnected,
         json.JSONDecodeError,
     ) as error:
@@ -416,12 +428,19 @@ def execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
     if (
         not isinstance(result, dict)
         or set(result)
-        != {"schema", "agentRunId", "disposition", "terminalState", "transitionReason"}
+        != ({"schema", "agentRunId", "disposition", "terminalState", "transitionReason"}
+            | ({"retryAtMs"} if result.get("transitionReason") == "execution_recovery_checkpoint_committed" else set()))
         or result.get("schema") != "runtime.agent_run.step.result.v1"
         or result.get("agentRunId") != agent_run_id
         or result.get("disposition") not in {"waiting", "terminal"}
         or not isinstance(result.get("transitionReason"), str)
         or not result["transitionReason"]
+    ):
+        raise RuntimeError("agent_run_step_response_invalid")
+    if result["transitionReason"] == "execution_recovery_checkpoint_committed" and (
+        result["disposition"] != "waiting"
+        or type(result.get("retryAtMs")) is not int
+        or result["retryAtMs"] < 0
     ):
         raise RuntimeError("agent_run_step_response_invalid")
     if result["disposition"] == "waiting":
@@ -433,12 +452,18 @@ def execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
         transition_agent_run(agent_run_id, "running", result["transitionReason"])
         require_healthy_lease()
         yielded_at_ms = now_ms()
+        if result["transitionReason"] == "execution_recovery_checkpoint_committed":
+            # Runtime derives this deadline from durable recovery facts. Waiting
+            # releases the execution slot; retries never sleep inside a worker.
+            next_run_at_ms = max(yielded_at_ms, result["retryAtMs"])
+        elif result["transitionReason"] == "runtime_job_wait":
+            next_run_at_ms = yielded_at_ms + RUNTIME_JOB_WAIT_RECHECK_MS
+        else:
+            next_run_at_ms = yielded_at_ms + AGENT_RUN_LIFECYCLE_RECHECK_MS
         yield_job(
             job["jobId"],
             lease_owner,
-            yielded_at_ms + RUNTIME_JOB_WAIT_RECHECK_MS
-            if result["transitionReason"] == "runtime_job_wait"
-            else yielded_at_ms + AGENT_RUN_LIFECYCLE_RECHECK_MS,
+            next_run_at_ms,
             result["transitionReason"],
         )
         return False
@@ -644,7 +669,39 @@ def execute_next_job(slot_index):
     return False
 
 
-def dispatch_terminal_once():
+def waiter_page_next(response, disposition, after):
+    if (
+        not isinstance(response, dict)
+        or set(response) != {"disposition", "checked", "waiters", "next"}
+        or response["disposition"] not in disposition
+        or type(response["checked"]) is not int
+        or not 0 <= response["checked"] <= 256
+        or not isinstance(response["waiters"], list)
+    ):
+        raise RuntimeError("runtime_job_waiter_page_invalid")
+    cursor = response["next"]
+    if cursor is not None and (
+        not isinstance(cursor, dict)
+        or set(cursor) != {"checkpointId", "toolCallId"}
+        or any(not isinstance(value, str) or not value.strip() for value in cursor.values())
+        or cursor == after
+        or response["checked"] == 0
+    ):
+        raise RuntimeError("runtime_job_waiter_cursor_invalid")
+    return cursor
+
+
+class TerminalDispatcher:
+    def __init__(self):
+        self.cursors = {}
+
+    def __call__(self):
+        return dispatch_terminal_once(self.cursors)
+
+
+def dispatch_terminal_once(cursors=None):
+    if cursors is None:
+        cursors = {}
     events = runtime_request(
         "/internal/job-outbox/pending",
         {"schema": "runtime.job.outbox.pending.v1", "limit": 100},
@@ -661,22 +718,23 @@ def dispatch_terminal_once():
             or not 0 <= event["generation"] <= 4_294_967_295
         ):
             raise RuntimeError("runtime_job_outbox_event_invalid")
+        key = (event["jobId"], event["generation"])
+        after = cursors.get(key)
         wake = runtime_request(
             "/internal/job-outbox/wake-waiter",
             {
                 "schema": "runtime.job.waiter_wake.v1",
                 "jobId": event["jobId"],
                 "generation": event["generation"],
+                "after": after,
             },
         )
-        if wake.get("disposition") not in {
-            "woken",
-            "already_runnable",
-            "active",
-            "terminal",
-            "no_waiter",
-        }:
-            raise RuntimeError("runtime_job_waiter_wake_response_invalid")
+        next_cursor = waiter_page_next(wake, {"woken", "no_waiter"}, after)
+        if next_cursor is not None:
+            cursors[key] = next_cursor
+            # A partial source fan-out remains pending. Process its next page on
+            # the next control round; never acknowledge an incomplete delivery.
+            continue
         published = runtime_request(
             "/internal/job-outbox/published",
             {
@@ -693,27 +751,41 @@ def dispatch_terminal_once():
             "stale",
         }:
             raise RuntimeError("runtime_job_outbox_publish_response_invalid")
+        cursors.pop(key, None)
+    visible = {(event["jobId"], event["generation"]) for event in events}
+    for key in list(cursors):
+        if key not in visible:
+            del cursors[key]
     return len(events)
 
 
-def reconcile_once():
-    runtime = runtime_request(
-        "/internal/jobs/reconcile",
-        {"schema": "runtime.job.reconcile.v1", "nowMs": now_ms()},
-    )
-    lifecycle = api_request(
-        "/internal/agent-run-lifecycle/reconcile",
-        {"schema": "runtime.agent_run_lifecycle.reconcile.v1", "limit": 100},
-        "agent_run_lifecycle_reconcile_unavailable",
-    )
-    waiters = runtime_request(
-        "/internal/job-outbox/reconcile-waiters",
-        {"schema": "runtime.job.waiters.reconcile.v1"},
-    )
-    if waiters.get("disposition") != "reconciled":
-        raise RuntimeError("runtime_job_waiter_reconcile_response_invalid")
-    return {"runtimeJobs": runtime, "runLifecycle": lifecycle, "waiters": waiters}
+class LifecycleReconciler:
+    def __init__(self):
+        # A restart safely begins a new pass; reconciliation is idempotent.
+        self.active_after = None
+        self.dead_letter_after = None
+        self.waiter_after = None
 
+    def __call__(self):
+        runtime = runtime_request(
+            "/internal/jobs/reconcile",
+            {"schema": "runtime.job.reconcile.v1", "nowMs": now_ms()},
+        )
+        lifecycle = api_request(
+            "/internal/agent-run-lifecycle/reconcile",
+            {"schema": "runtime.agent_run_lifecycle.reconcile.v1", "limit": 100,
+             "activeAfter": self.active_after, "deadLetterAfter": self.dead_letter_after},
+            "agent_run_lifecycle_reconcile_unavailable",
+        )
+        # Advance successful API pages even if the independent waiter pass fails.
+        self.active_after = lifecycle["activeNext"]
+        self.dead_letter_after = lifecycle["deadLetterNext"]
+        waiters = runtime_request(
+            "/internal/job-outbox/reconcile-waiters",
+            {"schema": "runtime.job.waiters.reconcile.v1", "after": self.waiter_after},
+        )
+        self.waiter_after = waiter_page_next(waiters, {"reconciled"}, self.waiter_after)
+        return {"runtimeJobs": runtime, "runLifecycle": lifecycle, "waiters": waiters}
 
 def run_loop(operation, interval_seconds, stopped=None):
     while stopped is None or not stopped.is_set():
@@ -743,7 +815,8 @@ def run_job_loop(slot_index, stopped):
                 file=sys.stderr,
                 flush=True,
             )
-            stopped.wait(JOB_WAIT_FAILURE_BACKOFF_SECONDS)
+            stopped.wait(5 if str(error) in {"runtime_busy", "execution_claim_busy"}
+                         else JOB_WAIT_FAILURE_BACKOFF_SECONDS)
 
 
 def run_worker_service():
@@ -759,12 +832,12 @@ def run_worker_service():
     control_threads = [
         threading.Thread(
             target=run_loop,
-            args=(dispatch_terminal_once, OUTBOX_POLL_INTERVAL_SECONDS, stopped),
+            args=(TerminalDispatcher(), OUTBOX_POLL_INTERVAL_SECONDS, stopped),
             name="workspace-terminal-dispatcher",
         ),
         threading.Thread(
             target=run_loop,
-            args=(reconcile_once, RECONCILE_INTERVAL_SECONDS, stopped),
+            args=(LifecycleReconciler(), RECONCILE_INTERVAL_SECONDS, stopped),
             name="workspace-reconciler",
         ),
     ]

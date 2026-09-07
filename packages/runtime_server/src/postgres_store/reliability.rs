@@ -31,12 +31,21 @@ pub(crate) struct RuntimeJobWaitResult {
 }
 
 impl PostgresRuntimeStore {
+    pub(crate) fn get_runtime_job_execution_control(
+        &self,
+        id: &str,
+    ) -> Result<Option<RuntimeJobRecord>, String> {
+        self.with_execution_control_client(|client| load_job(client, id))
+    }
+
     pub(crate) fn wait_for_runtime_jobs(
         &self,
         job_kinds: &[String],
         max_wait: Duration,
     ) -> Result<RuntimeJobWaitResult, String> {
-        self.with_client(|client| {
+        self.with_listener_client(|client| {
+            let max_wait = super::remaining_request_time()?
+                .map_or(max_wait, |remaining| max_wait.min(remaining));
             client
                 .batch_execute("LISTEN runtime_job_ready_v1")
                 .map_err(|error| format!("listen for Postgres runtime jobs failed: {error}"))?;
@@ -82,10 +91,17 @@ fn next_runtime_job(
     client: &mut Client,
     job_kinds: &[String],
 ) -> Result<(i64, Option<i64>), String> {
+    let limits = crate::execution_capacity::ExecutionCapacity::from_env()?;
     let row = client
         .query_one(
-            "SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,MIN(run_at_ms) FROM runtime_jobs WHERE status='queued' AND job_kind=ANY($1)",
-            &[&job_kinds],
+            &format!("{} SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,MIN(j.run_at_ms)
+                FROM runtime_jobs j LEFT JOIN execution_job_tenants t ON t.job_id=j.job_id
+                LEFT JOIN tenant_usage u ON u.workspace_id=t.workspace_id
+                WHERE j.status='queued' AND j.job_kind=ANY($1)
+                AND (j.job_kind<>'agent_run.lifecycle' OR
+                    (t.job_id IS NOT NULL AND (SELECT COUNT(*) FROM active)<$2 AND COALESCE(u.used,0)<$3))",
+                super::execution_capacity::ACTIVE_EXECUTIONS),
+            &[&job_kinds, &(limits.global as i64), &(limits.tenant as i64)],
         )
         .map_err(|error| format!("query next Postgres runtime job failed: {error}"))?;
     Ok((row.get(0), row.get(1)))
@@ -155,7 +171,7 @@ impl RuntimeJobStorePort for PostgresRuntimeStore {
         let until = r
             .heartbeat_at_ms
             .saturating_add(i64::try_from(r.lease_ms).map_err(|_| "lease overflow".to_string())?);
-        self.with_client(|c|updated(c.execute("UPDATE runtime_jobs SET heartbeat_at_ms=$1,lease_expires_at_ms=$2,updated_at_ms=$1 WHERE job_id=$3 AND status IN('leased','running') AND lease_owner=$4 AND lease_expires_at_ms>$1", &[&r.heartbeat_at_ms,&until,&r.job_id,&r.lease_owner]),"renew runtime job lease"))
+        self.with_execution_control_client(|c|updated(c.execute("UPDATE runtime_jobs SET heartbeat_at_ms=$1,lease_expires_at_ms=$2,updated_at_ms=$1 WHERE job_id=$3 AND status IN('leased','running') AND lease_owner=$4 AND lease_expires_at_ms>$1", &[&r.heartbeat_at_ms,&until,&r.job_id,&r.lease_owner]),"renew runtime job lease"))
     }
     fn yield_runtime_job(&self, r: YieldRuntimeJobRequest) -> Result<(), String> {
         if r.run_at_ms < r.yielded_at_ms || r.transition_reason.trim().is_empty() {
@@ -451,9 +467,6 @@ impl RuntimeJobOutboxPort for PostgresRuntimeStore {
                 Err("Postgres runtime job outbox publish CAS failed".to_string())
             }
         })
-    }
-    fn requeue_runtime_job_notifications(&self, published_before_ms: i64) -> Result<usize, String> {
-        self.with_client(|client| client.execute("UPDATE runtime_job_outbox outbox SET published_at_ms=NULL,generation=outbox.generation+1 FROM runtime_jobs jobs WHERE outbox.job_id=jobs.job_id AND outbox.event_type='runtime_job.terminal' AND outbox.published_at_ms IS NOT NULL AND outbox.published_at_ms<=$1 AND jobs.status IN('succeeded','failed','dead_lettered','cancelled')", &[&published_before_ms]).map(|count|count as usize).map_err(|error|format!("requeue Postgres runtime job notifications failed: {error}")))
     }
 }
 

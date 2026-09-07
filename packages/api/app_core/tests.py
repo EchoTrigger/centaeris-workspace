@@ -772,7 +772,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             response.json(),
-            {"scheduled": 0, "terminalized": 1, "pending": 0},
+            {"scheduled": 0, "terminalized": 1, "pending": 0, "activeNext": None, "deadLetterNext": None},
         )
         agent_run.refresh_from_db()
         self.assertEqual(agent_run.status, "failed")
@@ -841,7 +841,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"scheduled": 0, "terminalized": 1, "pending": 0})
+        self.assertEqual(response.json(), {"scheduled": 0, "terminalized": 1, "pending": 0, "activeNext": None, "deadLetterNext": None})
         agent_run.refresh_from_db()
         self.assertEqual(agent_run.status, "completed")
         self.assertEqual(agent_run.transitionReason, "runtime_session_terminal_committed")
@@ -849,6 +849,83 @@ class ApiVerticalSliceTests(TransactionTestCase):
         self.assertEqual(assistant.payload["payload"]["modelMarkdown"], "late but committed")
 
 
+
+    def test_agent_run_lifecycle_scan_rejects_invalid_cursors(self):
+        for cursor in ({}, {"createdAt": "yesterday", "id": "run"},
+                       {"createdAt": "2026-09-06T00:00:00", "id": "run"},
+                       {"createdAt": "2026-09-06T00:00:00Z", "id": ""},
+                       {"createdAt": "2026-09-06T00:00:00Z", "id": "run", "extra": 1}):
+            for field in ("activeAfter", "deadLetterAfter"):
+                with self.subTest(cursor=cursor, field=field):
+                    response = self.client.post("/internal/agent-run-lifecycle/reconcile",
+                        data=json.dumps({"schema": "runtime.agent_run_lifecycle.reconcile.v1",
+                                         "limit": 2, field: cursor}),
+                        content_type="application/json", HTTP_X_INTERNAL_TOKEN="test-internal-token")
+                    self.assertEqual(response.status_code, 400)
+
+    def test_agent_run_lifecycle_scan_advances_past_long_running_first_page(self):
+        user = User.objects.create_user(username="scan-pages@example.com")
+        workspace = Workspace.objects.create(name="Scan pages", createdBy=user)
+        workspace.members.add(user)
+        model = ModelConfig.objects.create(id="scan-pages-model", displayName="Fake")
+        session = create_session(workspace=workspace, owner=user)
+        runs = []
+        for index in range(3):
+            run = AgentRun.objects.create(workspace=workspace, session=session,
+                user=user, modelConfig=model, prompt=f"waiting {index}")
+            create_agent_run_authorization(run)
+            runs.append(run)
+        # Equal timestamps exercise the identity tie-breaker, not just time paging.
+        AgentRun.objects.filter(id__in=[r.id for r in runs]).update(createdAt=runs[0].createdAt)
+        cursor = None
+        with patch("app_core.http.internal.get_runtime_job", return_value=None), patch(
+            "app_core.http.internal.schedule_agent_run_lifecycle"
+        ) as schedule:
+            for _ in range(2):
+                body = {"schema": "runtime.agent_run_lifecycle.reconcile.v1", "limit": 2}
+                if cursor is not None:
+                    body["activeAfter"] = cursor
+                response = self.client.post("/internal/agent-run-lifecycle/reconcile",
+                    data=json.dumps(body), content_type="application/json",
+                    HTTP_X_INTERNAL_TOKEN="test-internal-token")
+                self.assertEqual(response.status_code, 200, response.content)
+                cursor = response.json().get("activeNext")
+            self.assertEqual({call.args[0].id for call in schedule.call_args_list},
+                             {run.id for run in runs})
+            self.assertEqual(schedule.call_count, 3)
+        self.assertIsNone(cursor)
+
+    def test_agent_run_lifecycle_late_final_scan_advances_after_projection_failures(self):
+        user = User.objects.create_user(username="dead-scan-pages@example.com")
+        workspace = Workspace.objects.create(name="Dead scan pages", createdBy=user)
+        workspace.members.add(user)
+        model = ModelConfig.objects.create(id="dead-scan-pages-model", displayName="Fake")
+        session = create_session(workspace=workspace, owner=user)
+        runs = []
+        for index in range(3):
+            run = AgentRun.objects.create(workspace=workspace, session=session, user=user,
+                modelConfig=model, prompt=f"late {index}", status="failed",
+                transitionReason="agent_run_lifecycle_dead_lettered")
+            create_agent_run_authorization(run)
+            append_started(run)
+            append_session_records(run, [
+                session_record(run, 3, "agent_run_completed", {"doneReason": "finalized"})
+            ])
+            runs.append(run)
+        cursor = None
+        with patch("app_core.http.internal.project_committed_agent_run",
+                   side_effect=RuntimeError("projection temporarily unavailable")) as project:
+            for _ in range(2):
+                response = self.client.post("/internal/agent-run-lifecycle/reconcile",
+                    data=json.dumps({"schema": "runtime.agent_run_lifecycle.reconcile.v1",
+                                     "limit": 2, "deadLetterAfter": cursor}),
+                    content_type="application/json", HTTP_X_INTERNAL_TOKEN="test-internal-token")
+                self.assertEqual(response.status_code, 200, response.content)
+                cursor = response.json()["deadLetterNext"]
+            self.assertEqual({call.args[0].id for call in project.call_args_list},
+                             {run.id for run in runs})
+            self.assertEqual(project.call_count, 3)
+        self.assertIsNone(cursor)
 
     def test_agent_run_lifecycle_late_final_scan_is_independent_from_full_active_limit(self):
         user = User.objects.create_user(
@@ -913,7 +990,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
-            response.json(), {"scheduled": 2, "terminalized": 1, "pending": 0}
+            response.json(), {"scheduled": 2, "terminalized": 1, "pending": 0, "activeNext": None, "deadLetterNext": None}
         )
         self.assertEqual(schedule.call_count, 2)
         late.refresh_from_db()
@@ -1701,6 +1778,29 @@ class ApiVerticalSliceTests(TransactionTestCase):
                 "disposition": "terminal",
             },
         )
+
+        # A projected terminal run must still reach runtime for waiter cleanup.
+        with patch(
+            "app_core.http.workspaces.request_agent_run_cancellation",
+            return_value={"disposition": "terminal", "terminalState": "cancelled"},
+        ) as cancel:
+            repeated = self.client.post(
+                f"/api/sessions/{session.id}/agent-runs/{agent_run.id}/cancel"
+            )
+        cancel.assert_called_once()
+        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(repeated.json(), response.json())
+        with patch(
+            "app_core.http.workspaces.request_agent_run_cancellation",
+            side_effect=RuntimeError("runtime unavailable"),
+        ):
+            unavailable = self.client.post(
+                f"/api/sessions/{session.id}/agent-runs/{agent_run.id}/cancel"
+            )
+        self.assertEqual(unavailable.status_code, 503)
+        self.assertEqual(unavailable.json(), {"error": "agent_run_cancel_unavailable"})
+        agent_run.refresh_from_db()
+        self.assertEqual(agent_run.status, "cancelled")
 
     def test_session_rejects_a_second_active_run(self):
         user = User.objects.create_user(
@@ -2656,6 +2756,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
         self.assertEqual(captured["body"]["schema"], "runtime.job.schedule.v1")
         self.assertEqual(captured["body"]["jobId"], f"agent_run.lifecycle:{agent_run.id}")
         self.assertEqual(captured["body"]["sessionId"], session.id)
+        self.assertEqual(captured["body"]["workspaceId"], workspace.id)
         self.assertEqual(captured["body"]["payloadRef"], f"record:agent_run:{agent_run.id}")
         self.assertEqual(
             captured["body"]["idempotencyKey"],

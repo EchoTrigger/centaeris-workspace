@@ -34,6 +34,36 @@ def compose_config(**overrides):
 
 
 class DeploymentContractTests(unittest.TestCase):
+    def test_runtime_image_does_not_bundle_docker_cli(self):
+        dockerfile = (ROOT / "packages/runtime_server/Dockerfile").read_text(encoding="utf-8")
+        self.assertNotIn("docker-cli", dockerfile)
+        self.assertNotIn("/usr/local/bin/docker", dockerfile)
+
+    def test_runtime_compose_starts_without_a_cli_preflight(self):
+        runtime = compose_config()["services"]["runtime"]
+        self.assertEqual(runtime["entrypoint"], ["runtime_server"])
+        self.assertFalse(runtime.get("command"))
+
+    def test_default_sandbox_resources_reach_authorization_service(self):
+        services = compose_config()["services"]
+        for service in ("api", "api-init"):
+            with self.subTest(service=service):
+                environment = services[service]["environment"]
+                self.assertEqual(environment["SANDBOX_CPU_MILLI"], "4000")
+                self.assertEqual(environment["SANDBOX_MEMORY_BYTES"], "8589934592")
+
+    def test_worker_slot_configuration_reaches_container(self):
+        self.assertEqual(compose_config()["services"]["worker"]["environment"]["WORKER_SLOT_COUNT"], "8")
+        self.assertEqual(compose_config(WORKER_SLOT_COUNT="4")["services"]["worker"]["environment"]["WORKER_SLOT_COUNT"], "4")
+
+    def test_runtime_postgres_connection_budgets_reach_runtime(self):
+        environment = compose_config()["services"]["runtime"]["environment"]
+        self.assertEqual(environment["RUNTIME_POSTGRES_POOL_SIZE"], "8")
+        self.assertEqual(environment["RUNTIME_POSTGRES_CONTROL_POOL_SIZE"], "2")
+        self.assertEqual(environment["RUNTIME_POSTGRES_LISTENER_LIMIT"], "8")
+        self.assertEqual(environment["RUNTIME_POSTGRES_CHECKOUT_TIMEOUT_MS"], "5000")
+        self.assertEqual(environment["RUNTIME_POSTGRES_CONNECT_TIMEOUT_MS"], "3000")
+
     def test_processor_build_extra_follows_exact_device(self):
         command = [os.sys.executable, str(ROOT / "packages/document_processor/processor_build_extra.py")]
         for device, extra in (("cpu", "cpu"), ("gpu:0", "gpu")):

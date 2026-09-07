@@ -1054,6 +1054,11 @@ class AgentRun(models.Model):
     updatedAt = models.DateTimeField(auto_now=True)
 
     class Meta:
+        indexes = [
+            models.Index(fields=["workspace", "createdAt", "id"],
+                         condition=models.Q(status="queued", startedAt__isnull=True),
+                         name="agent_run_initial_queue"),
+        ]
         constraints = [
             models.CheckConstraint(
                 condition=~models.Q(membership_ref=""),

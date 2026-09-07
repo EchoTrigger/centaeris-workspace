@@ -28,6 +28,8 @@ boundaries, and release verification.
 - [Release gate](eval/ReleaseGate.md): required source and deployment checks.
 - [Performance evaluation](eval/PerformanceEvaluation.md): reproducible measurement
   definitions without local run receipts.
+- [Isolated performance harness](../perf/README.md): synthetic test deployment,
+  TLS preflight, worker slot control, and external evidence collection.
 - [Third-party notices](../THIRD_PARTY_NOTICES.md): bundled font licenses.
 
 Runtime semantics remain in the external public Runtime Framework and are not

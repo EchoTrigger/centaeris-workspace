@@ -3,7 +3,13 @@ mod api_model_client;
 mod artifact_publication;
 mod contract;
 mod deferred_input_resolver;
+mod docker_engine;
 mod docker_execution_host;
+mod execution_capacity;
+mod execution_recovery_coordinator;
+mod execution_recovery_policy;
+mod execution_recovery_schedule;
+mod failure_diagnostics;
 mod file_mutation_commit;
 mod job_protocol;
 mod knowledge_port;
@@ -12,6 +18,7 @@ mod knowledge_types;
 mod lifecycle_hooks;
 mod mcp;
 mod postgres_store;
+mod request_capacity;
 mod skill_projection;
 mod transient_stream;
 mod workspace_tools;
@@ -111,7 +118,9 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
 use knowledge_port::WorkspaceKnowledgePort;
 use lifecycle_hooks::{workspace_hook_catalog, workspace_lifecycle_hook_runtime};
-use postgres_store::{hydrate_session_wire_values, PostgresRuntimeStore, PostgresSessionLog};
+use postgres_store::{
+    hydrate_session_wire_values, PostgresConnectionLimits, PostgresRuntimeStore, PostgresSessionLog,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -120,11 +129,11 @@ use tokio::sync::Semaphore;
 
 const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
 const MAX_HTTP_CONNECTIONS: usize = 128;
-const MAX_IN_FLIGHT_REQUESTS: usize = 32;
 const HTTP_HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 const HTTP_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const AGENT_RUN_WAITING_TRANSITION_REASONS: &[&str] = &[
+    "execution_recovery_checkpoint_committed",
     "question_wait",
     "runtime_job_wait",
     "session_workspace_commit_unavailable",
@@ -368,6 +377,7 @@ fn cached_execution_control_reason(
 
 fn main() -> Result<(), String> {
     DockerExecutionHostRunner::validate_host()?;
+    knowledge_processing::validate_processor_image()?;
     let execution_profile = Arc::new(RuntimeExecutionProfile {
         schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
         image_capability: "workspace_general_v1",
@@ -408,13 +418,14 @@ fn main() -> Result<(), String> {
         job_store.clone(),
         tool_layers.clone(),
     ));
+    execution_capacity::ExecutionCapacity::from_env()?;
     let state = HttpServerState {
         runtime: runtime.clone(),
         store,
         job_store,
         tool_layers,
         execution_profile,
-        request_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT_REQUESTS)),
+        request_capacity: request_capacity::RequestCapacity::from_env()?,
     };
     runtime.block_on(serve_http(listener, state))
 }
@@ -456,7 +467,7 @@ fn resolve_provider_polling_tool_layer(
                 false,
                 "provider poll AgentRun lifecycle is missing",
                 "provider_poll_lifecycle_missing",
-            )
+            );
         }
         Err(error) => {
             eprintln!("load provider poll AgentRun lifecycle failed: {error}");
@@ -470,10 +481,10 @@ fn resolve_provider_polling_tool_layer(
     };
     match resolve_provider_polling_tool_layer_records(job, &payload, &lifecycle, None) {
         ProviderPollingToolLayerResolution::Stopped { reason } => {
-            return ProviderPollingToolLayerResolution::Stopped { reason }
+            return ProviderPollingToolLayerResolution::Stopped { reason };
         }
         ProviderPollingToolLayerResolution::Failed(error) if !error.retryable => {
-            return ProviderPollingToolLayerResolution::Failed(error)
+            return ProviderPollingToolLayerResolution::Failed(error);
         }
         _ => {}
     }
@@ -489,7 +500,7 @@ fn resolve_provider_polling_tool_layer(
                 true,
                 "provider poll tool layer registry is temporarily unavailable",
                 "provider_poll_registry_unavailable",
-            )
+            );
         }
     };
     resolve_provider_polling_tool_layer_records(job, &payload, &lifecycle, context.as_ref())
@@ -510,7 +521,7 @@ fn resolve_provider_polling_tool_layer_records(
                     false,
                     "provider poll AgentRun binding is invalid",
                     "provider_poll_agent_run_invalid",
-                )
+                );
             }
         };
     let session_id = match job.session_id.as_deref() {
@@ -521,7 +532,7 @@ fn resolve_provider_polling_tool_layer_records(
                 false,
                 "provider poll session binding is missing",
                 "provider_poll_session_missing",
-            )
+            );
         }
     };
     if job.job_kind != centaeris_core::model::provider_polling::PROVIDER_POLL_RUNTIME_JOB_KIND
@@ -595,14 +606,57 @@ fn open_store() -> Result<(RuntimeStoreActor, PostgresRuntimeStore), String> {
         env::var("DATABASE_URL").map_err(|_| "DATABASE_URL is required".to_string())?;
     let state_root =
         env::var("RUNTIME_STATE_ROOT").map_err(|_| "RUNTIME_STATE_ROOT is required".to_string())?;
-    let store = PostgresRuntimeStore::new(database_url.as_str())
-        .map_err(|error| format!("open Postgres runtime store failed: {error}"))?;
+    let defaults = PostgresConnectionLimits::default();
+    let store = PostgresRuntimeStore::new_with_limits(
+        database_url.as_str(),
+        PostgresConnectionLimits {
+            ordinary: positive_usize_env("RUNTIME_POSTGRES_POOL_SIZE", defaults.ordinary)?,
+            execution_control: positive_usize_env(
+                "RUNTIME_POSTGRES_CONTROL_POOL_SIZE",
+                defaults.execution_control,
+            )?,
+            listeners: positive_usize_env("RUNTIME_POSTGRES_LISTENER_LIMIT", defaults.listeners)?,
+            checkout_timeout: Duration::from_millis(positive_u64_env(
+                "RUNTIME_POSTGRES_CHECKOUT_TIMEOUT_MS",
+                defaults.checkout_timeout.as_millis() as u64,
+            )?),
+            connect_timeout: Duration::from_millis(positive_u64_env(
+                "RUNTIME_POSTGRES_CONNECT_TIMEOUT_MS",
+                defaults.connect_timeout.as_millis() as u64,
+            )?),
+        },
+    )
+    .map_err(|error| format!("open Postgres runtime store failed: {error}"))?;
     std::fs::create_dir_all(state_root.as_str())
         .map_err(|error| format!("create runtime state root failed: {error}"))?;
     Ok((
         RuntimeStoreActor::start(store.clone()).map_err(|error| error.to_string())?,
         store,
     ))
+}
+
+fn positive_usize_env(name: &str, default: usize) -> Result<usize, String> {
+    match env::var(name) {
+        Ok(value) => value
+            .parse::<usize>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| format!("{name} must be a positive integer")),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(env::VarError::NotUnicode(_)) => Err(format!("{name} must be a positive integer")),
+    }
+}
+
+fn positive_u64_env(name: &str, default: u64) -> Result<u64, String> {
+    match env::var(name) {
+        Ok(value) => value
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| format!("{name} must be a positive integer")),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(env::VarError::NotUnicode(_)) => Err(format!("{name} must be a positive integer")),
+    }
 }
 
 async fn run_hosted_subagent_worker(
@@ -746,7 +800,7 @@ impl HostedSubagentRunner {
         let cancellation_lease_owner = lease_owner.clone();
         let cancellation_probe: Arc<ExecutionCancellationProbe> = Arc::new(move || {
             let job = cancellation_store
-                .get_runtime_job(cancellation_job_id.as_str())?
+                .get_runtime_job_execution_control(cancellation_job_id.as_str())?
                 .ok_or_else(|| "hosted_subagent_job_missing".to_string())?;
             if job.status == RuntimeJobStatus::Cancelled {
                 return Ok(Some(
@@ -910,7 +964,7 @@ struct HttpServerState {
     job_store: Arc<PostgresRuntimeStore>,
     tool_layers: ToolLayerRegistry,
     execution_profile: Arc<RuntimeExecutionProfile>,
-    request_slots: Arc<Semaphore>,
+    request_capacity: request_capacity::RequestCapacity,
 }
 
 const RUNTIME_EXECUTION_PROFILE_SCHEMA: &str = "runtime.execution_profile.v1";
@@ -968,26 +1022,83 @@ async fn dispatch_http_request(
     State(state): State<HttpServerState>,
     request: Request<Body>,
 ) -> Response<Body> {
-    let request_slot = match state.request_slots.clone().try_acquire_owned() {
-        Ok(slot) => slot,
-        Err(_) => return bounded_json_error_response(503, "runtime_busy").into_axum_response(),
+    let lane = state
+        .request_capacity
+        .lane(request.method().as_str(), request.uri().path());
+    let deadline = lane.deadline.map(|duration| Instant::now() + duration);
+    let slot = if lane.control {
+        // Absorb brief heartbeat bursts within the same control deadline.
+        // Connection admission bounds these waiters; they execute no DB work.
+        tokio::time::timeout_at(
+            deadline.expect("control deadline").into(),
+            lane.slots.acquire_owned(),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+    } else {
+        lane.slots.try_acquire_owned().ok()
     };
-    let request = match read_axum_request(request).await {
+    let request_slot = match slot {
+        Some(slot) => slot,
+        None => return bounded_json_error_response(503, "runtime_busy").into_axum_response(),
+    };
+    let read = read_axum_request(request);
+    let read_result = if let Some(deadline) = deadline {
+        match tokio::time::timeout_at(deadline.into(), read).await {
+            Ok(result) => result,
+            Err(_) => {
+                return bounded_json_error_response(408, "request_body_timeout")
+                    .into_axum_response();
+            }
+        }
+    } else {
+        read.await
+    };
+    let request = match read_result {
         Ok(request) => request,
         Err(response) => return response.into_axum_response(),
     };
-    let result = tokio::task::spawn_blocking(move || {
+    let task = tokio::task::spawn_blocking(move || {
         let _request_slot = request_slot;
+        let _deadline = postgres_store::RequestDeadline::enter(deadline);
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Ok(bounded_json_error_response(
+                504,
+                "request_deadline_exceeded",
+            ));
+        }
+        let job_store = if lane.control {
+            Arc::new(state.job_store.execution_control_view())
+        } else {
+            state.job_store
+        };
         handle_request(
             request,
             state.runtime,
             state.store,
-            state.job_store,
+            job_store,
             state.tool_layers,
             state.execution_profile,
         )
-    })
-    .await;
+    });
+    let result = if let Some(deadline) = deadline {
+        match tokio::time::timeout_at(deadline.into(), task).await {
+            Ok(result) => result,
+            // Dropping a JoinHandle does not stop blocking work. The closure owns
+            // the permit until it actually exits; timeout must not mint capacity
+            // or imply that an uncertain write was rolled back.
+            Err(_) => {
+                return bounded_json_error_response(504, "request_deadline_exceeded")
+                    .into_axum_response();
+            }
+        }
+    } else {
+        task.await
+    };
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return bounded_json_error_response(504, "request_deadline_exceeded").into_axum_response();
+    }
     match result {
         Ok(Ok(response)) => response.into_axum_response(),
         Ok(Err(error)) => {
@@ -1325,11 +1436,9 @@ fn handle_request(
                 return json_error_response(400, error.as_str());
             }
         };
-        let database_url =
-            env::var("DATABASE_URL").map_err(|_| "DATABASE_URL is required".to_string())?;
         let agent_run_id = request.agent_run_start.agent_run_id.clone();
         let terminal_state =
-            match load_existing_terminal_state(database_url.as_str(), &request.agent_run_start) {
+            match load_existing_terminal_state(job_store.as_ref(), &request.agent_run_start) {
                 Ok(value) => value,
                 Err(error) => {
                     eprintln!("load AgentRun cancellation terminal state failed: {error}");
@@ -1345,8 +1454,7 @@ fn handle_request(
                 request.agent_run_start.authorization_digest.as_str(),
                 now_ms()?,
             ) {
-                match load_existing_terminal_state(database_url.as_str(), &request.agent_run_start)
-                {
+                match load_existing_terminal_state(job_store.as_ref(), &request.agent_run_start) {
                     Ok(Some(state)) => ("terminal", Some(state)),
                     Ok(None) => {
                         eprintln!("request AgentRun cancellation failed: {error}");
@@ -1448,10 +1556,7 @@ fn handle_request(
         ) {
             return json_error_response(409, error.as_str());
         }
-        let database_url =
-            env::var("DATABASE_URL").map_err(|_| "DATABASE_URL is required".to_string())?;
-        if load_existing_terminal_state(database_url.as_str(), &teardown.agent_run_start)?.is_none()
-        {
+        if load_existing_terminal_state(job_store.as_ref(), &teardown.agent_run_start)?.is_none() {
             return json_error_response(409, "agent_run_not_terminal");
         }
         if let Err(error) = job_store.close_turn_supplement_queue(CloseTurnSupplementQueueRequest {
@@ -1517,6 +1622,7 @@ fn handle_request(
     let failure_lease_owner = agent_run_step.lease_owner.clone();
     let failure_runtime = runtime.clone();
     let failure_store = store.clone();
+    let failure_job_store = job_store.clone();
     let execution = catch_agent_run_step_panic(|| {
         execute_agent_run(
             agent_run_step.agent_run_start,
@@ -1536,6 +1642,7 @@ fn handle_request(
         Ok(Err(error)) => match terminalize_agent_run_failure(
             failure_runtime.as_ref(),
             failure_store.as_ref(),
+            failure_job_store.as_ref(),
             &failure_agent_run_start,
             failure_job_id.as_str(),
             failure_lease_owner.as_str(),
@@ -1565,6 +1672,7 @@ fn handle_request(
                 terminalize_agent_run_failure(
                     failure_runtime.as_ref(),
                     failure_store.as_ref(),
+                    failure_job_store.as_ref(),
                     &failure_agent_run_start,
                     failure_job_id.as_str(),
                     failure_lease_owner.as_str(),
@@ -1576,7 +1684,9 @@ fn handle_request(
                 Ok(Err(terminal_error)) => {
                     let retryable =
                         terminal_error == "runtime_completed_projection_requires_recovery";
-                    eprintln!("AgentRun panic terminalization failed: {terminal_error}; rootCause={error}");
+                    eprintln!(
+                        "AgentRun panic terminalization failed: {terminal_error}; rootCause={error}"
+                    );
                     return agent_run_step_failure_response(
                         agent_run_id.as_str(),
                         if retryable {
@@ -1589,7 +1699,9 @@ fn handle_request(
                     );
                 }
                 Err(terminal_error) => {
-                    eprintln!("AgentRun panic terminalization panicked: {terminal_error}; rootCause={error}");
+                    eprintln!(
+                        "AgentRun panic terminalization panicked: {terminal_error}; rootCause={error}"
+                    );
                     return agent_run_step_failure_response(
                         agent_run_id.as_str(),
                         "runtime_panic",
@@ -1601,14 +1713,18 @@ fn handle_request(
         }
     };
     outcome.validate()?;
-    let response = serde_json::to_vec(&json!({
+    let mut response = json!({
         "schema": "runtime.agent_run.step.result.v1",
         "agentRunId": agent_run_id,
         "disposition": outcome.disposition,
         "terminalState": outcome.terminal_state,
         "transitionReason": outcome.transition_reason,
-    }))
-    .map_err(|error| format!("encode AgentRun step response failed: {error}"))?;
+    });
+    if let Some(retry_at_ms) = outcome.retry_at_ms {
+        response["retryAtMs"] = json!(retry_at_ms);
+    }
+    let response = serde_json::to_vec(&response)
+        .map_err(|error| format!("encode AgentRun step response failed: {error}"))?;
     Ok(http_response(200, "application/json", response))
 }
 
@@ -1706,10 +1822,17 @@ struct AgentRunStepOutcome {
     disposition: &'static str,
     terminal_state: Option<&'static str>,
     transition_reason: String,
+    retry_at_ms: Option<i64>,
 }
 
 impl AgentRunStepOutcome {
     fn validate(&self) -> Result<(), String> {
+        if (self.transition_reason == "execution_recovery_checkpoint_committed")
+            != self.retry_at_ms.is_some()
+            || self.retry_at_ms.is_some_and(|deadline| deadline < 0)
+        {
+            return Err("runtime AgentRun retry deadline is invalid".to_string());
+        }
         match self.disposition {
             "waiting"
                 if self.terminal_state.is_none()
@@ -1735,6 +1858,31 @@ fn requires_session_workspace_restore(has_started_fact: bool, completing_recover
     !has_started_fact && !completing_recovery
 }
 
+fn execution_recovery_waiting(retry_at_ms: i64) -> AgentRunStepOutcome {
+    AgentRunStepOutcome {
+        disposition: "waiting",
+        terminal_state: None,
+        transition_reason: "execution_recovery_checkpoint_committed".to_string(),
+        retry_at_ms: Some(retry_at_ms),
+    }
+}
+
+fn recovery_retry_at_ms(
+    schedule: &execution_recovery_schedule::ExecutionRecoverySchedule,
+    start: &AgentRunStart,
+    sequence: &AgentRunSessionState,
+) -> Result<i64, String> {
+    let ended_at = sequence
+        .last_execution_ended_at_ms()
+        .ok_or_else(|| "execution recovery requires an ended Execution".to_string())?;
+    let (attempts, anchor) = sequence
+        .recovery_attempt()
+        .map_or((0, ended_at), |attempt| {
+            (attempt.number, attempt.started_at_ms.max(ended_at))
+        });
+    schedule.retry_at_ms(start.agent_run_id.as_str(), attempts, anchor)
+}
+
 fn catch_agent_run_step_panic<T>(operation: impl FnOnce() -> T) -> Result<T, String> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation)).map_err(|panic| {
         panic
@@ -1752,18 +1900,16 @@ fn catch_agent_run_step_panic<T>(operation: impl FnOnce() -> T) -> Result<T, Str
 fn terminalize_agent_run_failure(
     runtime: &tokio::runtime::Runtime,
     store: &RuntimeStoreActor,
+    job_store: &PostgresRuntimeStore,
     agent_run_start: &AgentRunStart,
     lifecycle_job_id: &str,
     lifecycle_lease_owner: &str,
     _internal_error: &str,
     transition_reason: &str,
 ) -> Result<AgentRunStepOutcome, String> {
-    let database_url =
-        env::var("DATABASE_URL").map_err(|_| "DATABASE_URL is required".to_string())?;
-    if let Some(terminal_state) =
-        load_existing_terminal_state(database_url.as_str(), agent_run_start)?
-    {
+    if let Some(terminal_state) = load_existing_terminal_state(job_store, agent_run_start)? {
         return Ok(AgentRunStepOutcome {
+            retry_at_ms: None,
             disposition: "terminal",
             terminal_state: Some(terminal_state),
             transition_reason: "runtime_session_terminal_committed".to_string(),
@@ -1782,14 +1928,12 @@ fn terminalize_agent_run_failure(
             return Err("runtime_completed_projection_requires_recovery".to_string());
         }
     }
-    let session_log = PostgresSessionLog::new(
-        database_url.clone(),
+    let session_log = job_store.session_log(
         agent_run_start.authorization.workspace_id.clone(),
         agent_run_start.authorization.session_id.clone(),
         agent_run_start.prompt.clone(),
     );
-    let mut committed_sequence =
-        load_existing_session_sequence(database_url.as_str(), agent_run_start)?;
+    let mut committed_sequence = load_existing_session_sequence(job_store, agent_run_start)?;
     let assistant_text = AssistantTextProjection::default();
     let mut events = if committed_sequence.is_empty() {
         started_session_records(agent_run_start, &mut committed_sequence, now_ms()?)?
@@ -1817,6 +1961,7 @@ fn terminalize_agent_run_failure(
     let mut stream = None;
     accept_session_commit(&mut committed_sequence, &mut stream, &receipt)?;
     Ok(AgentRunStepOutcome {
+        retry_at_ms: None,
         disposition: "terminal",
         terminal_state: Some("failed"),
         transition_reason: transition_reason.to_string(),
@@ -1862,13 +2007,12 @@ fn execute_agent_run(
         env::var("API_INTERNAL_URL").map_err(|_| "API_INTERNAL_URL is required".to_string())?;
     let token =
         env::var("INTERNAL_API_TOKEN").map_err(|_| "INTERNAL_API_TOKEN is required".to_string())?;
-    let database_url =
-        env::var("DATABASE_URL").map_err(|_| "DATABASE_URL is required".to_string())?;
     if let Some(terminal_state) =
-        load_existing_terminal_state(database_url.as_str(), &agent_run_start)?
+        load_existing_terminal_state(job_store.as_ref(), &agent_run_start)?
     {
         acknowledge_terminal_completed_projection(store.as_ref(), &agent_run_start)?;
         return Ok(AgentRunStepOutcome {
+            retry_at_ms: None,
             disposition: "terminal",
             terminal_state: Some(terminal_state),
             transition_reason: "runtime_session_terminal_committed".to_string(),
@@ -1884,8 +2028,7 @@ fn execute_agent_run(
         thinking_mode: agent_run_start.authorization.thinking_mode.clone(),
         model_max_output_tokens: agent_run_start.model_max_output_tokens,
     });
-    let session_log = PostgresSessionLog::new(
-        database_url.clone(),
+    let session_log = job_store.session_log(
         agent_run_start.authorization.workspace_id.clone(),
         agent_run_start.authorization.session_id.clone(),
         agent_run_start.prompt.clone(),
@@ -1896,7 +2039,7 @@ fn execute_agent_run(
         lease_owner: lifecycle_lease_owner.clone(),
     };
     let session_record_sequence = Arc::new(Mutex::new(load_existing_session_sequence(
-        database_url.as_str(),
+        job_store.as_ref(),
         &agent_run_start,
     )?));
     let has_started_fact = !session_record_sequence
@@ -1913,7 +2056,7 @@ fn execute_agent_run(
     }) {
         return Err("AgentRun Execution authorization identity mismatch".to_string());
     }
-    let mut recovery_checkpoint = if has_started_fact && active_execution.is_none() {
+    let recovery_checkpoint = if has_started_fact && active_execution.is_none() {
         latest_recovery_checkpoint(
             job_store.as_ref(),
             &agent_run_start,
@@ -1928,15 +2071,10 @@ fn execute_agent_run(
             "AgentRun execution environment was lost without a recovery checkpoint".to_string(),
         );
     }
-    let mut has_execution_fact = active_execution.is_some();
+    let has_execution_fact = active_execution.is_some();
     let mut execution_id = active_execution
         .as_ref()
         .map(|execution| execution.execution_id.clone())
-        .or_else(|| {
-            recovery_checkpoint.as_ref().map(|(_, checkpoint)| {
-                replacement_execution_id(&agent_run_start, checkpoint.checkpoint_id.as_str())
-            })
-        })
         .unwrap_or_else(|| initial_execution_id(&agent_run_start));
     let cancellation_job_store = job_store.clone();
     let cancellation_agent_run_id = agent_run_start.agent_run_id.clone();
@@ -1980,6 +2118,54 @@ fn execute_agent_run(
             return Err("agent_run_lifecycle_lease_lost".to_string());
         }
         _ => {}
+    }
+    let recovery_schedule = execution_recovery_schedule::ExecutionRecoverySchedule::from_env()?;
+    if let Some((_, checkpoint)) = recovery_checkpoint.as_ref() {
+        let mut sequence = sequence_guard(&session_record_sequence)?.clone();
+        let attempts = sequence
+            .recovery_attempt()
+            .map_or(0, |attempt| attempt.number);
+        if attempts >= recovery_schedule.maximum_attempts {
+            return commit_failed_agent_run(
+                runtime.as_ref(),
+                &session_log,
+                &agent_run_start,
+                &mut sequence,
+                &mut *session_stream_guard(&session_stream)?,
+                "execution recovery attempt budget exhausted",
+                "execution_recovery_exhausted",
+                &AssistantTextProjection::default(),
+                &terminal_lease_fence,
+            );
+        }
+        let retry_at_ms = recovery_retry_at_ms(&recovery_schedule, &agent_run_start, &sequence)?;
+        if now_ms()? < retry_at_ms {
+            return Ok(execution_recovery_waiting(retry_at_ms));
+        }
+        let reserved = sequence.reserve_execution_recovery(
+            agent_run_start.turn_id.as_str(),
+            checkpoint.checkpoint_id.as_str(),
+            recovery_schedule.maximum_attempts,
+            now_ms()?,
+        )?;
+        let receipt = append_agent_run_session_records(
+            runtime.as_ref(),
+            &session_log,
+            &agent_run_start,
+            &[reserved],
+            &terminal_lease_fence,
+        )?;
+        accept_session_commit(
+            &mut sequence,
+            &mut *session_stream_guard(&session_stream)?,
+            &receipt,
+        )?;
+        execution_id = replacement_execution_id(
+            &agent_run_start,
+            checkpoint.checkpoint_id.as_str(),
+            attempts + 1,
+        );
+        *sequence_guard(&session_record_sequence)? = sequence;
     }
     let workspace_skill_catalog_config =
         workspace_skill_catalog_config(&agent_run_start.authorization.plugin_activation)?;
@@ -2064,45 +2250,39 @@ fn execute_agent_run(
                 &receipt,
             )?;
             *sequence_guard(&session_record_sequence)? = ended_sequence;
-            recovery_checkpoint = Some(checkpoint);
-            has_execution_fact = false;
-            execution_id = replacement_execution_id(
+            let retry_at_ms = recovery_retry_at_ms(
+                &recovery_schedule,
                 &agent_run_start,
-                recovery_checkpoint
-                    .as_ref()
-                    .expect("recovery checkpoint assigned")
-                    .0
-                    .checkpoint_id
-                    .as_str(),
-            );
-            match DockerExecutionHostRunner::new(DockerExecutionHostRequest {
-                agent_run_id: agent_run_start.agent_run_id.clone(),
-                execution_id: execution_id.clone(),
-                user_id: agent_run_start.authorization.user_id.clone(),
-                agent_id: agent_run_start.authorization.agent_id.clone(),
-                authorization_digest: agent_run_start.authorization_digest.clone(),
-                image_digest: agent_run_start.authorization.image_digest.clone(),
-                resources: agent_run_start.authorization.resources,
-                has_execution_fact: false,
-                api_url: api_url.clone(),
-                api_token: token.clone(),
-                plugin_activation: &agent_run_start.authorization.plugin_activation,
-            }) {
-                Ok(runner) => runner,
-                Err(error) => {
-                    return commit_failed_agent_run(
-                        runtime.as_ref(),
-                        &session_log,
-                        &agent_run_start,
-                        &mut *sequence_guard(&session_record_sequence)?,
-                        &mut *session_stream_guard(&session_stream)?,
-                        error.as_str(),
-                        "execution_recovery_prepare_failed",
-                        &AssistantTextProjection::default(),
-                        &terminal_lease_fence,
-                    );
-                }
+                &*sequence_guard(&session_record_sequence)?,
+            )?;
+            return Ok(execution_recovery_waiting(retry_at_ms));
+        }
+        Err(error) if recovery_checkpoint.is_some() && !error.contains("refusing replacement") => {
+            let sequence = sequence_guard(&session_record_sequence)?;
+            if sequence
+                .recovery_attempt()
+                .is_some_and(|attempt| attempt.number < recovery_schedule.maximum_attempts)
+            {
+                let retry_at_ms =
+                    recovery_retry_at_ms(&recovery_schedule, &agent_run_start, &sequence)?;
+                eprintln!(
+                    "execution recovery preparation failed: agentRunId={}; error={error}",
+                    agent_run_start.agent_run_id
+                );
+                return Ok(execution_recovery_waiting(retry_at_ms));
             }
+            drop(sequence);
+            return commit_failed_agent_run(
+                runtime.as_ref(),
+                &session_log,
+                &agent_run_start,
+                &mut *sequence_guard(&session_record_sequence)?,
+                &mut *session_stream_guard(&session_stream)?,
+                error.as_str(),
+                "execution_recovery_exhausted",
+                &AssistantTextProjection::default(),
+                &terminal_lease_fence,
+            );
         }
         Err(error) => {
             return commit_failed_agent_run(
@@ -2327,7 +2507,7 @@ fn execute_agent_run(
     let workspace_input_upper_bound_bytes = workspace_input_upper_bound_bytes(&agent_run_start)?;
     if let Some((_, checkpoint)) = recovery_checkpoint.as_ref() {
         restore_runtime_state_from_recovery_checkpoint(
-            database_url.as_str(),
+            job_store.as_ref(),
             store.as_ref(),
             checkpoint,
         )?;
@@ -2376,6 +2556,7 @@ fn execute_agent_run(
                 "Session workspace resolve unavailable; transitionReason=session_workspace_resolve_unavailable"
             );
             return Ok(AgentRunStepOutcome {
+                retry_at_ms: None,
                 disposition: "waiting",
                 terminal_state: None,
                 transition_reason: "session_workspace_resolve_unavailable".to_string(),
@@ -2404,7 +2585,7 @@ fn execute_agent_run(
         Some(projection) if workspace_resolution == SessionWorkspaceResolution::Advanced => {
             let mut completed_sequence = sequence_guard(&session_record_sequence)?.clone();
             validate_completed_projection_session_log(
-                database_url.as_str(),
+                job_store.as_ref(),
                 &agent_run_start,
                 &projection,
                 &completed_sequence,
@@ -2443,6 +2624,7 @@ fn execute_agent_run(
                 &agent_run_identity,
             )?;
             return Ok(AgentRunStepOutcome {
+                retry_at_ms: None,
                 disposition: "terminal",
                 terminal_state: Some("completed"),
                 transition_reason: "runtime_completed_projection_recovered".to_string(),
@@ -2479,7 +2661,7 @@ fn execute_agent_run(
                 return Err("runtime_job_wait_missing_durable_start".to_string());
             }
             if !has_terminal_agent_run_identity(
-                database_url.as_str(),
+                job_store.as_ref(),
                 agent_run_start.authorization.session_id.as_str(),
                 &pending_identity,
             )? {
@@ -2693,230 +2875,349 @@ fn execute_agent_run(
     } else {
         observed_workspace_generation(docker_execution.as_ref())
     };
+    let recovery_boundary_committed = AtomicBool::new(false);
+    let recovery_budget_exhausted = AtomicBool::new(false);
+    let mut recovery_suffix = execution_recovery_policy::RecoverySuffix::default();
+    let mut previous_checkpoint_sequence = workspace_checkpoint
+        .as_ref()
+        .map_or(0, |checkpoint| checkpoint.session_sequence);
     let mut commit_tool_safe_point = |safe_point: ToolSafePoint| {
-        if !safe_point_live_degraded.load(Ordering::Relaxed) {
-            match flush_live_stream(&safe_point_stream) {
-                Ok(()) => {}
-                Err(error) => latch_live_error(&safe_point_live_degraded, error),
-            }
-        }
-        let fatal_execution_reason = match &safe_point {
-            ToolSafePoint::DurableReceipt { result, .. }
-                if matches!(
-                    result.transition_reason.as_deref(),
-                    Some("execution_cancellation_indeterminate")
-                ) =>
-            {
-                result.transition_reason.clone()
-            }
-            _ => None,
+        let stage = match &safe_point {
+            ToolSafePoint::ModelRequestStarted(_) => "model_request_safe_point",
+            ToolSafePoint::DurableToolCall { .. } => "tool_call_safe_point",
+            ToolSafePoint::DurableReceipt { .. } => "tool_receipt_safe_point",
+            _ => "other_safe_point",
         };
-        let now = now_ms()?;
-        let mut committed_sequence = safe_point_sequence
-            .lock()
-            .map_err(|_| "session record sequence lock poisoned".to_string())?
-            .clone();
-        let mut recovery_checkpoint = None;
-        let events = match safe_point {
-            ToolSafePoint::ReasoningCompleted {
-                session_id,
-                turn_id,
-                request_id,
-                text,
-                status,
-            } => {
-                if session_id != committed_sequence.session_id() {
-                    return Err("reasoning safe point Session identity mismatch".to_string());
+        failure_diagnostics::observe(&agent_run_start.agent_run_id, stage, || {
+            if !safe_point_live_degraded.load(Ordering::Relaxed) {
+                match flush_live_stream(&safe_point_stream) {
+                    Ok(()) => {}
+                    Err(error) => latch_live_error(&safe_point_live_degraded, error),
                 }
-                committed_sequence
-                    .record_reasoning_block(&turn_id, &request_id, &text, &status, now)?
-                    .into_iter()
-                    .collect()
             }
-            ToolSafePoint::ModelRequestStarted(started) => {
-                let mut events = committed_sequence.record_model_request_started(&started, now)?;
-                if !committed_sequence.open_tool_call_ids().is_empty() {
-                    return Err(
-                        "recovery checkpoint requires an empty in-flight tool set".to_string()
-                    );
-                }
-                let model_request = events
-                    .iter()
-                    .rev()
-                    .find(|record| {
-                        record.event.event_type == SessionRecordType::ModelRequestStarted
-                    })
-                    .ok_or_else(|| "model request start fact is missing".to_string())?;
-                let model_request_id = model_request
-                    .event
-                    .payload
-                    .get("requestId")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| "model request start requestId is missing".to_string())?;
-                let turn_id = model_request
-                    .event
-                    .turn_id
-                    .as_deref()
-                    .ok_or_else(|| "model request start turnId is missing".to_string())?;
-                let checkpoint_id = recovery_checkpoint_id(execution_id.as_str(), model_request_id);
-                let current_generation = observed_workspace_generation(docker_execution.as_ref());
-                let should_collect = !workspace_generations_match(
-                    &recovery_workspace_generation,
-                    &current_generation,
-                );
-                let workspace_snapshot = if should_collect {
-                    docker_execution.stage_recovery_workspace(
-                        &workspace_lease,
-                        checkpoint_id.as_str(),
-                        &recovery_workspace_snapshot,
-                        workspace_input_upper_bound_bytes,
-                    )?
-                } else {
-                    recovery_workspace_snapshot.clone()
-                };
-                let checkpoint_generation = if should_collect {
-                    let after_collect = observed_workspace_generation(docker_execution.as_ref());
-                    stable_workspace_generation(&current_generation, after_collect)
-                } else {
-                    current_generation
-                };
-                let session_sequence = committed_sequence
-                    .committed_session_sequence()
-                    .checked_add(events.len() as u64)
-                    .and_then(|value| value.checked_add(1))
-                    .ok_or_else(|| "recovery checkpoint Session sequence overflow".to_string())?;
-                let payload = RuntimeRecoveryCheckpointV1 {
-                    schema: RUNTIME_RECOVERY_CHECKPOINT_SCHEMA_V1.to_string(),
-                    checkpoint_id: checkpoint_id.clone(),
-                    session_id: agent_run_start.authorization.session_id.clone(),
-                    agent_run_id: agent_run_start.agent_run_id.clone(),
-                    execution_id: execution_id.clone(),
-                    authorization_digest: agent_run_start.authorization_digest.clone(),
-                    session_sequence,
-                    model_request_id: model_request_id.to_string(),
-                    workspace_snapshot: workspace_snapshot.clone(),
-                    workspace_generation: checkpoint_generation.clone(),
-                    created_at_ms: now,
-                };
-                payload.validate()?;
-                let checkpoint = CheckpointRecord {
-                    checkpoint_id,
-                    kind: CheckpointKindV1::Recovery,
-                    session_id: agent_run_start.authorization.session_id.clone(),
-                    turn_id: turn_id.to_string(),
-                    status: "committed".to_string(),
-                    done_reason: None,
-                    updated_at_ms: now,
-                    payload_json: serde_json::to_string(&payload)
-                        .map_err(|error| format!("encode recovery checkpoint failed: {error}"))?,
-                };
-                events.push(committed_sequence.checkpoint_ref(&checkpoint)?);
-                recovery_checkpoint = Some((checkpoint, workspace_snapshot, checkpoint_generation));
-                events
-            }
-            ToolSafePoint::ProviderUsage {
-                turn_id,
-                usage,
-                recorded_at_ms,
-            } => provider_usage_session_records(
-                &agent_run_start,
-                turn_id.as_str(),
-                &usage,
-                &mut committed_sequence,
-                recorded_at_ms,
-            )?,
-            ToolSafePoint::DurableToolCall {
-                session_id,
-                turn_id,
-                agent_run_id,
-                call,
-                provider_id,
-                tool_contract_digest,
-                recorded_at_ms,
-            } => {
-                if session_id != agent_run_start.authorization.session_id
-                    || agent_run_id != agent_run_start.agent_run_id
+            let fatal_execution_reason = match &safe_point {
+                ToolSafePoint::DurableReceipt { result, .. }
+                    if matches!(
+                        result.transition_reason.as_deref(),
+                        Some("execution_cancellation_indeterminate")
+                    ) =>
                 {
-                    return Err("tool safe point AgentRun identity mismatch".to_string());
+                    result.transition_reason.clone()
                 }
-                tool_call_session_records(
+                _ => None,
+            };
+            let now = now_ms()?;
+            let mut committed_sequence = safe_point_sequence
+                .lock()
+                .map_err(|_| "session record sequence lock poisoned".to_string())?
+                .clone();
+            let mut recovery_checkpoint = None;
+            let mut ending_lost_execution = false;
+            let events = match safe_point {
+                ToolSafePoint::ReasoningCompleted {
+                    session_id,
+                    turn_id,
+                    request_id,
+                    text,
+                    status,
+                } => {
+                    if session_id != committed_sequence.session_id() {
+                        return Err("reasoning safe point Session identity mismatch".to_string());
+                    }
+                    committed_sequence
+                        .record_reasoning_block(&turn_id, &request_id, &text, &status, now)?
+                        .into_iter()
+                        .collect()
+                }
+                ToolSafePoint::ModelRequestStarted(started) => 'checkpoint: {
+                    let mut events =
+                        committed_sequence.record_model_request_started(&started, now)?;
+                    if !committed_sequence.open_tool_call_ids().is_empty() {
+                        return Err(
+                            "recovery checkpoint requires an empty in-flight tool set".to_string()
+                        );
+                    }
+                    let model_request = events
+                        .iter()
+                        .rev()
+                        .find(|record| {
+                            record.event.event_type == SessionRecordType::ModelRequestStarted
+                        })
+                        .ok_or_else(|| "model request start fact is missing".to_string())?;
+                    let model_request_id = model_request
+                        .event
+                        .payload
+                        .get("requestId")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "model request start requestId is missing".to_string())?;
+                    let turn_id = model_request
+                        .event
+                        .turn_id
+                        .as_deref()
+                        .ok_or_else(|| "model request start turnId is missing".to_string())?;
+                    let checkpoint_id =
+                        recovery_checkpoint_id(execution_id.as_str(), model_request_id);
+                    let witness = docker_execution.recovery_workspace_evidence()?;
+                    // Only a typed dispatch gate can trigger replacement. Docker text,
+                    // `executed: false`, and model output are never sufficient proof.
+                    let pre_dispatch_loss = docker_execution.recovery_failure_evidence()
+                    == execution_recovery_policy::HostFailureEvidence::PreDispatchProcessNotStarted;
+                    if pre_dispatch_loss {
+                        if committed_sequence
+                            .recovery_attempt()
+                            .map_or(0, |attempt| attempt.number)
+                            >= recovery_schedule.maximum_attempts
+                        {
+                            recovery_budget_exhausted.store(true, Ordering::SeqCst);
+                            return Err("execution_recovery_exhausted".to_string());
+                        }
+                        let mut workspace = witness.ok_or_else(|| {
+                            "sandbox recovery has no in-process snapshot witness".to_string()
+                        })?;
+                        workspace.generation_known = matches!(
+                            &recovery_workspace_generation,
+                            ExecutionWorkspaceGeneration::Known { .. }
+                        );
+                        let evidence = execution_recovery_policy::RecoveryEvidence {
+                            failure: docker_execution.recovery_failure_evidence(),
+                            receipt_reported_executed: recovery_suffix.receipt_executed,
+                            durable_receipt_sequence: committed_sequence
+                                .committed_session_sequence(),
+                            previous_checkpoint_sequence,
+                            next_model_request_started: true,
+                            open_tool_calls: committed_sequence.open_tool_call_ids().len(),
+                            parallel_tool_calls: recovery_suffix.parallel_receipts,
+                            tool_calls_since_checkpoint: recovery_suffix.calls,
+                            receipts_since_checkpoint: recovery_suffix.receipts,
+                            all_suffix_tools_are_bash: recovery_suffix.non_bash_calls == 0,
+                            external_or_mcp_calls_since_checkpoint: recovery_suffix.non_bash_calls,
+                            successful_receipts_since_checkpoint: recovery_suffix
+                                .successful_receipts,
+                            facts_since_checkpoint: recovery_suffix.facts,
+                            workspace,
+                        };
+                        execution_recovery_coordinator::validate_sandbox_loss_recovery(
+                            &evidence,
+                            docker_execution.recovery_continuity(),
+                            committed_sequence
+                                .recovery_attempt()
+                                .map_or(0, |attempt| attempt.number),
+                            recovery_schedule.maximum_attempts,
+                        )?;
+                        ending_lost_execution = true;
+                    }
+                    let current_generation = if ending_lost_execution {
+                        recovery_workspace_generation.clone()
+                    } else {
+                        observed_workspace_generation(docker_execution.as_ref())
+                    };
+                    let witness_stable = witness.is_some_and(|evidence| {
+                        evidence.snapshot_activity_epoch == evidence.current_activity_epoch
+                            && evidence.snapshot_host_instance == evidence.current_host_instance
+                    });
+                    let should_collect = !ending_lost_execution
+                        && (!witness_stable
+                            || !workspace_generations_match(
+                                &recovery_workspace_generation,
+                                &current_generation,
+                            ));
+                    let workspace_snapshot = if should_collect {
+                        let Some(snapshot) = docker_execution.stage_recovery_workspace(
+                            &workspace_lease,
+                            checkpoint_id.as_str(),
+                            &recovery_workspace_snapshot,
+                            workspace_input_upper_bound_bytes,
+                        )?
+                        else {
+                            // Commit the real model request, but neither publish an unstable
+                            // checkpoint nor reset the tool suffix used by recovery policy.
+                            break 'checkpoint events;
+                        };
+                        snapshot
+                    } else {
+                        recovery_workspace_snapshot.clone()
+                    };
+                    let checkpoint_generation = if should_collect {
+                        let after_collect =
+                            observed_workspace_generation(docker_execution.as_ref());
+                        stable_workspace_generation(&current_generation, after_collect)
+                    } else {
+                        current_generation
+                    };
+                    let session_sequence = committed_sequence
+                        .committed_session_sequence()
+                        .checked_add(events.len() as u64)
+                        .and_then(|value| value.checked_add(1))
+                        .ok_or_else(|| {
+                            "recovery checkpoint Session sequence overflow".to_string()
+                        })?;
+                    let payload = RuntimeRecoveryCheckpointV1 {
+                        schema: RUNTIME_RECOVERY_CHECKPOINT_SCHEMA_V1.to_string(),
+                        checkpoint_id: checkpoint_id.clone(),
+                        session_id: agent_run_start.authorization.session_id.clone(),
+                        agent_run_id: agent_run_start.agent_run_id.clone(),
+                        execution_id: execution_id.clone(),
+                        authorization_digest: agent_run_start.authorization_digest.clone(),
+                        session_sequence,
+                        model_request_id: model_request_id.to_string(),
+                        workspace_snapshot: workspace_snapshot.clone(),
+                        workspace_generation: checkpoint_generation.clone(),
+                        created_at_ms: now,
+                    };
+                    payload.validate()?;
+                    let checkpoint = CheckpointRecord {
+                        checkpoint_id,
+                        kind: CheckpointKindV1::Recovery,
+                        session_id: agent_run_start.authorization.session_id.clone(),
+                        turn_id: turn_id.to_string(),
+                        status: "committed".to_string(),
+                        done_reason: None,
+                        updated_at_ms: now,
+                        payload_json: serde_json::to_string(&payload).map_err(|error| {
+                            format!("encode recovery checkpoint failed: {error}")
+                        })?,
+                    };
+                    events.push(committed_sequence.checkpoint_ref(&checkpoint)?);
+                    if ending_lost_execution {
+                        events.push(committed_sequence.end_execution(
+                            checkpoint.turn_id.as_str(),
+                            execution_id.as_str(),
+                            "lost",
+                            "execution_environment_lost",
+                            true,
+                            Some(checkpoint.checkpoint_id.as_str()),
+                            Vec::new(),
+                            now,
+                        )?);
+                    }
+                    recovery_checkpoint =
+                        Some((checkpoint, workspace_snapshot, checkpoint_generation));
+                    events
+                }
+                ToolSafePoint::ProviderUsage {
+                    turn_id,
+                    usage,
+                    recorded_at_ms,
+                } => provider_usage_session_records(
                     &agent_run_start,
-                    Some(resolved_inputs.as_ref()),
                     turn_id.as_str(),
-                    &call,
+                    &usage,
                     &mut committed_sequence,
-                    ToolCallRecordContext {
-                        provider_id: provider_id.as_str(),
-                        tool_contract_digest: tool_contract_digest.as_str(),
-                        created_at_ms: recorded_at_ms,
-                    },
-                )?
-            }
-            ToolSafePoint::DurableReceipt {
-                session_id,
-                turn_id,
-                agent_run_id,
-                call,
-                result,
-            } => {
-                if session_id != agent_run_start.authorization.session_id
-                    || agent_run_id != agent_run_start.agent_run_id
-                {
-                    return Err("tool safe point AgentRun identity mismatch".to_string());
+                    recorded_at_ms,
+                )?,
+                ToolSafePoint::DurableToolCall {
+                    session_id,
+                    turn_id,
+                    agent_run_id,
+                    call,
+                    provider_id,
+                    tool_contract_digest,
+                    recorded_at_ms,
+                } => {
+                    if !committed_sequence.has_tool_call(call.id.as_str()) {
+                        recovery_suffix.record_call(call.name.as_str());
+                    }
+                    if session_id != agent_run_start.authorization.session_id
+                        || agent_run_id != agent_run_start.agent_run_id
+                    {
+                        return Err("tool safe point AgentRun identity mismatch".to_string());
+                    }
+                    tool_call_session_records(
+                        &agent_run_start,
+                        Some(resolved_inputs.as_ref()),
+                        turn_id.as_str(),
+                        &call,
+                        &mut committed_sequence,
+                        ToolCallRecordContext {
+                            provider_id: provider_id.as_str(),
+                            tool_contract_digest: tool_contract_digest.as_str(),
+                            created_at_ms: recorded_at_ms,
+                        },
+                    )?
                 }
-                tool_result_session_records(
+                ToolSafePoint::DurableReceipt {
+                    session_id,
+                    turn_id,
+                    agent_run_id,
+                    call,
+                    result,
+                } => {
+                    if !committed_sequence.has_tool_result(result.tool_call_id.as_str()) {
+                        recovery_suffix.record_receipt(&result);
+                    }
+                    if session_id != agent_run_start.authorization.session_id
+                        || agent_run_id != agent_run_start.agent_run_id
+                    {
+                        return Err("tool safe point AgentRun identity mismatch".to_string());
+                    }
+                    tool_result_session_records(
+                        &agent_run_start,
+                        Some(resolved_inputs.as_ref()),
+                        turn_id.as_str(),
+                        &call,
+                        &result,
+                        &mut committed_sequence,
+                        now,
+                    )?
+                }
+                ToolSafePoint::CompletedTurn(turn) => tool_safe_point_session_records(
                     &agent_run_start,
                     Some(resolved_inputs.as_ref()),
-                    turn_id.as_str(),
-                    &call,
-                    &result,
+                    &turn,
                     &mut committed_sequence,
                     now,
-                )?
+                )?,
+            };
+            if events.is_empty() {
+                return fatal_execution_reason
+                    .map(|reason| Err(format!("fatal_execution_outcome:{reason}")))
+                    .unwrap_or(Ok(()));
             }
-            ToolSafePoint::CompletedTurn(turn) => tool_safe_point_session_records(
-                &agent_run_start,
-                Some(resolved_inputs.as_ref()),
-                &turn,
-                &mut committed_sequence,
-                now,
-            )?,
-        };
-        if events.is_empty() {
-            return fatal_execution_reason
-                .map(|reason| Err(format!("fatal_execution_outcome:{reason}")))
-                .unwrap_or(Ok(()));
-        }
-        let receipt = match recovery_checkpoint.as_ref() {
-            Some((checkpoint, _, _)) => session_log
-                .append_recovery_checkpoint_with_runtime_job_lease_blocking(
+            let receipt = match recovery_checkpoint.as_ref() {
+                Some((checkpoint, _, _)) => session_log
+                    .append_recovery_checkpoint_with_runtime_job_lease_blocking(
+                        agent_run_start.agent_run_id.as_str(),
+                        events.as_slice(),
+                        checkpoint,
+                        &terminal_lease_fence,
+                    )?,
+                None => session_log.append_session_records_with_runtime_job_lease_blocking(
                     agent_run_start.agent_run_id.as_str(),
                     events.as_slice(),
-                    checkpoint,
                     &terminal_lease_fence,
                 )?,
-            None => session_log.append_session_records_with_runtime_job_lease_blocking(
-                agent_run_start.agent_run_id.as_str(),
-                events.as_slice(),
-                &terminal_lease_fence,
-            )?,
-        };
-        accept_session_commit(
-            &mut committed_sequence,
-            &mut *session_stream_guard(&safe_point_stream)?,
-            &receipt,
-        )?;
-        *safe_point_sequence
-            .lock()
-            .map_err(|_| "session record sequence lock poisoned".to_string())? = committed_sequence;
-        if let Some((_, workspace_snapshot, workspace_generation)) = recovery_checkpoint {
-            recovery_workspace_snapshot = workspace_snapshot;
-            recovery_workspace_generation = workspace_generation;
-        }
-        if let Some(reason) = fatal_execution_reason {
-            return Err(format!("fatal_execution_outcome:{reason}"));
-        }
-        Ok(())
+            };
+            accept_session_commit(
+                &mut committed_sequence,
+                &mut *session_stream_guard(&safe_point_stream)?,
+                &receipt,
+            )?;
+            *safe_point_sequence
+                .lock()
+                .map_err(|_| "session record sequence lock poisoned".to_string())? =
+                committed_sequence;
+            if let Some((checkpoint, workspace_snapshot, workspace_generation)) =
+                recovery_checkpoint
+            {
+                recovery_workspace_snapshot = workspace_snapshot;
+                recovery_workspace_generation = workspace_generation;
+                previous_checkpoint_sequence =
+                    serde_json::from_str::<RuntimeRecoveryCheckpointV1>(&checkpoint.payload_json)
+                        .map_err(|error| {
+                            format!("decode committed recovery checkpoint failed: {error}")
+                        })?
+                        .session_sequence;
+                recovery_suffix = execution_recovery_policy::RecoverySuffix::default();
+            }
+            if ending_lost_execution {
+                recovery_boundary_committed.store(true, Ordering::SeqCst);
+                return Err("execution_recovery_yield".to_string());
+            }
+            if let Some(reason) = fatal_execution_reason {
+                return Err(format!("fatal_execution_outcome:{reason}"));
+            }
+            Ok(())
+        })
     };
     let agent_run_result = runtime.block_on(async {
         agent_runtime
@@ -3238,6 +3539,26 @@ fn execute_agent_run(
             &terminal_lease_fence,
         );
     }
+    if recovery_boundary_committed.load(Ordering::SeqCst) {
+        return Ok(execution_recovery_waiting(recovery_retry_at_ms(
+            &recovery_schedule,
+            &agent_run_start,
+            &*sequence_guard(&session_record_sequence)?,
+        )?));
+    }
+    if recovery_budget_exhausted.load(Ordering::SeqCst) {
+        return commit_failed_agent_run(
+            &runtime,
+            &session_log,
+            &agent_run_start,
+            &mut *sequence_guard(&session_record_sequence)?,
+            &mut *session_stream_guard(&session_stream)?,
+            "execution recovery attempt budget exhausted",
+            "execution_recovery_exhausted",
+            &*assistant_text_guard(&assistant_text)?,
+            &terminal_lease_fence,
+        );
+    }
     match (agent_run_result, stream_error) {
         (Ok(response), _)
             if response.stop
@@ -3278,6 +3599,7 @@ fn execute_agent_run(
                 &mut *session_stream_guard(&session_stream)?,
             )?;
             Ok(AgentRunStepOutcome {
+                retry_at_ms: None,
                 disposition: "waiting",
                 terminal_state: None,
                 transition_reason: response.stop.reason().to_string(),
@@ -3365,6 +3687,7 @@ fn execute_agent_run(
                     ) => {}
                     Ok(SessionWorkspaceCommitOutcome::Pending) => {
                         return Ok(AgentRunStepOutcome {
+                            retry_at_ms: None,
                             disposition: "waiting",
                             terminal_state: None,
                             transition_reason: "session_workspace_commit_unavailable".to_string(),
@@ -3413,6 +3736,7 @@ fn execute_agent_run(
                 .last()
                 .ok_or_else(|| "final assistant response is missing".to_string())?;
             Ok(AgentRunStepOutcome {
+                retry_at_ms: None,
                 disposition: "terminal",
                 terminal_state: Some("completed"),
                 transition_reason: "runtime_session_terminal_committed".to_string(),
@@ -3693,6 +4017,7 @@ fn commit_failed_agent_run(
     assistant_text: &AssistantTextProjection,
     lease_fence: &RuntimeJobLeaseFence,
 ) -> Result<AgentRunStepOutcome, String> {
+    failure_diagnostics::report(&agent_run_start.agent_run_id, "core_turn", internal_error);
     if provider_response_was_interrupted(internal_error) {
         return commit_interrupted_agent_run(
             runtime,
@@ -3743,6 +4068,7 @@ fn commit_failed_agent_run(
     accept_session_commit(&mut committed_sequence, session_stream, &receipt)?;
     *session_record_sequence = committed_sequence;
     Ok(AgentRunStepOutcome {
+        retry_at_ms: None,
         disposition: "terminal",
         terminal_state: Some("failed"),
         transition_reason: transition_reason.to_string(),
@@ -3812,6 +4138,7 @@ fn commit_interrupted_agent_run(
     accept_session_commit(&mut committed_sequence, session_stream, &receipt)?;
     *session_record_sequence = committed_sequence;
     Ok(AgentRunStepOutcome {
+        retry_at_ms: None,
         disposition: "terminal",
         terminal_state: Some("cancelled"),
         transition_reason: transition_reason.to_string(),
@@ -4204,8 +4531,8 @@ fn observed_workspace_generation(host: &impl ExecutionHostRunner) -> ExecutionWo
     }
     if let ExecutionWorkspaceGeneration::Unknown { reason } = &generation {
         eprintln!(
-                "Workspace generation unavailable: {reason}; transitionReason=workspace_generation_unknown; forceCollect=true"
-            );
+            "Workspace generation unavailable: {reason}; transitionReason=workspace_generation_unknown; forceCollect=true"
+        );
     }
     generation
 }
@@ -4539,11 +4866,10 @@ fn required_tool_input_string<'a>(
 }
 
 fn load_existing_session_sequence(
-    database_url: &str,
+    store: &PostgresRuntimeStore,
     agent_run_start: &AgentRunStart,
 ) -> Result<AgentRunSessionState, String> {
-    let mut client = postgres::Client::connect(database_url, postgres::NoTls)
-        .map_err(|error| format!("connect existing session sequence failed: {error}"))?;
+    store.with_client(|client| {
     let rows = client
         .query(
             "SELECT agent_run_sequence, \"eventId\", payload->>'type', session_id, payload::text FROM app_core_sessionevent WHERE agent_run_id = $1 ORDER BY agent_run_sequence",
@@ -4561,7 +4887,7 @@ fn load_existing_session_sequence(
                 .map_err(|error| format!("decode existing session wire failed: {error}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    hydrate_session_wire_values(&mut client, wires.as_mut_slice())?;
+    hydrate_session_wire_values(client, wires.as_mut_slice())?;
     for ((index, row), wire) in rows.iter().enumerate().zip(wires) {
         let stored_sequence = row.get::<_, i32>(0);
         let expected = i32::try_from(index + 1)
@@ -4611,6 +4937,7 @@ fn load_existing_session_sequence(
             .map_err(|_| "committed session position is invalid".to_string())?,
     );
     Ok(sequence)
+    })
 }
 
 fn latest_recovery_checkpoint(
@@ -4619,71 +4946,80 @@ fn latest_recovery_checkpoint(
     sequence: &AgentRunSessionState,
     require_recoverable: bool,
 ) -> Result<Option<(CheckpointRecord, RuntimeRecoveryCheckpointV1)>, String> {
-    let mut offset = 0;
-    loop {
-        let records = store
-            .list_checkpoints(
-                agent_run_start.authorization.session_id.as_str(),
-                100,
-                offset,
-            )
-            .map_err(|error| format!("load recovery checkpoints failed: {error}"))?;
-        if records.is_empty() {
-            return Ok(None);
-        }
-        for record in &records {
-            if record.kind != CheckpointKindV1::Recovery {
-                continue;
-            }
-            let payload =
-                serde_json::from_str::<RuntimeRecoveryCheckpointV1>(record.payload_json.as_str())
-                    .map_err(|error| format!("decode recovery checkpoint failed: {error}"))?;
-            payload.validate()?;
-            if payload.agent_run_id != agent_run_start.agent_run_id {
-                continue;
-            }
-            if record.checkpoint_id != payload.checkpoint_id
-                || record.session_id != payload.session_id
-                || record.status != "committed"
-                || record.done_reason.is_some()
-                || payload.session_id != agent_run_start.authorization.session_id
-                || payload.authorization_digest != agent_run_start.authorization_digest
-                || payload.session_sequence > sequence.committed_session_sequence()
-                || !sequence.has_checkpoint(payload.checkpoint_id.as_str())
-            {
-                return Err("recovery checkpoint binding mismatch".to_string());
-            }
-            if require_recoverable
-                && sequence.has_used_recovery_checkpoint(payload.checkpoint_id.as_str())
-            {
-                return Err(
-                    "recovery checkpoint already started a replacement Execution".to_string(),
-                );
-            }
-            if require_recoverable && !sequence.tool_ledger_is_checkpointed() {
-                return Err("recovery checkpoint does not cover the tool ledger".to_string());
-            }
-            return Ok(Some((record.clone(), payload)));
-        }
-        offset = offset
-            .checked_add(records.len())
-            .ok_or_else(|| "recovery checkpoint pagination overflow".to_string())?;
+    let Some(checkpoint_id) = sequence.latest_recovery_checkpoint_id() else {
+        return Ok(None);
+    };
+    let record = store
+        .load_recovery_checkpoint_by_id(checkpoint_id)?
+        .ok_or_else(|| "committed recovery checkpoint is missing".to_string())?;
+    let payload = serde_json::from_str::<RuntimeRecoveryCheckpointV1>(&record.payload_json)
+        .map_err(|error| format!("decode recovery checkpoint failed: {error}"))?;
+    payload.validate()?;
+    if record.kind != CheckpointKindV1::Recovery
+        || record.checkpoint_id != payload.checkpoint_id
+        || record.session_id != payload.session_id
+        || record.status != "committed"
+        || record.done_reason.is_some()
+        || payload.agent_run_id != agent_run_start.agent_run_id
+        || payload.session_id != agent_run_start.authorization.session_id
+        || payload.authorization_digest != agent_run_start.authorization_digest
+        || payload.session_sequence > sequence.committed_session_sequence()
+        || !sequence.has_checkpoint(payload.checkpoint_id.as_str())
+    {
+        return Err("recovery checkpoint binding mismatch".to_string());
     }
+    if require_recoverable && sequence.has_used_recovery_checkpoint(&payload.checkpoint_id) {
+        return Err("recovery checkpoint already started a replacement Execution".to_string());
+    }
+    if require_recoverable && !sequence.tool_ledger_is_checkpointed() {
+        return Err("recovery checkpoint does not cover the tool ledger".to_string());
+    }
+    Ok(Some((record, payload)))
 }
 
 fn restore_runtime_state_from_recovery_checkpoint(
-    database_url: &str,
+    job_store: &PostgresRuntimeStore,
     store: &RuntimeStoreActor,
     checkpoint: &RuntimeRecoveryCheckpointV1,
 ) -> Result<(), String> {
-    let mut client = postgres::Client::connect(database_url, postgres::NoTls)
-        .map_err(|error| format!("connect recovery Session replay failed: {error}"))?;
     let session_sequence = i32::try_from(checkpoint.session_sequence)
         .map_err(|_| "recovery checkpoint Session sequence overflow".to_string())?;
+    with_recovery_session_events(
+        job_store,
+        checkpoint.session_id.as_str(),
+        session_sequence,
+        |events| {
+            let snapshot = restore_runtime_snapshot_from_session_records(
+                checkpoint.session_id.as_str(),
+                &events,
+            )?;
+            SessionManager::new(store.clone()).save_session(&snapshot)
+        },
+    )
+}
+
+fn with_recovery_session_events<T>(
+    store: &PostgresRuntimeStore,
+    session_id: &str,
+    session_sequence: i32,
+    followup: impl FnOnce(Vec<centaeris_core::session::SessionLogRecord>) -> Result<T, String>,
+) -> Result<T, String> {
+    let events = load_recovery_session_events(store, session_id, session_sequence)?;
+    // Loading owns the decoded records, so its database lease ends before the
+    // follow-up may call RuntimeStoreActor through the same capacity-one pool.
+    followup(events)
+}
+
+fn load_recovery_session_events(
+    store: &PostgresRuntimeStore,
+    session_id: &str,
+    session_sequence: i32,
+) -> Result<Vec<centaeris_core::session::SessionLogRecord>, String> {
+    store.with_client(|client| {
     let rows = client
         .query(
             "SELECT sequence,payload::text FROM app_core_sessionevent WHERE session_id=$1 AND sequence<=$2 ORDER BY sequence",
-            &[&checkpoint.session_id, &session_sequence],
+            &[&session_id, &session_sequence],
         )
         .map_err(|error| format!("load recovery Session replay failed: {error}"))?;
     if rows.last().map(|row| row.get::<_, i32>(0)) != Some(session_sequence) {
@@ -4696,26 +5032,23 @@ fn restore_runtime_state_from_recovery_checkpoint(
                 .map_err(|error| format!("decode recovery Session wire failed: {error}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    hydrate_session_wire_values(&mut client, wires.as_mut_slice())?;
-    let events = wires
+    hydrate_session_wire_values(client, wires.as_mut_slice())?;
+    wires
         .iter()
         .map(|wire| {
             parse_wire_record(wire)
                 .map(|record| record.event)
                 .map_err(|error| format!("decode recovery Session record failed: {error}"))
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    let snapshot =
-        restore_runtime_snapshot_from_session_records(checkpoint.session_id.as_str(), &events)?;
-    SessionManager::new(store.clone()).save_session(&snapshot)
+        .collect::<Result<Vec<_>, _>>()
+    })
 }
 
 fn load_existing_terminal_state(
-    database_url: &str,
+    store: &PostgresRuntimeStore,
     agent_run_start: &AgentRunStart,
 ) -> Result<Option<&'static str>, String> {
-    let mut client = postgres::Client::connect(database_url, postgres::NoTls)
-        .map_err(|error| format!("connect existing terminal state failed: {error}"))?;
+    let terminal = store.with_client(|client| {
     let rows = client
         .query(
             "SELECT payload->>'type', session_id FROM app_core_sessionevent WHERE agent_run_id=$1 AND payload->>'type' IN ('agent_run_completed','agent_run_failed','agent_run_interrupted') ORDER BY sequence",
@@ -4737,16 +5070,23 @@ fn load_existing_terminal_state(
             "agent_run_interrupted" => "cancelled",
             _ => unreachable!("terminal query only returns supported types"),
         }))
+    })?;
+    if terminal.is_some() {
+        store.repair_terminal_runtime_job_waits(
+            &agent_run_start.authorization.session_id,
+            &agent_run_start.agent_run_id,
+        )?;
+    }
+    Ok(terminal)
 }
 
 fn has_terminal_agent_run_identity(
-    database_url: &str,
+    store: &PostgresRuntimeStore,
     session_id: &str,
     identity: &RuntimeAgentRunIdentityV1,
 ) -> Result<bool, String> {
     identity.validate()?;
-    let mut client = postgres::Client::connect(database_url, postgres::NoTls)
-        .map_err(|error| format!("connect terminal AgentRun identity failed: {error}"))?;
+    store.with_client(|client| {
     let rows = client
         .query(
             concat!(
@@ -4766,6 +5106,7 @@ fn has_terminal_agent_run_identity(
         return Err("terminal AgentRun identity conflict".to_string());
     }
     Ok(rows.len() == 1)
+    })
 }
 
 fn workspace_input_upper_bound_bytes(agent_run_start: &AgentRunStart) -> Result<u64, String> {
@@ -4807,7 +5148,7 @@ fn acknowledge_terminal_completed_projection(
 }
 
 fn validate_completed_projection_session_log(
-    database_url: &str,
+    store: &PostgresRuntimeStore,
     agent_run_start: &AgentRunStart,
     projection: &CompletedTurnProjectionV1,
     sequence: &AgentRunSessionState,
@@ -4826,32 +5167,32 @@ fn validate_completed_projection_session_log(
     if expected_tool_calls != committed_tool_calls {
         return Err("completed_turn_projection_tool_receipts_mismatch".to_string());
     }
-    let mut client = postgres::Client::connect(database_url, postgres::NoTls)
-        .map_err(|error| format!("connect completed projection validation failed: {error}"))?;
-    let rows = client
-        .query(
-            concat!(
+    store.with_client(|client| {
+        let rows = client
+            .query(
+                concat!(
                 "SELECT payload->>'modelMarkdown' FROM app_core_sessionevent ",
                 "WHERE agent_run_id=$1 AND session_id=$2 AND payload->>'type'='assistant_message' ",
                 "AND payload->>'turnId'=$3 AND payload->>'messageId'=$4 ",
                 "AND payload->>'status'='done'",
             ),
-            &[
-                &agent_run_start.agent_run_id,
-                &agent_run_start.authorization.session_id,
-                &projection.final_turn_id,
-                &assistant_message_id(projection.final_turn_id.as_str()),
-            ],
-        )
-        .map_err(|error| format!("query completed projection assistant failed: {error}"))?;
-    if rows.len() != 1
-        || rows[0]
-            .get::<_, Option<String>>(0)
-            .is_none_or(|text| text.trim().is_empty())
-    {
-        return Err("completed_turn_projection_final_assistant_missing".to_string());
-    }
-    Ok(())
+                &[
+                    &agent_run_start.agent_run_id,
+                    &agent_run_start.authorization.session_id,
+                    &projection.final_turn_id,
+                    &assistant_message_id(projection.final_turn_id.as_str()),
+                ],
+            )
+            .map_err(|error| format!("query completed projection assistant failed: {error}"))?;
+        if rows.len() != 1
+            || rows[0]
+                .get::<_, Option<String>>(0)
+                .is_none_or(|text| text.trim().is_empty())
+        {
+            return Err("completed_turn_projection_final_assistant_missing".to_string());
+        }
+        Ok(())
+    })
 }
 
 fn initial_execution_id(agent_run_start: &AgentRunStart) -> String {
@@ -4867,12 +5208,16 @@ fn initial_execution_id(agent_run_start: &AgentRunStart) -> String {
     )
 }
 
-fn replacement_execution_id(agent_run_start: &AgentRunStart, checkpoint_id: &str) -> String {
+fn replacement_execution_id(
+    agent_run_start: &AgentRunStart,
+    checkpoint_id: &str,
+    attempt: u64,
+) -> String {
     format!(
         "execution:{:x}",
         Sha256::digest(
             format!(
-                "workspace_agent_replacement_execution_v1:{}:{}:{checkpoint_id}",
+                "workspace_agent_replacement_execution_v1:{}:{}:{checkpoint_id}:{attempt}",
                 agent_run_start.agent_run_id, agent_run_start.authorization_digest
             )
             .as_bytes()
@@ -4943,12 +5288,14 @@ struct RuntimeHttpResponse {
 
 impl RuntimeHttpResponse {
     fn into_axum_response(self) -> Response<Body> {
-        match Response::builder()
+        let mut builder = Response::builder()
             .status(self.status)
             .header(header::CONTENT_TYPE, self.content_type)
-            .header(header::CONNECTION, "close")
-            .body(Body::from(self.body))
-        {
+            .header(header::CONNECTION, "close");
+        if self.status == 429 || self.status == 503 {
+            builder = builder.header(header::RETRY_AFTER, "5");
+        }
+        match builder.body(Body::from(self.body)) {
             Ok(response) => response,
             Err(error) => {
                 eprintln!("build runtime HTTP response failed: {error}");
@@ -5113,6 +5460,8 @@ mod tests {
     fn agent_run_step_outcome_accepts_only_canonical_waiting_reasons() {
         for transition_reason in AGENT_RUN_WAITING_TRANSITION_REASONS {
             AgentRunStepOutcome {
+                retry_at_ms: (*transition_reason == "execution_recovery_checkpoint_committed")
+                    .then_some(1),
                 disposition: "waiting",
                 terminal_state: None,
                 transition_reason: (*transition_reason).to_string(),
@@ -5126,6 +5475,7 @@ mod tests {
             "sandbox_prepare_unavailable:detail",
         ] {
             assert!(AgentRunStepOutcome {
+                retry_at_ms: None,
                 disposition: "waiting",
                 terminal_state: None,
                 transition_reason: transition_reason.to_string(),

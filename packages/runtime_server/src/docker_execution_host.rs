@@ -1,10 +1,19 @@
+use crate::docker_engine::{ExecChild, ExecReader, ExecRequest};
+use crate::execution_recovery_coordinator::OwnedExecutionContinuity;
+use crate::execution_recovery_policy::{
+    ExecutionActivityWitness, HostFailureEvidence, SnapshotCaptureError, WorkspaceReuseEvidence,
+};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
+#[cfg(test)]
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Mutex};
+
+static NEXT_EXECUTION_HOST_INSTANCE: AtomicU64 = AtomicU64::new(1);
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -259,6 +268,10 @@ fn plugin_command_path(activation: &PluginActivationSnapshotV1) -> Result<String
 }
 
 pub struct DockerExecutionHostRunner {
+    recovery_activity: ExecutionActivityWitness,
+    recovery_snapshot: Mutex<Option<WorkspaceReuseEvidence>>,
+    pre_dispatch_loss: AtomicBool,
+    deferred_extension_dispatch: AtomicBool,
     container_name: String,
     agent_run_id: String,
     execution_id: String,
@@ -279,28 +292,76 @@ pub struct DockerExecutionHostRunner {
 }
 
 struct WorkspaceGenerationRpc {
-    child: Child,
-    stdin: Option<ChildStdin>,
+    child: RpcChild,
+    stdin: Option<Box<dyn Write + Send>>,
+    stderr: Option<thread::JoinHandle<Result<BoundedRead, String>>>,
     responses: Option<mpsc::Receiver<Result<Vec<u8>, String>>>,
     reader: Option<thread::JoinHandle<()>>,
 }
 
+enum RpcChild {
+    Engine(ExecChild),
+    #[cfg(test)]
+    Process(Child),
+}
+impl RpcChild {
+    #[cfg(test)]
+    fn id(&self) -> String {
+        match self {
+            Self::Process(child) => child.id().to_string(),
+            Self::Engine(child) => child.id.clone(),
+        }
+    }
+    fn try_wait(&mut self) -> Result<Option<String>, String> {
+        match self {
+            Self::Engine(child) => child
+                .try_wait()
+                .map(|status| status.map(|status| status.to_string())),
+            #[cfg(test)]
+            Self::Process(child) => child
+                .try_wait()
+                .map(|status| status.map(|status| status.to_string()))
+                .map_err(|e| e.to_string()),
+        }
+    }
+    fn disconnect(&mut self) {
+        match self {
+            Self::Engine(child) => child.disconnect(),
+            #[cfg(test)]
+            Self::Process(child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+}
+
 impl WorkspaceGenerationRpc {
+    #[cfg(test)]
     fn spawn(command: &mut Command) -> Result<Self, String> {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|error| format!("start workspace generation RPC failed: {error}"))?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "workspace generation RPC stdin is unavailable".to_string())?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "workspace generation RPC stdout is unavailable".to_string())?;
+            .map_err(|e| e.to_string())?;
+        let stdin = Box::new(child.stdin.take().ok_or("RPC stdin missing")?);
+        let stdout = Box::new(child.stdout.take().ok_or("RPC stdout missing")?);
+        Self::from_streams(RpcChild::Process(child), stdin, stdout, None)
+    }
+    fn from_exec(mut child: ExecChild) -> Result<Self, String> {
+        let stdin = Box::new(child.stdin.take().ok_or("RPC stdin missing")?);
+        let stdout = Box::new(child.stdout.take().ok_or("RPC stdout missing")?);
+        let stderr = child.stderr.take().ok_or("RPC stderr missing")?;
+        let drain = thread::spawn(move || read_bounded(stderr, DOCKER_DIAGNOSTIC_LIMIT));
+        Self::from_streams(RpcChild::Engine(child), stdin, stdout, Some(drain))
+    }
+    fn from_streams(
+        child: RpcChild,
+        stdin: Box<dyn Write + Send>,
+        stdout: Box<dyn Read + Send>,
+        stderr: Option<thread::JoinHandle<Result<BoundedRead, String>>>,
+    ) -> Result<Self, String> {
         let (sender, responses) = mpsc::sync_channel(1);
         let reader = thread::spawn(move || {
             let mut stdout = BufReader::new(stdout);
@@ -314,6 +375,7 @@ impl WorkspaceGenerationRpc {
         });
         Ok(Self {
             child,
+            stderr,
             stdin: Some(stdin),
             responses: Some(responses),
             reader: Some(reader),
@@ -360,8 +422,10 @@ impl Drop for WorkspaceGenerationRpc {
     fn drop(&mut self) {
         self.responses.take();
         self.stdin.take();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.child.disconnect();
+        if let Some(stderr) = self.stderr.take() {
+            let _ = stderr.join();
+        }
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
@@ -430,6 +494,43 @@ struct ContainerExpectation<'a> {
 }
 
 impl DockerExecutionHostRunner {
+    pub(crate) fn recovery_continuity(&self) -> OwnedExecutionContinuity {
+        match inspect_container(&self.container_name) {
+            Ok(None) => OwnedExecutionContinuity::OwnedMissing,
+            Ok(Some(facts)) if !facts.matches_configuration(&self.container_expectation()) => {
+                OwnedExecutionContinuity::IdentityMismatch
+            }
+            Ok(Some(facts)) if !facts.running => OwnedExecutionContinuity::OwnedStopped,
+            Ok(Some(_)) => OwnedExecutionContinuity::OwnedRunning,
+            Err(_) => OwnedExecutionContinuity::InspectUnavailable,
+        }
+    }
+
+    pub(crate) fn recovery_workspace_evidence(
+        &self,
+    ) -> Result<Option<WorkspaceReuseEvidence>, String> {
+        let snapshot = self
+            .recovery_snapshot
+            .lock()
+            .map_err(|_| "recovery snapshot lock poisoned")?;
+        Ok(snapshot.as_ref().map(|snapshot| {
+            let mut evidence = self.recovery_activity.workspace_evidence(snapshot);
+            // An exec request can be dispatched after it was returned. Until that
+            // lifecycle is explicitly tracked, never attest a quiesced MCP host.
+            evidence.snapshot_was_quiesced &=
+                !self.deferred_extension_dispatch.load(Ordering::SeqCst);
+            evidence
+        }))
+    }
+
+    pub(crate) fn recovery_failure_evidence(&self) -> HostFailureEvidence {
+        if self.pre_dispatch_loss.load(Ordering::SeqCst) {
+            HostFailureEvidence::PreDispatchProcessNotStarted
+        } else {
+            HostFailureEvidence::Unknown
+        }
+    }
+
     pub fn new(request: DockerExecutionHostRequest<'_>) -> Result<Self, String> {
         let DockerExecutionHostRequest {
             agent_run_id,
@@ -482,6 +583,12 @@ impl DockerExecutionHostRunner {
             has_execution_fact,
         )?;
         let runner = Self {
+            recovery_activity: ExecutionActivityWitness::new(
+                NEXT_EXECUTION_HOST_INSTANCE.fetch_add(1, Ordering::Relaxed),
+            ),
+            recovery_snapshot: Mutex::new(None),
+            pre_dispatch_loss: AtomicBool::new(false),
+            deferred_extension_dispatch: AtomicBool::new(false),
             container_name,
             agent_run_id,
             execution_id,
@@ -542,9 +649,8 @@ impl DockerExecutionHostRunner {
         docker_volume_name_from_environment(AGENT_MEMORY_VOLUME_NAME_ENV)?;
         let oci_runtime = OciRuntime::from_environment()?;
         let runtime_name = oci_runtime.docker_runtime_name();
-        let output = docker(&["info", "--format", "{{json .Runtimes}}"])?;
-        let runtimes = serde_json::from_slice::<serde_json::Value>(output.stdout.as_slice())
-            .map_err(|error| format!("decode Docker runtimes failed: {error}"))?;
+        let info = crate::docker_engine::info()?;
+        let runtimes = &info["Runtimes"];
         if runtimes.get(runtime_name).is_none() {
             return Err(format!(
                 "configured OCI runtime is unavailable: {runtime_name}"
@@ -553,12 +659,21 @@ impl DockerExecutionHostRunner {
         Ok(())
     }
 
-    pub(crate) fn mcp_stdio_command(
+    fn exec_request(&self, command: Vec<String>) -> ExecRequest {
+        ExecRequest::owned(
+            &self.container_name,
+            &self.agent_run_id,
+            &self.execution_id,
+            command,
+        )
+    }
+
+    pub(crate) fn mcp_exec_request(
         &self,
         plugin_name: &str,
         program: &str,
         program_args: &[String],
-    ) -> Result<tokio::process::Command, String> {
+    ) -> Result<ExecRequest, String> {
         let mount = self
             .plugin_mounts
             .iter()
@@ -571,31 +686,22 @@ impl DockerExecutionHostRunner {
             return Err("MCP stdio program must belong to its activated plugin".to_string());
         }
         let path_env = format!("PATH={}", self.command_path);
-        let mut command = tokio::process::Command::new("docker");
-        command.args([
-            "exec",
-            "--interactive",
-            "--user",
-            AGENT_USER,
-            "--workdir",
-            WORKSPACE_DATA_ROOT,
-            "--env",
-            "HOME=/home/agent",
-            "--env",
-            path_env.as_str(),
-            "--env",
-            "TMPDIR=/tmp",
-            self.container_name.as_str(),
-            program.as_str(),
-        ]);
-        command.args(program_args);
-        Ok(command)
+        self.deferred_extension_dispatch
+            .store(true, Ordering::SeqCst);
+        self.recovery_activity.invalidate_before_dispatch()?;
+        let mut command = vec![program];
+        command.extend_from_slice(program_args);
+        let mut request = self.exec_request(command);
+        request.user = Some(AGENT_USER.to_string());
+        request.cwd = Some(WORKSPACE_DATA_ROOT.to_string());
+        request.env = vec!["HOME=/home/agent".into(), path_env, "TMPDIR=/tmp".into()];
+        Ok(request)
     }
 
-    fn lifecycle_hook_docker_args(
+    fn lifecycle_hook_exec_request(
         &self,
         handler: &LifecycleHookHandlerV1,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<ExecRequest, String> {
         if handler.source.kind != LifecycleHookSourceKindV1::Plugin {
             return Err("Workspace lifecycle hook source must be Plugin".to_string());
         }
@@ -609,14 +715,9 @@ impl DockerExecutionHostRunner {
                     handler.source.name
                 )
             })?;
-        let mut args = vec![
-            "exec".to_string(),
-            "--interactive".to_string(),
-            "--user".to_string(),
-            AGENT_USER.to_string(),
-            "--workdir".to_string(),
-            mount.destination.clone(),
-        ];
+        let mut request = self.exec_request(Vec::new());
+        request.user = Some(AGENT_USER.to_string());
+        request.cwd = Some(mount.destination.clone());
         for (name, value) in [
             ("LANG", "C.UTF-8"),
             ("LC_ALL", "C.UTF-8"),
@@ -625,18 +726,17 @@ impl DockerExecutionHostRunner {
             ("PATH", self.command_path.as_str()),
             ("TMPDIR", "/tmp"),
         ] {
-            args.extend(["--env".to_string(), format!("{name}={value}")]);
+            request.env.push(format!("{name}={value}"));
         }
-        args.extend([
-            self.container_name.clone(),
+        request.command.extend([
             "/usr/bin/timeout".to_string(),
             "--signal=TERM".to_string(),
             "--kill-after=1s".to_string(),
             coreutils_timeout_duration(handler.timeout_ms),
             handler.program.clone(),
         ]);
-        args.extend(handler.args.clone());
-        Ok(args)
+        request.command.extend(handler.args.clone());
+        Ok(request)
     }
 
     fn run_lifecycle_hook_command(
@@ -647,14 +747,9 @@ impl DockerExecutionHostRunner {
         let mut stdin_json = serde_json::to_vec(event)
             .map_err(|error| format!("serialize lifecycle hook event failed: {error}"))?;
         stdin_json.push(b'\n');
-        let args = self.lifecycle_hook_docker_args(handler)?;
-        let mut child = Command::new("docker")
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("start lifecycle hook docker exec failed: {error}"))?;
+        let request = self.lifecycle_hook_exec_request(handler)?;
+        self.recovery_activity.invalidate_before_dispatch()?;
+        let mut child = request.spawn()?;
         let stdout = child
             .stdout
             .take()
@@ -667,7 +762,7 @@ impl DockerExecutionHostRunner {
         let stderr_reader = thread::spawn(move || read_bounded(stderr, DOCKER_DIAGNOSTIC_LIMIT));
         if let Some(mut stdin) = child.stdin.take() {
             if let Err(error) = stdin.write_all(stdin_json.as_slice()) {
-                let _ = child.kill();
+                child.disconnect();
                 let _ = child.wait();
                 return Err(format!("write lifecycle hook stdin failed: {error}"));
             }
@@ -682,7 +777,7 @@ impl DockerExecutionHostRunner {
                 Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
                 Ok(None) => {
                     let teardown = Self::teardown(self.agent_run_id.as_str());
-                    let _ = child.kill();
+                    child.disconnect();
                     let _ = child.wait();
                     return Err(teardown.err().unwrap_or_else(|| {
                         "lifecycle hook docker exec exceeded its confirmed deadline; sandbox removed"
@@ -690,7 +785,7 @@ impl DockerExecutionHostRunner {
                     }));
                 }
                 Err(error) => {
-                    let _ = child.kill();
+                    child.disconnect();
                     let _ = child.wait();
                     return Err(format!("wait lifecycle hook docker exec failed: {error}"));
                 }
@@ -714,14 +809,14 @@ impl DockerExecutionHostRunner {
     }
 
     pub fn teardown(agent_run_id: &str) -> Result<(), String> {
-        for name in container_names_for_agent_run(agent_run_id)? {
+        for name in container_ids_for_agent_run(agent_run_id)? {
             let Some(facts) = inspect_container(name.as_str())? else {
                 continue;
             };
             if !facts.has_agent_run_identity(agent_run_id) {
                 return Err("sandbox container identity mismatch; refusing teardown".to_string());
             }
-            docker(&["rm", "--force", name.as_str()])?;
+            crate::docker_engine::remove(&facts.id, false)?;
             if inspect_container(name.as_str())?.is_some() {
                 return Err("sandbox container teardown was not confirmed".to_string());
             }
@@ -986,14 +1081,84 @@ impl DockerExecutionHostRunner {
         }
     }
 
+    /// Concurrent host activity defers this checkpoint; it cannot attest a reusable snapshot.
     pub(crate) fn stage_recovery_workspace(
         &self,
         lease: &SessionWorkspaceLease,
         checkpoint_id: &str,
         previous: &RecoveryWorkspaceSnapshotV1,
         input_upper_bound_bytes: u64,
+    ) -> Result<Option<RecoveryWorkspaceSnapshotV1>, String> {
+        self.capture_recovery_workspace(|| {
+            self.stage_recovery_workspace_inner(
+                lease,
+                checkpoint_id,
+                previous,
+                input_upper_bound_bytes,
+            )
+            .inspect_err(|error| {
+                crate::failure_diagnostics::report(
+                    &self.agent_run_id,
+                    "recovery_snapshot_stage",
+                    error,
+                )
+            })
+        })
+    }
+
+    fn capture_recovery_workspace(
+        &self,
+        collect: impl FnOnce() -> Result<RecoveryWorkspaceSnapshotV1, String>,
+    ) -> Result<Option<RecoveryWorkspaceSnapshotV1>, String> {
+        *self
+            .recovery_snapshot
+            .lock()
+            .map_err(|_| "recovery snapshot lock poisoned")? = None;
+        let token = self.recovery_activity.begin_snapshot_capture();
+        let snapshot = collect()?;
+        let evidence = match self
+            .recovery_activity
+            .complete_quiesced_snapshot(token, true, true)
+        {
+            Ok(evidence) => evidence,
+            Err(SnapshotCaptureError::ActivityChanged) => {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "event": "recovery_checkpoint_deferred", "agentRunId": self.agent_run_id,
+                        "reason": "workspace_activity_changed",
+                    })
+                );
+                return Ok(None);
+            }
+            Err(SnapshotCaptureError::HostChanged) => {
+                return Err(
+                    "execution host changed during workspace snapshot collection".to_string(),
+                );
+            }
+        };
+        *self
+            .recovery_snapshot
+            .lock()
+            .map_err(|_| "recovery snapshot lock poisoned")? = Some(evidence);
+        self.pre_dispatch_loss.store(false, Ordering::SeqCst);
+        Ok(Some(snapshot))
+    }
+
+    fn stage_recovery_workspace_inner(
+        &self,
+        lease: &SessionWorkspaceLease,
+        checkpoint_id: &str,
+        previous: &RecoveryWorkspaceSnapshotV1,
+        input_upper_bound_bytes: u64,
     ) -> Result<RecoveryWorkspaceSnapshotV1, String> {
-        let descriptor = self.inspect_snapshot_collect()?;
+        let descriptor = self.inspect_snapshot_collect().inspect_err(|error| {
+            crate::failure_diagnostics::report(
+                &self.agent_run_id,
+                "recovery_snapshot_collect",
+                error,
+            )
+        })?;
         self.require_workspace_capacity(descriptor.expanded_size_bytes, input_upper_bound_bytes)?;
         if snapshot_matches_recovery_workspace(&descriptor, previous) {
             return Ok(previous.clone());
@@ -1182,23 +1347,13 @@ impl DockerExecutionHostRunner {
         Ok(())
     }
 
-    fn snapshot_collect_command(&self) -> Result<Child, String> {
+    fn snapshot_collect_command(&self) -> Result<ExecChild, String> {
         self.quiesce_agent_processes()?;
-        Command::new("docker")
-            .args([
-                "exec",
-                "--interactive",
-                "--workdir",
-                WORKSPACE_DATA_ROOT,
-                self.container_name.as_str(),
-                AGENT_BINARY,
-                "snapshot-collect",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("start snapshot collect helper failed: {error}"))
+        let mut request = self.exec_request(vec![AGENT_BINARY.into(), "snapshot-collect".into()]);
+        request.cwd = Some(WORKSPACE_DATA_ROOT.into());
+        let mut child = request.spawn()?;
+        child.stdin.take();
+        Ok(child)
     }
 
     fn inspect_snapshot_collect(&self) -> Result<WorkspaceSnapshotDescriptor, String> {
@@ -1216,7 +1371,7 @@ impl DockerExecutionHostRunner {
             Ok(result) => result,
             Err(error) => {
                 drop(stdout);
-                let _ = child.kill();
+                child.disconnect();
                 let _ = child.wait();
                 let _ = stderr_reader.join();
                 return Err(error);
@@ -1270,22 +1425,21 @@ impl DockerExecutionHostRunner {
         expected_size_bytes: u64,
         expected_sha256: &str,
     ) -> Result<(), String> {
+        self.recovery_activity.invalidate_before_dispatch()?;
         self.quiesce_agent_processes()?;
-        let mut child = Command::new("docker")
-            .args([
-                "exec",
-                "--interactive",
-                "--workdir",
-                WORKSPACE_DATA_ROOT,
-                self.container_name.as_str(),
-                AGENT_BINARY,
-                "snapshot-restore",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("start snapshot restore helper failed: {error}"))?;
+        let mut request = self.exec_request(vec![AGENT_BINARY.into(), "snapshot-restore".into()]);
+        request.cwd = Some(WORKSPACE_DATA_ROOT.into());
+        let mut child = request.spawn()?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("snapshot restore stdout missing")?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or("snapshot restore stderr missing")?;
+        let stdout_reader = thread::spawn(move || read_bounded(stdout, DOCKER_DIAGNOSTIC_LIMIT));
+        let stderr_reader = thread::spawn(move || read_bounded(stderr, DOCKER_DIAGNOSTIC_LIMIT));
         let mut stdin = child
             .stdin
             .take()
@@ -1293,17 +1447,21 @@ impl DockerExecutionHostRunner {
         let copy = copy_exact(source, &mut stdin, expected_size_bytes, expected_sha256);
         drop(stdin);
         if let Err(error) = copy {
-            let _ = child.kill();
+            child.disconnect();
             let _ = child.wait();
             return Err(error);
         }
-        let output = child
-            .wait_with_output()
-            .map_err(|error| format!("wait for snapshot restore helper failed: {error}"))?;
-        if !output.status.success() {
+        let status = child.wait()?;
+        let _stdout = stdout_reader
+            .join()
+            .map_err(|_| "snapshot restore stdout reader panicked")??;
+        let stderr = stderr_reader
+            .join()
+            .map_err(|_| "snapshot restore stderr reader panicked")??;
+        if !status.success() {
             return Err(format!(
                 "snapshot restore helper failed: {}",
-                bounded_diagnostic(output.stderr.as_slice())
+                bounded_diagnostic(&stderr.bytes)
             ));
         }
         Ok(())
@@ -1457,18 +1615,16 @@ impl DockerExecutionHostRunner {
         input: &[u8],
         output_limit: usize,
     ) -> Result<Vec<u8>, String> {
-        let mut args = vec!["exec".to_string(), "--interactive".to_string()];
-        if let Some(user) = user {
-            args.extend(["--user".to_string(), user.to_string()]);
+        if !matches!(
+            mode,
+            "read-artifact" | "input-inventory" | "quiesce-agent-processes"
+        ) {
+            self.recovery_activity.invalidate_before_dispatch()?;
         }
-        args.extend([
-            "--workdir".to_string(),
-            WORKSPACE_DATA_ROOT.to_string(),
-            self.container_name.clone(),
-            AGENT_BINARY.to_string(),
-            mode.to_string(),
-        ]);
-        let output = command_with_input("docker", args.as_slice(), input)?;
+        let mut request = self.exec_request(vec![AGENT_BINARY.into(), mode.into()]);
+        request.user = user.map(str::to_string);
+        request.cwd = Some(WORKSPACE_DATA_ROOT.into());
+        let output = exec_with_input(&request, input, output_limit)?;
         if !output.status.success() {
             return Err(format!(
                 "sandbox helper {mode} failed: {}",
@@ -1482,17 +1638,10 @@ impl DockerExecutionHostRunner {
     }
 
     fn start_workspace_generation_rpc(&self) -> Result<WorkspaceGenerationRpc, String> {
-        let mut command = Command::new("docker");
-        command.args([
-            "exec",
-            "--interactive",
-            "--workdir",
-            WORKSPACE_DATA_ROOT,
-            self.container_name.as_str(),
-            AGENT_BINARY,
-            "workspace-generation-rpc",
-        ]);
-        WorkspaceGenerationRpc::spawn(&mut command)
+        let mut request =
+            self.exec_request(vec![AGENT_BINARY.into(), "workspace-generation-rpc".into()]);
+        request.cwd = Some(WORKSPACE_DATA_ROOT.into());
+        WorkspaceGenerationRpc::from_exec(request.spawn()?)
     }
 
     fn protected_input_error(
@@ -1557,7 +1706,14 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
         self.validate_policy(policy)?;
         let facts = inspect_container(self.container_name.as_str())
             .map_err(|error| self.unavailable(error))?
-            .ok_or_else(|| self.unavailable("sandbox container is missing"))?;
+            .ok_or_else(|| {
+                self.pre_dispatch_loss.store(true, Ordering::SeqCst);
+                self.unavailable("sandbox container is missing")
+            })?;
+        if facts.matches_configuration(&self.container_expectation()) && !facts.running {
+            self.pre_dispatch_loss.store(true, Ordering::SeqCst);
+            return Err(self.unavailable("sandbox container is stopped"));
+        }
         if !facts.matches(&self.container_expectation())
             || !workspace_execution_sentinel_matches(
                 self.container_name.as_str(),
@@ -1712,42 +1868,40 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
         cancellation_probe: Option<&ExecutionCancellationProbe>,
     ) -> Result<ExecutionHostCommandOutput, SandboxErr> {
         self.status(&request.policy)?;
+        self.recovery_activity
+            .invalidate_before_dispatch()
+            .map_err(|error| self.unavailable(error))?;
         let input_state_changes = self.refresh_materialized_inputs()?;
-        let mut args = vec![
-            "exec".to_string(),
-            "--user".to_string(),
-            AGENT_USER.to_string(),
-            "--workdir".to_string(),
-            WORKSPACE_DATA_ROOT.to_string(),
-        ];
+        let mut command = self.exec_request(Vec::new());
+        command.user = Some(AGENT_USER.into());
+        command.cwd = Some(WORKSPACE_DATA_ROOT.into());
         for (name, default) in [("LANG", "C.UTF-8"), ("LC_ALL", "C.UTF-8"), ("TERM", "dumb")] {
             let value = request.env.get(name).map(String::as_str).unwrap_or(default);
-            args.extend(["--env".to_string(), format!("{name}={value}")]);
+            command.env.push(format!("{name}={value}"));
         }
         for (name, value) in [
             ("HOME", WORKSPACE_HOME),
             ("PATH", self.command_path.as_str()),
             ("TMPDIR", "/tmp"),
         ] {
-            args.extend(["--env".to_string(), format!("{name}={value}")]);
+            command.env.push(format!("{name}={value}"));
         }
-        args.extend([
-            self.container_name.clone(),
+        command.command.extend([
             "/usr/bin/timeout".to_string(),
             "--signal=TERM".to_string(),
             "--kill-after=1s".to_string(),
             coreutils_timeout_duration(request.timeout_ms),
             request.program,
         ]);
-        args.extend(request.args);
+        command.command.extend(request.args);
 
-        let mut child = Command::new("docker")
-            .args(args.as_slice())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+        let mut child = command
             .spawn()
-            .map_err(|error| self.unavailable(format!("start docker exec failed: {error}")))?;
+            .map_err(|error| SandboxErr::CancellationIndeterminate {
+                reason: error,
+                sandbox_type: Some(self.oci_runtime.sandbox_type()),
+            })?;
+        child.stdin.take();
         let stdout = child
             .stdout
             .take()
@@ -1756,10 +1910,9 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
             .stderr
             .take()
             .ok_or_else(|| self.unavailable("docker exec stderr is unavailable"))?;
-        // ponytail: V1 buffers complete command output in memory; replace this with a
-        // streaming ToolResult sink when measured output can exceed the Host budget.
-        let stdout_reader = thread::spawn(move || read_all(stdout));
-        let stderr_reader = thread::spawn(move || read_all(stderr));
+        // Drain both channels, retaining at most 8 MiB each and exact raw byte counts.
+        let stdout_reader = thread::spawn(move || capture_command_output(stdout, 8 * 1024 * 1024));
+        let stderr_reader = thread::spawn(move || capture_command_output(stderr, 8 * 1024 * 1024));
         let deadline =
             Instant::now() + Duration::from_millis(request.timeout_ms.saturating_add(5_000));
         let (exit_code, timed_out, cancelled) = loop {
@@ -1772,11 +1925,11 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
                 {
                     match Self::teardown(self.agent_run_id.as_str()) {
                         Ok(()) => {
-                            let _ = child.wait();
+                            child.disconnect();
                             break (None, false, true);
                         }
                         Err(error) => {
-                            let _ = child.kill();
+                            child.disconnect();
                             let _ = child.wait();
                             return Err(SandboxErr::CancellationIndeterminate {
                                 reason: error,
@@ -1792,7 +1945,7 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
                 Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
                 Ok(None) => {
                     let teardown = Self::teardown(self.agent_run_id.as_str());
-                    let _ = child.kill();
+                    child.disconnect();
                     let _ = child.wait();
                     return Err(SandboxErr::CancellationIndeterminate {
                         reason: teardown.err().unwrap_or_else(|| {
@@ -1802,7 +1955,7 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
                     });
                 }
                 Err(error) => {
-                    let _ = child.kill();
+                    child.disconnect();
                     let _ = child.wait();
                     return Err(SandboxErr::CancellationIndeterminate {
                         reason: format!("poll docker exec failed: {error}"),
@@ -1813,16 +1966,38 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
         };
         let stdout = stdout_reader
             .join()
-            .map_err(|_| self.unavailable("docker exec stdout reader panicked"))?
-            .map_err(|error| self.unavailable(error))?;
+            .map_err(|_| self.unavailable("exec stdout reader panicked"))?;
         let stderr = stderr_reader
             .join()
-            .map_err(|_| self.unavailable("docker exec stderr reader panicked"))?
-            .map_err(|error| self.unavailable(error))?;
+            .map_err(|_| self.unavailable("exec stderr reader panicked"))?;
+        if !cancelled {
+            if let Some(error) = stdout.error.as_ref().or(stderr.error.as_ref()) {
+                return Err(SandboxErr::CancellationIndeterminate {
+                    reason: error.clone(),
+                    sandbox_type: Some(self.oci_runtime.sandbox_type()),
+                });
+            }
+        }
+        let stdout = stdout.output;
+        let stderr = stderr.output;
         let mut stdout_decoded = decode_process_output(stdout.bytes.as_slice());
         let mut stderr_decoded = decode_process_output(stderr.bytes.as_slice());
         stdout_decoded.summary.raw_byte_length = stdout.total_bytes;
         stderr_decoded.summary.raw_byte_length = stderr.total_bytes;
+        let mut diagnostics = Vec::new();
+        for (stream, captured, decoded) in [
+            ("stdout", &stdout, &mut stdout_decoded),
+            ("stderr", &stderr, &mut stderr_decoded),
+        ] {
+            if captured.total_bytes > captured.bytes.len() {
+                decoded.text.push_str("\n[output truncated at 8 MiB]");
+                diagnostics.push(centaeris_core::execution::sandbox::RuntimeOutputDiagnostic {
+                    source: "execution_host".into(), stream: stream.into(), severity: "warning".into(),
+                    code: "output_truncated".into(), message: "Output exceeded the per-stream retention limit".into(),
+                    details: Some(serde_json::json!({"retainedBytes":captured.bytes.len(), "rawBytes":captured.total_bytes})),
+                });
+            }
+        }
         if timed_out {
             stderr_decoded.text = format!(
                 "sandboxed process timed out after {}ms\n{}",
@@ -1852,7 +2027,7 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
                     transition_reason: self.oci_runtime.transition_reason().to_string(),
                     policy: policy_summary(self.oci_runtime.sandbox_type(), &request.policy),
                 },
-                runtime_diagnostics: Vec::new(),
+                runtime_diagnostics: diagnostics,
             },
             failure_kind,
             input_state_changes,
@@ -1921,103 +2096,100 @@ fn ensure_container(
             if !facts.has_identity(expected.agent_run_id, expected.execution_id) {
                 return Err("sandbox container identity mismatch; refusing replacement".to_string());
             }
-            if facts.matches(expected)
-                && workspace_execution_sentinel_matches(
-                    expected.name,
-                    expected.agent_run_id,
-                    expected.execution_id,
-                    expected.authorization_digest,
-                )?
-            {
+            if !facts.matches_configuration(expected) {
+                return Err(
+                    "sandbox container configuration mismatch; refusing replacement".to_string(),
+                );
+            }
+            if !facts.running {
+                return Err("execution_environment_lost:container_stopped".to_string());
+            }
+            if workspace_execution_sentinel_matches(
+                expected.name,
+                expected.agent_run_id,
+                expected.execution_id,
+                expected.authorization_digest,
+            )? {
                 return Ok(());
             }
-            return Err("execution_environment_lost:workspace_identity_mismatch".to_string());
+            return Err("sandbox workspace identity mismatch; refusing replacement".to_string());
         }
         if !facts.has_identity(expected.agent_run_id, expected.execution_id) {
             return Err("sandbox container identity mismatch; refusing replacement".to_string());
         }
-        docker(&["rm", "--force", expected.name])?;
+        if !facts.matches_configuration(expected) {
+            return Err(
+                "sandbox container configuration mismatch; refusing replacement".to_string(),
+            );
+        }
     } else if has_execution_fact {
         return Err("execution_environment_lost:container_missing".to_string());
     }
 
+    let id = crate::docker_engine::ensure_created(expected.name, container_create_body(expected)?)?;
+    let prepared = (|| {
+        crate::docker_engine::start(&id)?;
+        let facts =
+            inspect_container(&id)?.ok_or("sandbox container disappeared after creation")?;
+        if !facts.matches(expected) {
+            return Err("sandbox container creation verification failed".to_string());
+        }
+        write_workspace_execution_sentinel(
+            &id,
+            expected.agent_run_id,
+            expected.execution_id,
+            expected.authorization_digest,
+        )
+    })();
+    if let Err(error) = prepared {
+        // No Execution fact or user tool dispatch exists at this preparation
+        // boundary. Remove only the verified immutable container we prepared.
+        let cleanup = crate::docker_engine::remove(&id, false);
+        return Err(match cleanup {
+            Ok(()) => error,
+            Err(cleanup) => format!("{error}; sandbox preparation cleanup failed: {cleanup}"),
+        });
+    }
+    Ok(())
+}
+
+fn container_create_body(expected: &ContainerExpectation<'_>) -> Result<serde_json::Value, String> {
+    use serde_json::json;
     let cpu_quota = u64::from(expected.resources.cpu_milli)
         .checked_mul(100)
-        .ok_or_else(|| "sandbox CPU quota overflow".to_string())?;
-    let labels = [
-        ("centaeris.managed", "true"),
-        ("centaeris.agent_run_id", expected.agent_run_id),
-        ("centaeris.execution_id", expected.execution_id),
-    ];
-    let mut args = vec![
-        "run".to_string(),
-        "--detach".to_string(),
-        "--name".to_string(),
-        expected.name.to_string(),
-        "--runtime".to_string(),
-        expected.oci_runtime.docker_runtime_name().to_string(),
-        "--network".to_string(),
-        SANDBOX_NETWORK_MODE.to_string(),
-        "--read-only".to_string(),
-        "--cap-drop".to_string(),
-        "ALL".to_string(),
-        "--cap-add".to_string(),
-        "CHOWN".to_string(),
-        "--security-opt".to_string(),
-        "no-new-privileges".to_string(),
-        "--memory".to_string(),
-        expected.resources.memory_bytes.to_string(),
-        "--cpu-period".to_string(),
-        "100000".to_string(),
-        "--cpu-quota".to_string(),
-        cpu_quota.to_string(),
-        "--pids-limit".to_string(),
-        expected.resources.pids_limit.to_string(),
-        "--tmpfs".to_string(),
-        format!(
-            "/mnt/data:rw,exec,nosuid,nodev,size={},uid=0,gid=0,mode=1777",
-            expected.resources.data_tmpfs_bytes
-        ),
-        "--tmpfs".to_string(),
-        "/tmp:rw,exec,nosuid,nodev,size=268435456,mode=1777".to_string(),
-        "--tmpfs".to_string(),
-        "/home/agent:rw,nosuid,nodev,size=134217728,uid=10001,gid=10001,mode=0700".to_string(),
-        "--tmpfs".to_string(),
-        "/run/centaeris:rw,noexec,nosuid,nodev,size=8388608,uid=0,gid=0,mode=0700".to_string(),
-    ];
-    for (name, value) in labels {
-        args.extend(["--label".to_string(), format!("{name}={value}")]);
-    }
-    for mount in expected.plugin_mounts {
-        args.extend([
-            "--mount".to_string(),
-            format!(
-                "type=volume,src={},dst={},ro,volume-subpath={}",
-                expected.plugin_volume_name, mount.destination, mount.package_name
-            ),
-        ]);
-    }
-    args.extend([
-        "--mount".to_string(),
-        format!(
-            "type=volume,src={},dst={MEMORY_CONTAINER_ROOT},volume-subpath={}",
-            expected.memory_mount.volume_name, expected.memory_mount.scope_key
-        ),
-    ]);
-    args.push(expected.image_digest.to_string());
-    docker_owned(args.as_slice())?;
-    let facts = inspect_container(expected.name)?
-        .ok_or_else(|| "sandbox container disappeared after creation".to_string())?;
-    if !facts.matches(expected) {
-        return Err("sandbox container creation verification failed".to_string());
-    }
-    write_workspace_execution_sentinel(
-        expected.name,
-        expected.agent_run_id,
-        expected.execution_id,
-        expected.authorization_digest,
-    )?;
-    Ok(())
+        .ok_or("sandbox CPU quota overflow")?;
+    let mut mounts = expected
+        .plugin_mounts
+        .iter()
+        .map(|mount| {
+            json!({
+                "Type":"volume", "Source":expected.plugin_volume_name, "Target":mount.destination,
+                "ReadOnly":true, "VolumeOptions":{"Subpath":mount.package_name},
+            })
+        })
+        .collect::<Vec<_>>();
+    mounts.push(
+        json!({"Type":"volume", "Source":expected.memory_mount.volume_name,
+        "Target":MEMORY_CONTAINER_ROOT, "ReadOnly":false,
+        "VolumeOptions":{"Subpath":expected.memory_mount.scope_key}}),
+    );
+    Ok(json!({
+        "Image":expected.image_digest,
+        "Labels":{"centaeris.managed":"true", "centaeris.agent_run_id":expected.agent_run_id,
+            "centaeris.execution_id":expected.execution_id},
+        "HostConfig":{
+            "Runtime":expected.oci_runtime.docker_runtime_name(), "NetworkMode":SANDBOX_NETWORK_MODE,
+            "ReadonlyRootfs":true, "CapDrop":["ALL"], "CapAdd":["CHOWN"],
+            "SecurityOpt":["no-new-privileges"], "Memory":expected.resources.memory_bytes,
+            "CpuPeriod":100000, "CpuQuota":cpu_quota, "PidsLimit":expected.resources.pids_limit,
+            "Tmpfs":{
+                "/mnt/data":format!("rw,exec,nosuid,nodev,size={},uid=0,gid=0,mode=1777",expected.resources.data_tmpfs_bytes),
+                "/tmp":"rw,exec,nosuid,nodev,size=268435456,mode=1777",
+                "/home/agent":"rw,nosuid,nodev,size=134217728,uid=10001,gid=10001,mode=0700",
+                "/run/centaeris":"rw,noexec,nosuid,nodev,size=8388608,uid=0,gid=0,mode=0700"
+            }, "Mounts":mounts
+        }
+    }))
 }
 
 fn container_name(execution_id: &str) -> String {
@@ -2057,17 +2229,18 @@ fn write_workspace_execution_sentinel(
         authorization_digest,
     ))
     .map_err(|error| format!("encode workspace execution sentinel failed: {error}"))?;
-    let args = vec![
-        "exec".to_string(),
-        "--interactive".to_string(),
-        "--user".to_string(),
-        "0:0".to_string(),
-        name.to_string(),
-        "/bin/sh".to_string(),
-        "-c".to_string(),
-        format!("umask 077; cat > {WORKSPACE_EXECUTION_SENTINEL}"),
-    ];
-    let output = command_with_input("docker", args.as_slice(), bytes.as_slice())?;
+    let mut request = ExecRequest::owned(
+        name,
+        agent_run_id,
+        execution_id,
+        vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            format!("umask 077; cat > {WORKSPACE_EXECUTION_SENTINEL}"),
+        ],
+    );
+    request.user = Some("0:0".into());
+    let output = exec_with_input(&request, &bytes, DOCKER_DIAGNOSTIC_LIMIT)?;
     if !output.status.success() {
         return Err(format!(
             "write workspace execution sentinel failed: {}",
@@ -2083,17 +2256,14 @@ fn workspace_execution_sentinel_matches(
     execution_id: &str,
     authorization_digest: &str,
 ) -> Result<bool, String> {
-    let output = raw_command(
-        "docker",
-        &[
-            "exec",
-            "--user",
-            "0:0",
-            name,
-            "/bin/cat",
-            WORKSPACE_EXECUTION_SENTINEL,
-        ],
-    )?;
+    let mut request = ExecRequest::owned(
+        name,
+        agent_run_id,
+        execution_id,
+        vec!["cat".into(), WORKSPACE_EXECUTION_SENTINEL.into()],
+    );
+    request.user = Some("0:0".into());
+    let output = exec_with_input(&request, &[], DOCKER_DIAGNOSTIC_LIMIT)?;
     if !output.status.success() {
         let diagnostic = bounded_diagnostic(output.stderr.as_slice());
         if diagnostic.to_ascii_lowercase().contains("no such file") {
@@ -2109,27 +2279,16 @@ fn workspace_execution_sentinel_matches(
         == expected_workspace_execution_sentinel(agent_run_id, execution_id, authorization_digest))
 }
 
-fn container_names_for_agent_run(agent_run_id: &str) -> Result<Vec<String>, String> {
-    let filter = format!("label=centaeris.agent_run_id={agent_run_id}");
-    let output = docker(&[
-        "ps",
-        "--all",
-        "--filter",
-        filter.as_str(),
-        "--format",
-        "{{.Names}}",
-    ])?;
-    Ok(String::from_utf8_lossy(output.stdout.as_slice())
-        .lines()
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .collect())
+fn container_ids_for_agent_run(agent_run_id: &str) -> Result<Vec<String>, String> {
+    crate::docker_engine::list_owned(agent_run_id)
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct ContainerFacts {
+    id: String,
+    #[serde(skip)]
+    raw: serde_json::Value,
     running: bool,
     image: String,
     runtime: String,
@@ -2183,7 +2342,12 @@ impl ContainerFacts {
     }
 
     fn matches(&self, expected: &ContainerExpectation<'_>) -> bool {
-        self.running
+        self.running && self.matches_configuration(expected)
+    }
+
+    fn matches_configuration(&self, expected: &ContainerExpectation<'_>) -> bool {
+        container_create_body(expected)
+            .is_ok_and(|body| crate::docker_engine::verify_created(&self.raw, &body).is_ok())
             && self.has_identity(expected.agent_run_id, expected.execution_id)
             && self.image == expected.image_digest
             && self.runtime == expected.oci_runtime.docker_runtime_name()
@@ -2240,81 +2404,54 @@ fn memory_mount_matches(actual: &[ContainerMountFacts], expected: &MemoryMount) 
 }
 
 fn inspect_container(name: &str) -> Result<Option<ContainerFacts>, String> {
-    let output = raw_command(
-        "docker",
-        &[
-            "inspect",
-            "--format",
-            "{\"Running\":{{json .State.Running}},\"Image\":{{json .Image}},\"Runtime\":{{json .HostConfig.Runtime}},\"Labels\":{{json .Config.Labels}},\"Memory\":{{json .HostConfig.Memory}},\"CpuPeriod\":{{json .HostConfig.CpuPeriod}},\"CpuQuota\":{{json .HostConfig.CpuQuota}},\"PidsLimit\":{{json .HostConfig.PidsLimit}},\"ReadonlyRootfs\":{{json .HostConfig.ReadonlyRootfs}},\"NetworkMode\":{{json .HostConfig.NetworkMode}},\"Mounts\":{{with index .HostConfig \"Mounts\"}}{{json .}}{{else}}[]{{end}}}",
-            name,
-        ],
-    )?;
-    if !output.status.success() {
-        let diagnostic = bounded_diagnostic(output.stderr.as_slice());
-        if is_missing_container_diagnostic(diagnostic.as_str()) {
-            return Ok(None);
-        }
-        return Err(format!("docker inspect failed: {diagnostic}"));
+    crate::docker_engine::inspect(name)?.map(|facts| {
+        let host = &facts["HostConfig"];
+        let mut parsed: ContainerFacts = serde_json::from_value(serde_json::json!({
+            "Id":facts["Id"], "Running":facts["State"]["Running"], "Image":facts["Image"],
+            "Runtime":host["Runtime"], "Labels":facts["Config"]["Labels"],
+            "Memory":host["Memory"], "CpuPeriod":host["CpuPeriod"], "CpuQuota":host["CpuQuota"],
+            "PidsLimit":host["PidsLimit"], "ReadonlyRootfs":host["ReadonlyRootfs"],
+            "NetworkMode":host["NetworkMode"], "Mounts":host["Mounts"].as_array().cloned().unwrap_or_default(),
+        })).map_err(|error| format!("decode sandbox container facts failed: {error}"))?;
+        parsed.raw = facts;
+        Ok(parsed)
+    }).transpose()
+}
+
+struct ExecOutput {
+    status: crate::docker_engine::ExecStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn exec_with_input(
+    request: &ExecRequest,
+    input: &[u8],
+    output_limit: usize,
+) -> Result<ExecOutput, String> {
+    let mut child = request.spawn()?;
+    let stdout = child.stdout.take().ok_or("exec stdout missing")?;
+    let stderr = child.stderr.take().ok_or("exec stderr missing")?;
+    let stdout_reader = thread::spawn(move || read_bounded(stdout, output_limit));
+    let stderr_reader = thread::spawn(move || read_bounded(stderr, DOCKER_DIAGNOSTIC_LIMIT));
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(input).map_err(|e| e.to_string())?;
     }
-    serde_json::from_slice(output.stdout.as_slice())
-        .map(Some)
-        .map_err(|error| format!("decode sandbox container facts failed: {error}"))
-}
-
-fn is_missing_container_diagnostic(diagnostic: &str) -> bool {
-    let diagnostic = diagnostic.to_ascii_lowercase();
-    diagnostic.contains("no such object") || diagnostic.contains("no such container")
-}
-
-fn docker(args: &[&str]) -> Result<Output, String> {
-    let output = raw_command("docker", args)?;
-    if !output.status.success() {
-        return Err(format!(
-            "docker command failed: {}",
-            bounded_diagnostic(output.stderr.as_slice())
-        ));
+    let status = child.wait()?;
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| "exec stdout reader panicked")??;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| "exec stderr reader panicked")??;
+    if stdout.total_bytes > output_limit {
+        return Err("exec helper exceeded output limit".into());
     }
-    Ok(output)
-}
-
-pub(crate) fn docker_owned(args: &[String]) -> Result<Output, String> {
-    let output = Command::new("docker")
-        .args(args)
-        .output()
-        .map_err(|error| format!("start docker command failed: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "docker command failed: {}",
-            bounded_diagnostic(output.stderr.as_slice())
-        ));
-    }
-    Ok(output)
-}
-
-fn raw_command(program: &str, args: &[&str]) -> Result<Output, String> {
-    Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|error| format!("start {program} failed: {error}"))
-}
-
-fn command_with_input(program: &str, args: &[String], input: &[u8]) -> Result<Output, String> {
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("start {program} failed: {error}"))?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| format!("{program} stdin is unavailable"))?
-        .write_all(input)
-        .map_err(|error| format!("write {program} stdin failed: {error}"))?;
-    child
-        .wait_with_output()
-        .map_err(|error| format!("wait for {program} failed: {error}"))
+    Ok(ExecOutput {
+        status,
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
+    })
 }
 
 pub(crate) fn bounded_diagnostic(bytes: &[u8]) -> String {
@@ -2341,6 +2478,7 @@ struct BoundedRead {
     total_bytes: usize,
 }
 
+#[cfg(test)]
 fn read_all(mut reader: impl Read) -> Result<BoundedRead, String> {
     let mut bytes = Vec::new();
     reader
@@ -2348,6 +2486,40 @@ fn read_all(mut reader: impl Read) -> Result<BoundedRead, String> {
         .map_err(|error| format!("read docker exec output failed: {error}"))?;
     let total_bytes = bytes.len();
     Ok(BoundedRead { bytes, total_bytes })
+}
+
+struct CapturedOutput {
+    output: BoundedRead,
+    error: Option<String>,
+}
+
+fn capture_command_output(mut reader: impl Read, limit: usize) -> CapturedOutput {
+    let mut output = BoundedRead {
+        bytes: Vec::new(),
+        total_bytes: 0,
+    };
+    let mut buffer = [0u8; 8192];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => {
+                return CapturedOutput {
+                    output,
+                    error: None,
+                };
+            }
+            Ok(count) => {
+                output.total_bytes = output.total_bytes.saturating_add(count);
+                let keep = count.min(limit.saturating_sub(output.bytes.len()));
+                output.bytes.extend_from_slice(&buffer[..keep]);
+            }
+            Err(error) => {
+                return CapturedOutput {
+                    output,
+                    error: Some(error.to_string()),
+                };
+            }
+        }
+    }
 }
 
 fn read_bounded(mut reader: impl Read, limit: usize) -> Result<BoundedRead, String> {
@@ -2521,8 +2693,8 @@ struct WorkspaceSnapshotDescriptor {
 }
 
 struct WorkspaceSnapshotReader {
-    child: Option<Child>,
-    stdout: ChildStdout,
+    child: Option<ExecChild>,
+    stdout: ExecReader,
     stderr: Option<thread::JoinHandle<Result<BoundedRead, String>>>,
     expected: WorkspaceSnapshotDescriptor,
     remaining: u64,
@@ -2586,8 +2758,8 @@ pub(crate) fn resolve_workspace_image_digest() -> Result<String, String> {
             "{WORKSPACE_GENERAL_IMAGE_ENV} is not a canonical Docker image reference"
         ));
     }
-    let output = docker(&["image", "inspect", "--format", "{{.Id}}", image.as_str()])?;
-    parse_docker_image_digest(output.stdout.as_slice())
+    let digest = crate::docker_engine::image_id(&image)?;
+    parse_docker_image_digest(digest.as_bytes())
 }
 
 fn parse_docker_image_digest(output: &[u8]) -> Result<String, String> {
@@ -2636,7 +2808,7 @@ impl Drop for WorkspaceSnapshotReader {
     fn drop(&mut self) {
         if !self.finished {
             if let Some(child) = self.child.as_mut() {
-                let _ = child.kill();
+                child.disconnect();
                 let _ = child.wait();
             }
         }
@@ -2912,6 +3084,23 @@ enum ProjectedInputState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn command_capture_bounds_retention_and_keeps_failure_evidence() {
+        let captured = super::capture_command_output(&b"0123456789"[..], 4);
+        assert_eq!(captured.output.bytes, b"0123");
+        assert_eq!(captured.output.total_bytes, 10);
+        assert!(captured.error.is_none());
+        struct Broken;
+        impl std::io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("transport lost"))
+            }
+        }
+        let stream = std::io::Read::chain(&b"partial"[..], Broken);
+        let captured = super::capture_command_output(stream, 64);
+        assert_eq!(captured.output.bytes, b"partial");
+        assert_eq!(captured.error.as_deref(), Some("transport lost"));
+    }
     use super::*;
     use centaeris_core::execution::{
         ExecutionFileIdentity, ExecutionFileReadOutput, ExecutionHostBinding, ExecutionHostMode,
@@ -3034,22 +3223,28 @@ mod tests {
     fn workspace_generation_rpc_docker_42_query_benchmark() {
         let container = std::env::var("CENTAERIS_GENERATION_BENCH_CONTAINER")
             .expect("Docker generation benchmark container");
-        let mut command = Command::new("docker");
-        command.args([
-            "exec",
-            "--interactive",
-            "--workdir",
-            WORKSPACE_DATA_ROOT,
-            container.as_str(),
-            AGENT_BINARY,
-            "workspace-generation-rpc",
-        ]);
-        assert_generation_rpc_42_query_metrics(&mut command, "docker");
+        let cold_started = Instant::now();
+        let mut request = ExecRequest::new(
+            &container,
+            vec![AGENT_BINARY.into(), "workspace-generation-rpc".into()],
+        );
+        request.cwd = Some(WORKSPACE_DATA_ROOT.into());
+        let rpc =
+            WorkspaceGenerationRpc::from_exec(request.spawn().expect("start Engine RPC")).unwrap();
+        assert_generation_rpc_metrics(rpc, cold_started, "docker_engine");
     }
 
     fn assert_generation_rpc_42_query_metrics(command: &mut Command, transport: &str) {
         let cold_started = Instant::now();
-        let mut rpc = WorkspaceGenerationRpc::spawn(command).expect("start test RPC");
+        let rpc = WorkspaceGenerationRpc::spawn(command).expect("start test RPC");
+        assert_generation_rpc_metrics(rpc, cold_started, transport);
+    }
+
+    fn assert_generation_rpc_metrics(
+        mut rpc: WorkspaceGenerationRpc,
+        cold_started: Instant,
+        transport: &str,
+    ) {
         let process_id = rpc.child.id();
         let mut durations = Vec::new();
         let mut expected_generation = None;
@@ -3203,19 +3398,6 @@ mod tests {
         assert_eq!(summary.workspace_root, WORKSPACE_DATA_ROOT);
         assert_eq!(summary.network, NetworkSandboxPolicy::Disabled);
         assert_eq!(SANDBOX_NETWORK_MODE, "none");
-    }
-
-    #[test]
-    fn docker_missing_container_diagnostic_accepts_docker_29_casing_only() {
-        assert!(is_missing_container_diagnostic(
-            "error: no such object: centaeris-agent-run-1"
-        ));
-        assert!(is_missing_container_diagnostic(
-            "Error: No such container: centaeris-agent-run-1"
-        ));
-        assert!(!is_missing_container_diagnostic(
-            "error during connect: docker daemon unavailable"
-        ));
     }
 
     #[test]
@@ -3531,8 +3713,117 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn engine_creation_preserves_sandbox_limits_and_mount_isolation() {
+        let mut runner = test_docker_execution_host_runner();
+        runner.resources.cpu_milli = 4000;
+        runner.resources.memory_bytes = 8 * 1024 * 1024 * 1024;
+        let body = container_create_body(&runner.container_expectation()).unwrap();
+        assert_eq!(body["Image"], runner.image_digest);
+        assert_eq!(
+            body["Labels"]["centaeris.execution_id"],
+            runner.execution_id
+        );
+        let host = &body["HostConfig"];
+        assert_eq!(host["CpuPeriod"], 100000);
+        assert_eq!(host["CpuQuota"], 400000);
+        assert_eq!(host["Memory"], 8u64 * 1024 * 1024 * 1024);
+        assert_eq!(host["PidsLimit"], runner.resources.pids_limit);
+        assert_eq!(host["NetworkMode"], "none");
+        assert_eq!(host["ReadonlyRootfs"], true);
+        assert_eq!(host["CapDrop"], serde_json::json!(["ALL"]));
+        assert_eq!(host["CapAdd"], serde_json::json!(["CHOWN"]));
+        assert_eq!(
+            host["SecurityOpt"],
+            serde_json::json!(["no-new-privileges"])
+        );
+        assert_eq!(host["Mounts"][0]["ReadOnly"], true);
+        assert_eq!(host["Mounts"][0]["VolumeOptions"]["Subpath"], "banana");
+        assert_eq!(host["Mounts"][1]["ReadOnly"], false);
+        assert_eq!(host["Mounts"][1]["VolumeOptions"]["Subpath"], "memory-test");
+        // Verify the actual SDK request retains all configured fields before
+        // any daemon-dependent gate is run.
+        let encoded = serde_json::to_value(
+            serde_json::from_value::<bollard::models::ContainerCreateBody>(body.clone()).unwrap(),
+        )
+        .unwrap();
+        for (key, value) in host.as_object().unwrap() {
+            // Models may add null defaults inside nested objects; security
+            // verification itself permits only those extra defaults.
+            let facts =
+                serde_json::json!({"Id":"test", "HostConfig":{key:encoded["HostConfig"][key]}});
+            let requested = serde_json::json!({"HostConfig":{key:value}});
+            assert!(
+                crate::docker_engine::verify_created(&facts, &requested).is_ok(),
+                "{key}"
+            );
+        }
+    }
+
+    fn empty_recovery_snapshot() -> RecoveryWorkspaceSnapshotV1 {
+        RecoveryWorkspaceSnapshotV1 {
+            object_ref: None,
+            snapshot_sha256: String::new(),
+            snapshot_size_bytes: 0,
+            expanded_size_bytes: 0,
+            file_count: 0,
+        }
+    }
+
+    #[test]
+    fn recovery_snapshot_activity_defers_without_reusing_old_witness_or_retrying() {
+        let runner = test_docker_execution_host_runner();
+        let previous = empty_recovery_snapshot();
+        assert!(runner
+            .capture_recovery_workspace(|| Ok(previous.clone()))
+            .unwrap()
+            .is_some());
+        assert!(runner.recovery_workspace_evidence().unwrap().is_some());
+        let mut calls = 0;
+        let candidate = runner
+            .capture_recovery_workspace(|| {
+                calls += 1;
+                runner
+                    .recovery_activity
+                    .invalidate_before_dispatch()
+                    .unwrap();
+                Ok(previous.clone())
+            })
+            .expect("concurrent activity defers checkpoint rather than failing the parent");
+        assert!(candidate.is_none());
+        assert_eq!(calls, 1, "no internal collection or tool retry");
+        assert!(runner.recovery_workspace_evidence().unwrap().is_none());
+        assert_eq!(
+            runner
+                .capture_recovery_workspace(|| Ok(previous.clone()))
+                .unwrap(),
+            Some(previous)
+        );
+        let fresh = runner.recovery_workspace_evidence().unwrap().unwrap();
+        assert_eq!(fresh.snapshot_activity_epoch, fresh.current_activity_epoch);
+        assert_eq!(fresh.snapshot_activity_epoch, 1);
+    }
+
+    #[test]
+    fn recovery_snapshot_collection_error_still_fails_and_clears_witness() {
+        let runner = test_docker_execution_host_runner();
+        runner
+            .capture_recovery_workspace(|| Ok(empty_recovery_snapshot()))
+            .unwrap();
+        let result =
+            runner.capture_recovery_workspace(|| Err("snapshot upload failed".to_string()));
+        assert_eq!(result, Err("snapshot upload failed".to_string()));
+        assert!(runner.recovery_workspace_evidence().unwrap().is_none());
+    }
+
     fn test_docker_execution_host_runner() -> DockerExecutionHostRunner {
         DockerExecutionHostRunner {
+            recovery_activity: ExecutionActivityWitness::new(
+                NEXT_EXECUTION_HOST_INSTANCE.fetch_add(1, Ordering::Relaxed),
+            ),
+            recovery_snapshot: Mutex::new(None),
+            pre_dispatch_loss: AtomicBool::new(false),
+            deferred_extension_dispatch: AtomicBool::new(false),
             container_name: "centaeris-agent-run-test".to_string(),
             agent_run_id: "agent_run_test".to_string(),
             execution_id: "execution_test".to_string(),
@@ -3581,45 +3872,37 @@ mod tests {
     }
 
     #[test]
-    fn mcp_stdio_command_is_bound_to_the_agent_run_container() {
+    fn mcp_exec_is_bound_to_the_agent_run_container() {
         let runner = test_docker_execution_host_runner();
-        let command = runner
-            .mcp_stdio_command(
+        let request = runner
+            .mcp_exec_request(
                 "banana",
                 "bin/banana-mcp",
-                &["--mode".to_string(), "stdio".to_string()],
+                &["--mode".into(), "stdio".into()],
             )
-            .expect("MCP command");
-        let args = command
-            .as_std()
-            .get_args()
-            .map(|arg| arg.to_string_lossy().to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(command.as_std().get_program(), "docker");
+            .unwrap();
+        assert_eq!(request.container, "centaeris-agent-run-test");
+        assert_eq!(request.user.as_deref(), Some("10001:10001"));
+        assert_eq!(request.cwd.as_deref(), Some("/mnt/data"));
         assert_eq!(
-            args,
+            request.command,
             [
-                "exec",
-                "--interactive",
-                "--user",
-                "10001:10001",
-                "--workdir",
-                "/mnt/data",
-                "--env",
-                "HOME=/home/agent",
-                "--env",
-                "PATH=/opt/centaeris/plugins/banana/bin:/usr/bin",
-                "--env",
-                "TMPDIR=/tmp",
-                "centaeris-agent-run-test",
                 "/opt/centaeris/plugins/banana/bin/banana-mcp",
                 "--mode",
-                "stdio",
+                "stdio"
+            ]
+        );
+        assert_eq!(
+            request.env,
+            [
+                "HOME=/home/agent",
+                "PATH=/opt/centaeris/plugins/banana/bin:/usr/bin",
+                "TMPDIR=/tmp"
             ]
         );
 
         let hook_args = runner
-            .lifecycle_hook_docker_args(&LifecycleHookHandlerV1 {
+            .lifecycle_hook_exec_request(&LifecycleHookHandlerV1 {
                 id: "banana:guard".to_string(),
                 event: centaeris_core::extension::hooks::LifecycleHookEventNameV1::PreToolUse,
                 matcher: Some("write".to_string()),
@@ -3634,37 +3917,35 @@ mod tests {
                 timeout_ms: 5_000,
             })
             .expect("Hook command");
+        assert_eq!(hook_args.container, "centaeris-agent-run-test");
+        assert_eq!(hook_args.user.as_deref(), Some("10001:10001"));
         assert_eq!(
-            hook_args,
+            hook_args.cwd.as_deref(),
+            Some("/opt/centaeris/plugins/banana")
+        );
+        assert_eq!(
+            hook_args.command,
             [
-                "exec",
-                "--interactive",
-                "--user",
-                "10001:10001",
-                "--workdir",
-                "/opt/centaeris/plugins/banana",
-                "--env",
-                "LANG=C.UTF-8",
-                "--env",
-                "LC_ALL=C.UTF-8",
-                "--env",
-                "TERM=dumb",
-                "--env",
-                "HOME=/home/agent",
-                "--env",
-                "PATH=/opt/centaeris/plugins/banana/bin:/usr/bin",
-                "--env",
-                "TMPDIR=/tmp",
-                "centaeris-agent-run-test",
                 "/usr/bin/timeout",
                 "--signal=TERM",
                 "--kill-after=1s",
                 "5.000s",
                 "node",
-                "hooks/guard-write.mjs",
+                "hooks/guard-write.mjs"
             ]
         );
-        assert!(!hook_args.iter().any(|arg| arg.contains("token")));
+        assert_eq!(
+            hook_args.env,
+            [
+                "LANG=C.UTF-8",
+                "LC_ALL=C.UTF-8",
+                "TERM=dumb",
+                "HOME=/home/agent",
+                "PATH=/opt/centaeris/plugins/banana/bin:/usr/bin",
+                "TMPDIR=/tmp"
+            ]
+        );
+        assert!(!hook_args.env.iter().any(|arg| arg.contains("token")));
     }
 
     #[cfg(unix)]

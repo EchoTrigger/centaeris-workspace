@@ -7,8 +7,10 @@ from django.conf import settings
 from django.core.files import File
 from django.core.files.storage import default_storage
 from django.db import connection, transaction
+from django.db.models import Q
 from django.http import JsonResponse
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from ninja import Router
 
 from app_core.artifact_publish import (
@@ -45,6 +47,7 @@ from app_core.runtime_client import (
     build_agent_run_start,
     agent_run_lifecycle_job_id,
     schedule_agent_run_lifecycle,
+    request_agent_run_cancellation,
 )
 from app_core.runtime_job_client import get_runtime_job
 from app_core.session_event import (
@@ -1085,15 +1088,63 @@ def resolve_agent_run_lifecycle(request):
     )
 
 
+def _lifecycle_scan_cursor(value):
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"createdAt", "id"}:
+        raise ValueError
+    if not isinstance(value["id"], str) or not 1 <= len(value["id"]) <= 256:
+        raise ValueError
+    if not isinstance(value["createdAt"], str):
+        raise ValueError
+    created_at = parse_datetime(value["createdAt"])
+    if created_at is None or timezone.is_naive(created_at):
+        raise ValueError
+    return created_at, value["id"]
+
+
+def _expire_queued_run_locked(agent_run):
+    """The row lock serializes expiry against the first running transition.
+
+    Logical waits remain running and never enter this policy. Cancellation is
+    committed by Runtime; the API records the reason, not a fabricated terminal.
+    """
+    if (agent_run.status != "queued" or agent_run.startedAt is not None
+            or (timezone.now() - agent_run.createdAt).total_seconds()
+            < settings.EXECUTION_QUEUE_WAIT_SECONDS):
+        return False
+    request_agent_run_cancellation(agent_run)
+    agent_run.transitionReason = "execution_queue_expired"
+    agent_run.save(update_fields=["transitionReason", "updatedAt"])
+    return True
+
+
+def _lifecycle_scan_page(queryset, after, limit):
+    if after is not None:
+        created_at, identity = after
+        queryset = queryset.filter(
+            Q(createdAt__gt=created_at) | Q(createdAt=created_at, id__gt=identity)
+        )
+    rows = list(queryset.order_by("createdAt", "id")[:limit + 1])
+    page = rows[:limit]
+    next_cursor = None
+    if len(rows) > limit:
+        next_cursor = {"createdAt": page[-1].createdAt.isoformat(), "id": page[-1].id}
+    return page, next_cursor
+
+
 @_internal_post("/agent-run-lifecycle/reconcile")
 def reconcile_agent_run_lifecycle(request):
     try:
         body = decode_json_object(request)
         if (
-            set(body) != {"schema", "limit"}
+            not {"schema", "limit"} <= set(body)
+            or set(body) - {"schema", "limit", "activeAfter", "deadLetterAfter"}
             or body["schema"] != "runtime.agent_run_lifecycle.reconcile.v1"
         ):
             raise ValueError
+        active_after = _lifecycle_scan_cursor(body.get("activeAfter"))
+        dead_letter_after = _lifecycle_scan_cursor(body.get("deadLetterAfter"))
         limit = body["limit"]
         if (
             isinstance(limit, bool)
@@ -1107,12 +1158,12 @@ def reconcile_agent_run_lifecycle(request):
     scheduled = 0
     terminalized = 0
     pending = 0
-    active_agent_runs = list(
+    active_agent_runs, active_next = _lifecycle_scan_page(
         AgentRun.objects.filter(status__in={"queued", "running"})
-        .select_related("authorization", "modelConfig", "session")
-        .order_by("createdAt", "id")[:limit]
+        .select_related("authorization", "modelConfig", "session"),
+        active_after, limit,
     )
-    dead_letter_agent_runs = list(
+    dead_letter_agent_runs, dead_letter_next = _lifecycle_scan_page(
         AgentRun.objects.filter(
             status="failed",
             transitionReason=AGENT_RUN_LIFECYCLE_DEAD_LETTER_REASON,
@@ -1123,8 +1174,8 @@ def reconcile_agent_run_lifecycle(request):
             },
         )
         .select_related("authorization", "modelConfig", "session")
-        .order_by("createdAt", "id")
-        .distinct()[:limit]
+        .distinct(),
+        dead_letter_after, limit,
     )
     agent_runs = dead_letter_agent_runs + active_agent_runs
     for agent_run in agent_runs:
@@ -1150,6 +1201,12 @@ def reconcile_agent_run_lifecycle(request):
                 terminalized += 1
                 continue
             schedule_agent_run_lifecycle(agent_run)
+            if agent_run.status == "queued":
+                with transaction.atomic():
+                    current = (AgentRun.objects.select_for_update(of=("self",))
+                               .select_related("authorization", "modelConfig", "session")
+                               .get(id=agent_run.id))
+                    _expire_queued_run_locked(current)
             scheduled += 1
         except Exception:
             pending += 1
@@ -1159,9 +1216,11 @@ def reconcile_agent_run_lifecycle(request):
             )
             AgentRun.objects.filter(
                 id=agent_run.id, status__in={"queued", "running"}
-            ).update(transitionReason="agent_run_lifecycle_reconcile_pending")
+            ).exclude(transitionReason="execution_queue_expired").update(
+                transitionReason="agent_run_lifecycle_reconcile_pending")
     return JsonResponse(
-        {"scheduled": scheduled, "terminalized": terminalized, "pending": pending}
+        {"scheduled": scheduled, "terminalized": terminalized, "pending": pending,
+         "activeNext": active_next, "deadLetterNext": dead_letter_next}
     )
 
 
@@ -1218,6 +1277,15 @@ def transition_agent_run(request):
             raise ValueError("transition_invalid")
         with transaction.atomic():
             agent_run = AgentRun.objects.select_for_update().get(id=agent_run_id)
+            if state == "running" and agent_run.status == "queued":
+                try:
+                    _expire_queued_run_locked(agent_run)
+                except RuntimeError:
+                    response = JsonResponse({"error": "execution_queue_expiry_unavailable"}, status=503)
+                    response["Retry-After"] = "5"
+                    return response
+            if agent_run.transitionReason == "execution_queue_expired":
+                reason = "execution_queue_expired"
             if state == "running":
                 if agent_run.status == "running":
                     agent_run.transitionReason = reason

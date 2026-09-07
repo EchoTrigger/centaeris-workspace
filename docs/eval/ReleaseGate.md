@@ -2,6 +2,49 @@
 
 Run from the repository root. Any failure blocks release.
 
+Sandbox-loss recovery requires an isolated-stack behavioral gate before release:
+verify a pre-dispatch loss resumes from the advanced checkpoint with a new tool
+call ID; the original failed call remains exactly once. Verify the recovery
+checkpoint and old Execution end commit together, stale leases write neither,
+and preparation failures/restarts retain the five-attempt budget. Post-dispatch
+uncertainty, parallel/external tools, changed snapshot activity, deferred MCP
+spawn, and foreign container identity must not trigger automatic replacement.
+When concurrent child activity invalidates snapshot collection, the parent must
+continue to its next model request without a new recovery checkpoint or reusable
+snapshot witness. The safe-point commit and tool ledger remain intact; collection
+errors still fail and foreign host evidence stays rejected. Verify that the parent
+can reach durable waiting before injecting sandbox loss.
+Compilation alone does not satisfy these checks.
+
+Waiter-index acceptance must cover both PostgreSQL and SQLite: atomic index
+creation and rollback, cascading removal on checkpoint consumption, targeted
+source lookup, and more than 256 relationships inside one checkpoint. Worker
+coverage must show cursor preservation after transient failures and no outbox
+acknowledgement while `next` is non-null. Under load, unrelated historical rows
+must not increase a source notification's lookup work; measure bounded pages
+separately from the complete reconciliation pass.
+
+Terminal waiter acceptance must reproduce sandbox loss while waiting for a runtime
+job, followed by source completion and an unrecoverable parent failure. The
+terminal session append must atomically write the Core `abandoned` event and
+consume the checkpoint and waiter index. Cover completed, failed and cancelled
+owners, rejected stale leases, transaction rollback on conflicting events, and
+idempotent repair through the cancellation API for an already-terminal owner.
+A live owner must not be consumed. Direct test-database cleanup is fixture
+management only and cannot count as lifecycle acceptance. Record zero remaining
+waiters before any manual cleanup, with no replayed tools or fabricated results.
+
+The local gate runs `scripts/runtime_outbox_gate.py` in the API dependency
+environment. It uses only `TEST_POSTGRES_*`, creates a random disposable database,
+checks non-empty Rust test discovery, runs the PostgreSQL outbox regressions, and
+drops only that database. Coverage includes acknowledged-history stability,
+unacknowledged delivery across restart, duplicate/stale acknowledgement, active
+wakes across yield, and concurrent late-waiter recovery across checkpoint pages.
+The same disposable-database gate runs the PostgreSQL shared waiter contract and
+cross-replica execution-capacity test. It pins execution limits to 8 global and 4
+per tenant for that fixture. The controller's database-isolation and non-empty
+discovery guard tests run before creating the disposable database.
+
 The Python gate uses package-wide `test*.py` discovery, not a hand-maintained
 list of API test labels. `scripts/python_test_gate.py api` runs Django's full
 discovery against PostgreSQL, including transactional/locking behavior. The
@@ -74,6 +117,22 @@ covered. It uses synthetic events and isolated API fixtures without model calls.
    `centaeris-workspace_*` named volumes.
 
 Gates must not read production data, real Plugin content, or developer secrets.
+
+Execution-capacity acceptance uses a fresh isolated database with the current
+initial schema. Across independent API/Runtime/worker replicas, verify initial
+queue limits (128 global, 32 per Workspace) and execution leases (8 global, 4 per
+Workspace), concurrent submissions/claims, immutable tenant binding, and rollback
+on rejected admission. Yield, terminal transitions and reconciled expiry must
+release capacity; at saturation, job waits must not spin on unclaimable work.
+Expired initial queues must request cancellation at the first-start gate; user
+questions, runtime-job waits and recovery backoff must remain unaffected.
+
+Fill ordinary HTTP and database capacity, then exercise cancellation preflight,
+cancellation writes, heartbeat and job-status reads through control capacity.
+Fill listeners independently. Check 503 plus Retry-After, body/handler deadlines,
+and that timed-out blocking work retains its permit until exit. Long AgentRun
+steps and knowledge processing must not inherit the short-request deadline.
+These are acceptance requirements, not a claim that an isolated run was executed.
 Sibling Rust paths must become exact Git revisions before distribution.
 
 CI and Performance use the shared `Resolve public Core revision` workflow.
@@ -105,6 +164,33 @@ Every distributed image or application must identify the AGPL license and the
 complete corresponding source for its exact released revision. A modified
 network-interactive deployment must offer that corresponding source to users
 interacting with it remotely, as required by AGPL section 13.
+
+Docker management transport acceptance requires both source/build checks and
+an isolated daemon gate. Source checks cover request field preservation, sandbox
+limits/mount isolation, processor CPU/GPU configuration, and structured missing
+container errors. Production management, exec and archive operations must have
+no Docker CLI branch, and the Runtime image must not copy a Docker CLI binary.
+Check rendered Compose entrypoint/command as well as the image. With a missing
+processor image, direct Runtime startup must fail before listening via Engine
+inspection. No external entrypoint override may be used for acceptance.
+Verify both explicit and omitted false for Mount.ReadOnly after create and start;
+a required read-only mount must still reject omission/false, and mismatched
+volume identity/subpath and missing security fields must still fail.
+
+The isolated daemon gate must exercise root preparation/sentinel verification,
+processor specification and document processing, nonzero batch exit/output,
+resource/security/mount inspection, owned-ID cleanup, and a lost create/start
+response. Unknown outcomes must not cause duplicate creation or process restart;
+foreign containers and daemon failures must not be treated as missing containers.
+The Debian/production-Engine gate also covers binary/interleaved exec output,
+nonzero exit and missing exit confirmation, stdin EOF, 8 MiB output truncation,
+confirmed cancellation versus unknown transport failure, and no command replay
+after an exec-start response is lost. Verify MCP discovery/line limits/close,
+persistent generation RPC reuse, snapshot upload/restore hashes, and processor
+archive traversal/link/size rejection plus large-file streaming. Run these on
+an isolated stack with the CLI-free Runtime image; host-side probes may use CLI.
+Compilation alone does not satisfy this behavior gate. No throughput or latency
+improvement is certified without a separately recorded measurement.
 
 The local gate also checks document streaming beyond 1000 PDF pages/image
 frames, UTF-8 locations, bounded incremental output, and API manifest validation.

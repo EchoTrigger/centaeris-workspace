@@ -21,6 +21,19 @@ def boolean_env(name: str, default: str = "0") -> bool:
     return value == "1"
 
 
+def positive_capacity_env(name, default):
+    value = os.environ.get(name, str(default))
+    if not value.isascii() or not value.isdecimal() or not 1 <= int(value) <= 1_000_000:
+        raise RuntimeError(f"{name} must be an integer between 1 and 1000000")
+    return int(value)
+
+
+EXECUTION_GLOBAL_QUEUE_LIMIT = positive_capacity_env("EXECUTION_GLOBAL_QUEUE_LIMIT", 128)
+EXECUTION_TENANT_QUEUE_LIMIT = positive_capacity_env("EXECUTION_TENANT_QUEUE_LIMIT", 32)
+EXECUTION_QUEUE_WAIT_SECONDS = positive_capacity_env("EXECUTION_QUEUE_WAIT_SECONDS", 300)
+RUNTIME_CONTROL_TIMEOUT_SECONDS = positive_capacity_env("RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS", 5)
+
+
 SECRET_KEY = required_env("DJANGO_SECRET_KEY")
 DEBUG = os.environ.get("DJANGO_DEBUG") == "1"
 ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")

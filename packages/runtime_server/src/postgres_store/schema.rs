@@ -5,6 +5,7 @@ use postgres::Client;
 const STORE_SCHEMA_VERSION: i64 = 1;
 
 const RUNTIME_TABLES: &[&str] = &[
+    "execution_job_tenants",
     "checkpoints",
     "dead_letters",
     "external_context_links",
@@ -15,12 +16,15 @@ const RUNTIME_TABLES: &[&str] = &[
     "runtime_events",
     "runtime_jobs",
     "runtime_job_outbox",
+    "runtime_job_waiters",
     "runtime_turn_supplement_queues",
     "schema_migrations",
     "session_runtime_snapshots",
 ];
 
 const RUNTIME_INDEXES: &[&str] = &[
+    "idx_runtime_job_waiters_owner",
+    "idx_runtime_job_waiters_source",
     "idx_checkpoints_session_updated",
     "idx_dead_letters_session_job_kind",
     "idx_dead_letters_status_failed_at",
@@ -39,22 +43,77 @@ const RUNTIME_INDEXES: &[&str] = &[
 ];
 
 const TABLE_SHAPES: &[(&str, &str)] = &[
-    ("schema_migrations", "version:bigint:NO,applied_at_ms:bigint:NO"),
-    ("checkpoints", "checkpoint_id:text:NO,kind:text:NO,session_id:text:NO,turn_id:text:NO,status:text:NO,done_reason:text:YES,updated_at_ms:bigint:NO,payload_json:text:NO"),
-    ("session_runtime_snapshots", "session_id:text:NO,snapshot_json:text:NO,updated_at_ms:bigint:NO"),
-    ("runtime_events", "event_id:text:NO,session_id:text:NO,task_id:text:YES,event_type:text:NO,at_ms:bigint:NO,visibility:text:NO,payload_json:text:NO"),
-    ("runtime_jobs", "job_id:text:NO,job_kind:text:NO,status:text:NO,run_at_ms:bigint:NO,lease_owner:text:YES,lease_expires_at_ms:bigint:YES,retry_count:bigint:NO,max_retries:bigint:NO,backoff_policy_json:text:NO,idempotency_key:text:NO,session_id:text:YES,branch_id:text:YES,checkpoint_id:text:YES,payload_ref:text:YES,output_refs_json:text:NO,last_error:text:YES,created_at_ms:bigint:NO,updated_at_ms:bigint:NO,heartbeat_at_ms:bigint:YES"),
-    ("runtime_job_outbox", "job_id:text:NO,event_type:text:NO,published_at_ms:bigint:YES,generation:bigint:NO"),
-    ("runtime_turn_supplement_queues", "agent_run_id:text:NO,lifecycle_job_id:text:NO,session_id:text:NO,authorization_digest:text:NO,revision:bigint:NO,next_sequence:bigint:NO,accepting:bigint:NO,entries_json:text:NO,dedupe_json:text:NO,closed_reason:text:YES,updated_at_ms:bigint:NO"),
-    ("resource_claims", "resource_kind:text:NO,resource_key:text:NO,owner:text:NO,owner_kind:text:NO,session_id:text:YES,branch_id:text:YES,expires_at_ms:bigint:NO,metadata_json:text:NO,created_at_ms:bigint:NO,updated_at_ms:bigint:NO"),
-    ("dead_letters", "dead_letter_id:text:NO,original_job_id:text:NO,job_kind:text:NO,status:text:NO,session_id:text:YES,branch_id:text:YES,checkpoint_id:text:YES,payload_ref:text:YES,idempotency_key:text:NO,failure_reason:text:NO,last_error:text:NO,attempts:bigint:NO,first_failed_at_ms:bigint:NO,last_failed_at_ms:bigint:NO,replay_policy_json:text:NO,replayed_job_id:text:YES,dismissed_by:text:YES,dismissed_reason:text:YES,updated_at_ms:bigint:NO"),
-    ("external_context_objects", "object_id:text:NO,schema_version:text:NO,object_kind:text:NO,source_provider_id:text:NO,source_tool_name:text:NO,title:text:NO,content:text:NO,metadata_json:text:NO,updated_at_ms:bigint:NO,inserted_at_ms:bigint:NO"),
-    ("external_context_links", "session_id:text:NO,object_id:text:NO,turn_id:text:NO,tool_call_id:text:NO,source_provider_id:text:NO,source_tool_name:text:NO,linked_at_ms:bigint:NO"),
-    ("model_observation_contents", "session_id:text:NO,content_digest:text:NO,kind:text:NO,content_json:text:NO,content_bytes:bigint:NO,first_seen_at_ms:bigint:NO"),
-    ("model_observation_manifests", "session_id:text:NO,manifest_digest:text:NO,parent_digest:text:YES,manifest_json:text:NO,manifest_bytes:bigint:NO,first_seen_at_ms:bigint:NO"),
+    (
+        "execution_job_tenants",
+        "job_id:text:NO,workspace_id:text:NO",
+    ),
+    (
+        "runtime_job_waiters",
+        "checkpoint_id:text:NO,tool_call_id:text:NO,source_job_id:text:NO,source_job_kind:text:NO,session_id:text:NO,agent_run_id:text:NO",
+    ),
+    (
+        "schema_migrations",
+        "version:bigint:NO,applied_at_ms:bigint:NO",
+    ),
+    (
+        "checkpoints",
+        "checkpoint_id:text:NO,kind:text:NO,session_id:text:NO,turn_id:text:NO,status:text:NO,done_reason:text:YES,updated_at_ms:bigint:NO,payload_json:text:NO",
+    ),
+    (
+        "session_runtime_snapshots",
+        "session_id:text:NO,snapshot_json:text:NO,updated_at_ms:bigint:NO",
+    ),
+    (
+        "runtime_events",
+        "event_id:text:NO,session_id:text:NO,task_id:text:YES,event_type:text:NO,at_ms:bigint:NO,visibility:text:NO,payload_json:text:NO",
+    ),
+    (
+        "runtime_jobs",
+        "job_id:text:NO,job_kind:text:NO,status:text:NO,run_at_ms:bigint:NO,lease_owner:text:YES,lease_expires_at_ms:bigint:YES,retry_count:bigint:NO,max_retries:bigint:NO,backoff_policy_json:text:NO,idempotency_key:text:NO,session_id:text:YES,branch_id:text:YES,checkpoint_id:text:YES,payload_ref:text:YES,output_refs_json:text:NO,last_error:text:YES,created_at_ms:bigint:NO,updated_at_ms:bigint:NO,heartbeat_at_ms:bigint:YES",
+    ),
+    (
+        "runtime_job_outbox",
+        "job_id:text:NO,event_type:text:NO,published_at_ms:bigint:YES,generation:bigint:NO",
+    ),
+    (
+        "runtime_turn_supplement_queues",
+        "agent_run_id:text:NO,lifecycle_job_id:text:NO,session_id:text:NO,authorization_digest:text:NO,revision:bigint:NO,next_sequence:bigint:NO,accepting:bigint:NO,entries_json:text:NO,dedupe_json:text:NO,closed_reason:text:YES,updated_at_ms:bigint:NO",
+    ),
+    (
+        "resource_claims",
+        "resource_kind:text:NO,resource_key:text:NO,owner:text:NO,owner_kind:text:NO,session_id:text:YES,branch_id:text:YES,expires_at_ms:bigint:NO,metadata_json:text:NO,created_at_ms:bigint:NO,updated_at_ms:bigint:NO",
+    ),
+    (
+        "dead_letters",
+        "dead_letter_id:text:NO,original_job_id:text:NO,job_kind:text:NO,status:text:NO,session_id:text:YES,branch_id:text:YES,checkpoint_id:text:YES,payload_ref:text:YES,idempotency_key:text:NO,failure_reason:text:NO,last_error:text:NO,attempts:bigint:NO,first_failed_at_ms:bigint:NO,last_failed_at_ms:bigint:NO,replay_policy_json:text:NO,replayed_job_id:text:YES,dismissed_by:text:YES,dismissed_reason:text:YES,updated_at_ms:bigint:NO",
+    ),
+    (
+        "external_context_objects",
+        "object_id:text:NO,schema_version:text:NO,object_kind:text:NO,source_provider_id:text:NO,source_tool_name:text:NO,title:text:NO,content:text:NO,metadata_json:text:NO,updated_at_ms:bigint:NO,inserted_at_ms:bigint:NO",
+    ),
+    (
+        "external_context_links",
+        "session_id:text:NO,object_id:text:NO,turn_id:text:NO,tool_call_id:text:NO,source_provider_id:text:NO,source_tool_name:text:NO,linked_at_ms:bigint:NO",
+    ),
+    (
+        "model_observation_contents",
+        "session_id:text:NO,content_digest:text:NO,kind:text:NO,content_json:text:NO,content_bytes:bigint:NO,first_seen_at_ms:bigint:NO",
+    ),
+    (
+        "model_observation_manifests",
+        "session_id:text:NO,manifest_digest:text:NO,parent_digest:text:YES,manifest_json:text:NO,manifest_bytes:bigint:NO,first_seen_at_ms:bigint:NO",
+    ),
 ];
 
 const INDEX_SHAPES: &[(&str, &str)] = &[
+    (
+        "idx_runtime_job_waiters_owner",
+        "(agent_run_id, session_id, checkpoint_id)",
+    ),
+    (
+        "idx_runtime_job_waiters_source",
+        "(source_job_id, checkpoint_id, tool_call_id)",
+    ),
     (
         "idx_checkpoints_session_updated",
         "(session_id, updated_at_ms DESC, checkpoint_id DESC)",
@@ -197,6 +256,19 @@ fn validate_schema(client: &mut Client) -> Result<(), String> {
             ));
         }
     }
+    let waiter_constraints = client.query_one(
+        "SELECT COUNT(*) FILTER (WHERE contype='f' AND confrelid='runtime.checkpoints'::regclass AND confdeltype='c' AND conkey=ARRAY[1]::smallint[] AND confkey=ARRAY[1]::smallint[]), COUNT(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1,2]::smallint[]) FROM pg_constraint WHERE conrelid='runtime.runtime_job_waiters'::regclass",
+        &[],
+    ).map_err(|error| format!("query waiter index constraints failed: {error}"))?;
+    if waiter_constraints.get::<_, i64>(0) != 1 || waiter_constraints.get::<_, i64>(1) != 1 {
+        return Err("Postgres waiter index constraint mismatch".to_string());
+    }
+    let tenant_constraints = client.query_one(
+        "SELECT COUNT(*) FILTER (WHERE contype='f' AND confrelid='runtime.runtime_jobs'::regclass AND confdeltype='c' AND conkey=ARRAY[1]::smallint[] AND confkey=ARRAY[1]::smallint[]), COUNT(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1]::smallint[]) FROM pg_constraint WHERE conrelid='runtime.execution_job_tenants'::regclass", &[],
+    ).map_err(|error| format!("query execution tenant constraints failed: {error}"))?;
+    if tenant_constraints.get::<_, i64>(0) != 1 || tenant_constraints.get::<_, i64>(1) != 1 {
+        return Err("Postgres execution tenant constraint mismatch".to_string());
+    }
     let indexes = client
         .query(
             "SELECT indexname FROM pg_indexes WHERE schemaname = 'runtime' ORDER BY indexname",
@@ -282,9 +354,13 @@ const RUNTIME_DDL: &str = r#"
 CREATE SCHEMA runtime;
 CREATE TABLE runtime.schema_migrations(version bigint PRIMARY KEY, applied_at_ms bigint NOT NULL);
 CREATE TABLE runtime.checkpoints(checkpoint_id text PRIMARY KEY, kind text NOT NULL CHECK(kind IN('wait','recovery')), session_id text NOT NULL, turn_id text NOT NULL, status text NOT NULL, done_reason text, updated_at_ms bigint NOT NULL, payload_json text NOT NULL);
+CREATE TABLE runtime.runtime_job_waiters(checkpoint_id text NOT NULL REFERENCES runtime.checkpoints(checkpoint_id) ON DELETE CASCADE, tool_call_id text NOT NULL, source_job_id text NOT NULL, source_job_kind text NOT NULL, session_id text NOT NULL, agent_run_id text NOT NULL, PRIMARY KEY(checkpoint_id,tool_call_id));
+CREATE INDEX idx_runtime_job_waiters_source ON runtime.runtime_job_waiters(source_job_id,checkpoint_id,tool_call_id);
+CREATE INDEX idx_runtime_job_waiters_owner ON runtime.runtime_job_waiters(agent_run_id,session_id,checkpoint_id);
 CREATE TABLE runtime.session_runtime_snapshots(session_id text PRIMARY KEY, snapshot_json text NOT NULL, updated_at_ms bigint NOT NULL);
 CREATE TABLE runtime.runtime_events(event_id text PRIMARY KEY, session_id text NOT NULL, task_id text, event_type text NOT NULL, at_ms bigint NOT NULL, visibility text NOT NULL, payload_json text NOT NULL);
 CREATE TABLE runtime.runtime_jobs(job_id text PRIMARY KEY, job_kind text NOT NULL, status text NOT NULL, run_at_ms bigint NOT NULL, lease_owner text, lease_expires_at_ms bigint, retry_count bigint NOT NULL DEFAULT 0, max_retries bigint NOT NULL DEFAULT 0, backoff_policy_json text NOT NULL, idempotency_key text NOT NULL, session_id text, branch_id text, checkpoint_id text, payload_ref text, output_refs_json text NOT NULL DEFAULT '[]', last_error text, created_at_ms bigint NOT NULL, updated_at_ms bigint NOT NULL, heartbeat_at_ms bigint, UNIQUE(job_kind, idempotency_key));
+CREATE TABLE runtime.execution_job_tenants(job_id text PRIMARY KEY REFERENCES runtime.runtime_jobs(job_id) ON DELETE CASCADE,workspace_id text NOT NULL);
 CREATE TABLE runtime.runtime_job_outbox(job_id text NOT NULL REFERENCES runtime.runtime_jobs(job_id) ON DELETE CASCADE,event_type text NOT NULL,published_at_ms bigint,generation bigint NOT NULL DEFAULT 0,PRIMARY KEY(job_id,event_type));
 CREATE TABLE runtime.runtime_turn_supplement_queues(agent_run_id text PRIMARY KEY,lifecycle_job_id text NOT NULL UNIQUE REFERENCES runtime.runtime_jobs(job_id) ON DELETE CASCADE,session_id text NOT NULL,authorization_digest text NOT NULL,revision bigint NOT NULL,next_sequence bigint NOT NULL,accepting bigint NOT NULL CHECK(accepting IN(0,1)),entries_json text NOT NULL,dedupe_json text NOT NULL,closed_reason text,updated_at_ms bigint NOT NULL);
 CREATE TABLE runtime.resource_claims(resource_kind text NOT NULL, resource_key text NOT NULL, owner text NOT NULL, owner_kind text NOT NULL, session_id text, branch_id text, expires_at_ms bigint NOT NULL, metadata_json text NOT NULL, created_at_ms bigint NOT NULL, updated_at_ms bigint NOT NULL, PRIMARY KEY(resource_kind, resource_key));
@@ -295,6 +371,11 @@ CREATE TABLE runtime.model_observation_contents(session_id text NOT NULL, conten
 CREATE TABLE runtime.model_observation_manifests(session_id text NOT NULL, manifest_digest text NOT NULL CHECK(manifest_digest ~ '^sha256:[0-9a-f]{64}$'), parent_digest text CHECK(parent_digest ~ '^sha256:[0-9a-f]{64}$'), manifest_json text NOT NULL, manifest_bytes bigint NOT NULL CHECK(manifest_bytes >= 0), first_seen_at_ms bigint NOT NULL, PRIMARY KEY(session_id, manifest_digest));
 CREATE FUNCTION runtime.notify_runtime_job_ready_v1() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        IF OLD.job_kind = 'agent_run.lifecycle' AND OLD.status IN ('leased','running') AND NEW.status NOT IN ('leased','running') THEN
+            PERFORM pg_notify('runtime_job_ready_v1', '');
+        END IF;
+    END IF;
     IF NEW.status = 'queued' AND NEW.job_kind IN ('agent_run.lifecycle','knowledge.process','worker.noop') THEN
         IF TG_OP = 'INSERT' THEN
             PERFORM pg_notify('runtime_job_ready_v1', '');
@@ -325,7 +406,41 @@ CREATE INDEX idx_external_context_links_object ON runtime.external_context_links
 
 #[cfg(test)]
 mod tests {
-    use super::STORE_SCHEMA_VERSION;
+    use super::{INDEX_SHAPES, RUNTIME_DDL, RUNTIME_INDEXES, STORE_SCHEMA_VERSION};
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn runtime_index_ddl_and_validation_contracts_match() {
+        let declared: Vec<_> = RUNTIME_DDL
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("CREATE INDEX "))
+            .map(|line| line.split_once(" ON ").expect("index DDL has table"))
+            .collect();
+        let names: BTreeSet<_> = declared.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names.len(), declared.len(), "duplicate DDL index");
+        assert_eq!(names, RUNTIME_INDEXES.iter().copied().collect());
+        assert_eq!(names, INDEX_SHAPES.iter().map(|(name, _)| *name).collect());
+        assert_eq!(names.len(), RUNTIME_INDEXES.len());
+        assert_eq!(names.len(), INDEX_SHAPES.len());
+        let normalize = |text: &str| {
+            text.replace(" ASC", "")
+                .split_whitespace()
+                .collect::<String>()
+        };
+        for (name, definition) in declared {
+            let columns =
+                definition[definition.find('(').expect("index columns")..].trim_end_matches(';');
+            let (_, expected) = INDEX_SHAPES
+                .iter()
+                .find(|(candidate, _)| *candidate == name)
+                .unwrap();
+            assert_eq!(
+                normalize(columns),
+                normalize(expected),
+                "index shape drift: {name}"
+            );
+        }
+    }
 
     #[test]
     fn clean_slate_store_schema_starts_at_one() {
