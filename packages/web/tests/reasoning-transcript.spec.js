@@ -1,23 +1,73 @@
 const { test, expect } = require("@playwright/test");
 
-test("live collapsed preview follows the latest text, expansion keeps the running label and seal keeps disclosure", async ({ page }) => {
+test("live labels sweep once, remain readable, and respect motion and contrast preferences", async ({ page }) => {
+  await page.goto("/tests/fixtures/reasoning.html");
+  await page.evaluate(() => window.reasoningFixture.liveSnapshot(1, "Inspect inputs"));
+  const label = page.locator(".workspaceReasoning button > span").first();
+  await expect(label).toHaveCSS("animation-name", "statusShimmerSweep");
+  await expect(label).toHaveCSS("animation-iteration-count", "1");
+  await expect(label).toHaveCSS("animation-duration", "4s");
+  await label.evaluate((node) => node.getAnimations().forEach((animation) => animation.finish()));
+  await expect(label).toHaveCSS("background-color", "rgb(107, 107, 107)");
+  await expect(label).toHaveText("Thinking");
+  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+  await expect(label).toHaveCSS("background-color", "rgb(160, 160, 160)");
+  await page.evaluate(() => { delete document.documentElement.dataset.theme; });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(label).toHaveCSS("animation-name", "none");
+  await expect(label).toHaveCSS("-webkit-text-fill-color", "rgb(107, 107, 107)");
+  await page.emulateMedia({ reducedMotion: "no-preference", forcedColors: "active" });
+  await expect(label).toHaveCSS("animation-name", "none");
+  await page.emulateMedia({ forcedColors: "none" });
+  await page.evaluate(() => window.reasoningFixture.committedHistory());
+  await expect(label).toHaveCSS("animation-name", "none");
+  await expect(label).toHaveText("Thoughts");
+});
+
+test("live tool status uses the same sweep and disappears when the run completes", async ({ page }) => {
+  await page.goto("/tests/fixtures/reasoning.html");
+  await page.evaluate(() => window.reasoningFixture.reconnect());
+  const label = page.locator(".workspaceLiveStatusText");
+  await expect(label).toHaveCSS("animation-name", "statusShimmerSweep");
+  await page.evaluate(() => window.reasoningFixture.complete());
+  await expect(label).toHaveCount(0);
+  await expect(page.locator(".statusShimmer")).toHaveCount(0);
+});
+
+test("reasoning shows running only while collapsed and live, and keeps its preview after completion", async ({ page }) => {
   await page.goto("/tests/fixtures/reasoning.html");
   await page.evaluate(() => window.reasoningFixture.liveSnapshot(1, "Inspect **inputs**"));
   const toggle = page.locator(".workspaceReasoning button");
-  await expect(toggle).toHaveAttribute("aria-label", "正在思考");
+  await expect(toggle).toHaveAttribute("aria-label", "Thinking");
+  await expect(toggle.locator(":scope > span").first()).toHaveText("Thinking");
   await expect(page.locator(".reasoningPreviewText")).toHaveText("Inspect inputs");
   await page.evaluate(() => window.reasoningFixture.liveSnapshot(2, "Inspect **inputs**\nlatest fragment"));
   await expect(page.locator(".reasoningPreviewText")).toContainText("latest fragment");
   await toggle.click();
-  await expect(toggle).toHaveText("正在思考");
+  await expect(toggle).toHaveText("Thoughts");
   await expect(page.locator(".reasoningPreviewText")).toHaveCount(0);
   await page.evaluate(() => { window.reasoningFixture.liveSnapshot(3, "More thinking"); window.reasoningFixture.remount(); });
   await expect(toggle).toHaveAttribute("aria-expanded", "true");
   await expect(page.locator(".workspaceReasoningBody")).toHaveText("More thinking");
   await page.evaluate(() => window.reasoningFixture.committedHistory());
   await expect(toggle).toHaveAttribute("aria-expanded", "true");
-  await expect(toggle).toHaveText("思考");
+  await expect(toggle).toHaveText("Thoughts");
   await expect(page.locator(".workspaceReasoning")).toHaveCount(1);
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-label", "Thoughts");
+  await expect(page.locator(".reasoningPreviewText")).toHaveText("Committed thinking");
+});
+
+test("interrupted reasoning keeps its collapsed preview and expands under the thinking label", async ({ page }) => {
+  await page.goto("/tests/fixtures/reasoning.html");
+  await page.evaluate(() => window.reasoningFixture.committedHistory("interrupted"));
+  const toggle = page.locator(".workspaceReasoning button");
+  await expect(toggle).toHaveAttribute("aria-label", "Thoughts");
+  await expect(page.locator(".reasoningPreviewText")).toHaveText("Committed thinking");
+  await toggle.click();
+  await expect(toggle).toHaveText("Thoughts");
+  await expect(page.locator(".reasoningPreviewText")).toHaveCount(0);
+  await expect(page.locator(".workspaceReasoningBody")).toHaveText("Committed thinking");
 });
 
 test("committed history renders thinking before its answer and preserves disclosure on reload", async ({ page }) => {
@@ -72,7 +122,7 @@ test("reasoning and tools keep their order and independent disclosures across up
   const tool = page.getByRole("button", { name: "Read files", exact: true }).first();
   await tool.click();
   await page.evaluate(() => window.reasoningFixture.complete());
-  await expect(first).toHaveText("思考");
+  await expect(first).toHaveText("Thoughts");
   await expect(first).toHaveAttribute("aria-expanded", "true");
   await expect(page.getByText("Inspect inputs and constraints", { exact: true })).toBeVisible();
   await expect(blocks.last().getByRole("button")).toHaveAttribute("aria-expanded", "false");
@@ -85,5 +135,12 @@ test("reasoning and tools keep their order and independent disclosures across up
   await first.focus();
   await page.keyboard.press("Space");
   await expect(first).toHaveAttribute("aria-expanded", "false");
-  await expect(page.getByText("Inspect inputs and constraints", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".workspaceReasoningBody").getByText("Inspect inputs and constraints", { exact: true })).toHaveCount(0);
+  await expect(first.locator(".reasoningPreviewText")).toHaveText("Inspect inputs and constraints");
+});
+
+
+
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("centaeris:language:v1", "en"));
 });

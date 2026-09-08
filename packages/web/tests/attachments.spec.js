@@ -32,7 +32,7 @@ test("draft attachment squares retain local image URLs without uploading or crea
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/w/ws_1/agents/centaeris");
-  await page.getByLabel("选择一个或多个材料").setInputFiles([
+  await page.getByLabel("Select one or more materials").setInputFiles([
     { name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("notes") },
     { name: "long-filename-that-must-stop-after-two-lines.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4") },
     { name: "photo.svg", mimeType: "image/svg+xml", buffer: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="blue"/></svg>') },
@@ -46,13 +46,13 @@ test("draft attachment squares retain local image URLs without uploading or crea
   }
   await expect(page.getByText("notes.txt", { exact: true })).toBeVisible();
   await expect(page.locator(".attachmentCardName").last()).toHaveCSS("-webkit-line-clamp", "2");
-  const image = page.getByRole("button", { name: "预览 photo.svg", exact: true });
+  const image = page.getByRole("button", { name: "Preview photo.svg", exact: true });
   await expect(image).toHaveAttribute("title", "photo.svg");
   await expect(image.locator("img")).toBeVisible();
   await expect(image).not.toContainText("photo.svg");
   const source = await image.locator("img").getAttribute("src");
   expect(source).toMatch(/^blob:/);
-  await expect(page.getByRole("button", { name: "预览 broken.png", exact: true })).toContainText("图片不可用");
+  await expect(page.getByRole("button", { name: "Preview broken.png", exact: true })).toContainText("Image unavailable");
   for (const remove of await page.locator(".attachmentCardRemove").all()) {
     expect(await remove.evaluate((button) => {
       const bounds = button.getBoundingClientRect();
@@ -63,24 +63,24 @@ test("draft attachment squares retain local image URLs without uploading or crea
   await page.screenshot({ path: screenshot });
   await testInfo.attach("attachment-cards", { path: screenshot, contentType: "image/png" });
   const created = await page.evaluate(() => window.attachmentUrls.created.length);
-  await page.getByRole("textbox", { name: "输入消息", exact: true }).fill("rerender the composer");
-  await page.getByRole("button", { name: "从本条消息移除 notes.txt", exact: true }).click();
+  await page.getByRole("textbox", { name: "Message", exact: true }).fill("rerender the composer");
+  await page.getByRole("button", { name: "Remove notes.txt from this message", exact: true }).click();
   await expect(image.locator("img")).toHaveAttribute("src", source);
   expect(await page.evaluate(() => window.attachmentUrls.created.length)).toBe(created);
   await image.click();
-  const dialog = page.getByRole("dialog", { name: "预览 photo.svg", exact: true });
+  const dialog = page.getByRole("dialog", { name: "Preview photo.svg", exact: true });
   await expect(dialog.locator("img")).toHaveAttribute("src", source);
-  await dialog.getByRole("button", { name: "关闭预览", exact: true }).press("Escape");
+  await dialog.getByRole("button", { name: "Close preview", exact: true }).press("Escape");
   await expect(dialog).toHaveCount(0);
-  await page.getByRole("button", { name: "从本条消息移除 photo.svg", exact: true }).click();
+  await page.getByRole("button", { name: "Remove photo.svg from this message", exact: true }).click();
   await expect.poll(() => page.evaluate((url) => window.attachmentUrls.revoked.includes(url), source)).toBe(true);
-  await page.getByRole("button", { name: "从本条消息移除 broken.png", exact: true }).click();
+  await page.getByRole("button", { name: "Remove broken.png from this message", exact: true }).click();
   await expect.poll(() => page.evaluate(() => window.attachmentUrls.created.every((url) => window.attachmentUrls.revoked.includes(url)))).toBe(true);
   expect(writes).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
 
-  await page.getByLabel("选择一个或多个材料").setInputFiles({ name: "leave.svg", mimeType: "image/svg+xml", buffer: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>') });
-  const leavingImage = page.getByRole("button", { name: "预览 leave.svg", exact: true });
+  await page.getByLabel("Select one or more materials").setInputFiles({ name: "leave.svg", mimeType: "image/svg+xml", buffer: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>') });
+  const leavingImage = page.getByRole("button", { name: "Preview leave.svg", exact: true });
   await expect(leavingImage.locator("img")).toBeVisible();
   const leavingUrl = await leavingImage.locator("img").getAttribute("src");
   // A client-side navigation unmounts the composer without replacing the monitored document.
@@ -90,4 +90,10 @@ test("draft attachment squares retain local image URLs without uploading or crea
   });
   await expect(page.locator(".workspaceComposer")).toHaveCount(0);
   await expect.poll(() => page.evaluate((url) => window.attachmentUrls.revoked.includes(url), leavingUrl)).toBe(true);
+});
+
+
+
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("centaeris:language:v1", "en"));
 });

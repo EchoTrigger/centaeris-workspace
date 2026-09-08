@@ -1,3 +1,5 @@
+
+import { useTranslation } from "../i18n";
 import { memo, useId } from "react";
 import { Brain, ChevronDown } from "lucide-react";
 import { MarkdownContent } from "./MarkdownContent";
@@ -9,19 +11,20 @@ export const ReasoningBlock = memo(function ReasoningBlock({ block, expanded, on
   expanded: boolean;
   onToggle: () => void;
 }) {
+  const { t } = useTranslation();
   const bodyId = useId();
-  const label = block.status === "streaming" ? "正在思考" : "思考";
+  const label = !expanded && block.status === "streaming" ? t("reasoningBlock.thinking") : t("reasoningBlock.thoughts");
   return (
     <div className="workspaceReasoning">
       <button type="button" className="workspaceActivityGroup"
         aria-label={label}
         aria-expanded={expanded} aria-controls={bodyId} onClick={onToggle}>
         <Brain aria-hidden="true" />
-        <span>{label}</span>
-        {!expanded && block.status === "streaming" ? <span className="reasoningPreview" aria-hidden="true"><span className="reasoningPreviewText">{reasoningPreview(block.text)}</span></span> : null}
+        <span className={!expanded && block.status === "streaming" ? "statusShimmer" : undefined}>{label}</span>
+        {!expanded ? <span className="reasoningPreview" aria-hidden="true"><span className="reasoningPreviewText">{reasoningPreview(block.text)}</span></span> : null}
         <ChevronDown className={`workspaceActivityGroupChevron ${expanded ? "isExpanded" : ""}`} aria-hidden="true" />
       </button>
-      {expanded ? <div id={bodyId} className="workspaceReasoningBody" role="region" aria-label="思考内容" tabIndex={0}><MarkdownContent text={block.text} /></div> : null}
+      {expanded ? <div id={bodyId} className="workspaceReasoningBody" role="region" aria-label={t("reasoningBlock.thinkingContent")} tabIndex={0}><MarkdownContent text={block.text} /></div> : null}
     </div>
   );
 });

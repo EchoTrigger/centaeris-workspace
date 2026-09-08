@@ -1,3 +1,5 @@
+import { t } from "../i18n";
+import { useTranslation } from "../i18n";
 import {
   Component,
   memo,
@@ -128,8 +130,8 @@ class AgentRunErrorBoundary extends Component<
       <article className="workspaceAgentRun" data-agent-run-id={this.props.agentRunId}>
         <div className="workspaceAnswer">
           <div className="workspaceProjectionFailure" role="alert">
-            <span>此轮内容暂时无法显示，其他会话功能仍可使用。</span>
-            <button type="button" onClick={this.retry}>重新读取</button>
+            <span>{t("agentRunRow.thisRunIsTemporarilyUnavailableOtherConversationFeaturesAre")}</span>
+            <button type="button" onClick={this.retry}>{t("agentRunRow.reload")}</button>
           </div>
         </div>
       </article>
@@ -159,6 +161,7 @@ export const VirtualAgentRunList = memo(function VirtualAgentRunList({
   onSubmitEditingMessage,
   onRetryAgentRun,
 }: VirtualAgentRunListProps) {
+  const { t } = useTranslation();
   const { agentRunIds } = useAgentRunList(store) as AgentRunListSnapshot;
   const scrollRef = useRef<HTMLDivElement>(null);
   const [isFollowingLatest, setIsFollowingLatest] = useState(true);
@@ -257,18 +260,18 @@ export const VirtualAgentRunList = memo(function VirtualAgentRunList({
   return (
     <div className="workspaceAgentRunList">
       <div className="workspaceMessages" ref={scrollRef} onScroll={handleScroll} data-testid="virtual-agent-run-list">
-        {loadingHistory ? <div className="workspaceEmptyState" role="status" aria-live="polite">正在读取会话…</div> : null}
+        {loadingHistory ? <div className="workspaceEmptyState" role="status" aria-live="polite">{t("virtualAgentRunList.loadingConversation")}</div> : null}
         {!loadingHistory && !agentRunIds.length ? (
           emptyState ?? (
-            <div className="workspaceEmptyState workspaceEmptyBrand" aria-label="新会话">
+            <div className="workspaceEmptyState workspaceEmptyBrand" aria-label={t("virtualAgentRunList.newChat")}>
               <h2>Centaeris</h2>
-              <p>从一个任务开始</p>
+              <p>{t("virtualAgentRunList.startWithATask")}</p>
             </div>
           )
         ) : null}
         {agentRunIds.length ? (
           <div className="workspaceVirtualMessageCanvas" style={{ height: `${totalSize}px` }}>
-            {loadingOlderHistory ? <div className="workspaceHistoryLoading" role="status" aria-live="polite">正在读取更早内容…</div> : null}
+            {loadingOlderHistory ? <div className="workspaceHistoryLoading" role="status" aria-live="polite">{t("virtualAgentRunList.loadingEarlierMessages")}</div> : null}
             {virtualItems.map((item) => (
               <div
                 className="workspaceVirtualAgentRun"
@@ -308,8 +311,8 @@ export const VirtualAgentRunList = memo(function VirtualAgentRunList({
           type="button"
           className="workspaceJumpToLatest"
           onClick={scrollToLatest}
-          aria-label="回到最新"
-          title="回到最新"
+          aria-label={t("virtualAgentRunList.jumpToLatest")}
+          title={t("virtualAgentRunList.jumpToLatest")}
         >
           <ChevronDown aria-hidden="true" />
         </button>

@@ -26,20 +26,22 @@ const DYNAMIC_TOOL_ATOM = Object.freeze({
   pathOpenable: false, expandable: false, icon: "plug", detail: "none",
 });
 
-function webToolAtom(atom) {
-  return { ...atom, icon: TOOL_ICONS[atom.kind], detail: atom.detailRendererKind };
+const identity = (text) => text;
+
+function webToolAtom(atom, translate = identity) {
+  return { ...atom, title: translate(atom.title), runningVerb: translate(atom.runningVerb), icon: TOOL_ICONS[atom.kind] || atom.icon, detail: atom.detailRendererKind };
 }
 
-export function toolAtom(toolName) {
-  return webToolAtom(getToolActivityDefinition(toolName));
+export function toolAtom(toolName, translate = identity) {
+  return webToolAtom(getToolActivityDefinition(toolName), translate);
 }
 
-export function activityToolAtom(toolName, providerId) {
+export function activityToolAtom(toolName, providerId, translate = identity) {
   try {
-    return toolAtom(toolName);
+    return toolAtom(toolName, translate);
   } catch (error) {
     if (!providerId || providerId === "centaeris.builtin" || !(error instanceof Error) || !error.message.startsWith("unsupported tool activity:")) throw error;
-    return DYNAMIC_TOOL_ATOM;
+    return webToolAtom(DYNAMIC_TOOL_ATOM, translate);
   }
 }
 
@@ -66,22 +68,22 @@ function bashDescription(activity) {
   return typeof input.description === "string" ? input.description.trim() : "";
 }
 
-export function runningActivityPresentation(activity) {
+export function runningActivityPresentation(activity, translate = identity) {
   if (activity.status !== "running") throw new Error("live tool activity must be running");
-  const atom = activityToolAtom(activity.toolName, activity.call?.providerId);
+  const atom = activityToolAtom(activity.toolName, activity.call?.providerId, translate);
   return {
     icon: atom.icon,
     label: bashDescription(activity) || (activity.toolName === "bash"
-      ? "Running a command"
+      ? translate("Running a command")
       : `${atom.runningVerb} ${activityTarget(activity)}`),
   };
 }
 
-export function toolActivityPresentation(activities) {
+export function toolActivityPresentation(activities, translate = identity) {
   const atoms = [];
   const kinds = new Set();
   for (const activity of activities) {
-    const atom = activityToolAtom(activity.toolName, activity.call?.providerId);
+    const atom = activityToolAtom(activity.toolName, activity.call?.providerId, translate);
     if (!kinds.has(atom.kind)) {
       kinds.add(atom.kind);
       atoms.push(atom);
@@ -92,14 +94,14 @@ export function toolActivityPresentation(activities) {
   return {
     atoms,
     title: singleBash
-      ? bashDescription(singleBash) || (singleBash.status === "running" ? "Running a command" : "Ran a command")
+      ? bashDescription(singleBash) || translate(singleBash.status === "running" ? "Running a command" : "Ran a command")
       : atoms.map((atom) => atom.title).join(" · "),
     icon: atoms[0].icon,
     expandable: atoms.some((atom) => atom.expandable),
   };
 }
 
-export function groupActivities(activities) {
+export function groupActivities(activities, translate = identity) {
   if (!activities.length) return [];
   const turnIds = new Set(activities.map((activity) => activity.turnId));
   const status = activities.some((activity) => activity.status === "running")
@@ -111,11 +113,11 @@ export function groupActivities(activities) {
     activities,
     status,
     activityIds: activities.map((activity) => activity.activityId),
-    presentation: toolActivityPresentation(activities),
+    presentation: toolActivityPresentation(activities, translate),
   }];
 }
 
-export function buildAgentRunSections(messages, activities, reasoningBlocks = []) {
+export function buildAgentRunSections(messages, activities, reasoningBlocks = [], translate = identity) {
   const displayEntries = [
     ...messages.filter((item) => item.role === "assistant").map((message) => ({ kind: "assistant", sequence: message.sequence, message })),
     ...activities.map((activity) => ({ kind: "tool", sequence: activity.sequence, activity })),
@@ -124,7 +126,7 @@ export function buildAgentRunSections(messages, activities, reasoningBlocks = []
   const processItems = [];
   let pendingActivities = [];
   const flushActivities = () => {
-    for (const group of groupActivities(pendingActivities)) {
+    for (const group of groupActivities(pendingActivities, translate)) {
       processItems.push({ kind: "toolGroup", group });
     }
     pendingActivities = [];

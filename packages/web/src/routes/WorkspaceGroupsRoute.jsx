@@ -1,3 +1,5 @@
+import { t } from "../i18n";
+import { useTranslation } from "../i18n";
 import { useCallback, useEffect, useState } from "react";
 import { Plus, ShieldCheck, Trash2, UsersRound } from "lucide-react";
 import { Link, Navigate, useNavigate, useRouteLoaderData } from "react-router";
@@ -7,24 +9,25 @@ import { ShellPage } from "../shell/ShellPage";
 import { redirectAfterWorkspaceNotFound } from "../workspaceAccess";
 
 const ADMIN_ROLES = new Set(["owner", "admin"]);
-const ERRORS = {
-  workspace_group_name_exists: "当前工作区已经有同名用户组。",
-  workspace_group_name_unchanged: "用户组名称没有变化。",
-  workspace_system_group_immutable: "系统动态组不能修改。",
-  workspace_group_not_found: "用户组已经不存在。",
-  workspace_member_not_found: "成员身份已经发生变化。",
-};
+const ERRORS = () => ({
+  workspace_group_name_exists: t("workspaceGroupsRoute.aGroupWithThisNameAlreadyExistsInThis"),
+  workspace_group_name_unchanged: t("workspaceGroupsRoute.theGroupNameHasNotChanged"),
+  workspace_system_group_immutable: t("workspaceGroupsRoute.systemDynamicGroupsCannotBeModified"),
+  workspace_group_not_found: t("workspaceGroupsRoute.thisGroupNoLongerExists"),
+  workspace_member_not_found: t("workspaceGroupsRoute.membershipHasChanged"),
+});
 
 function errorText(error) {
   const message = error instanceof Error ? error.message : String(error);
-  return ERRORS[message] || message;
+  return ERRORS()[message] || message;
 }
 
 function roleLabel(role) {
-  return { owner: "所有者", admin: "管理员", member: "成员" }[role] || role;
+  return { owner: t("workspaceChooserRoute.owner"), admin: t("invitationActivationRoute.administrator"), member: t("invitationActivationRoute.member") }[role] || role;
 }
 
 export default function WorkspaceGroupsRoute({ embedded = false } = {}) {
+  const { t } = useTranslation();
   const { workspace } = useRouteLoaderData("workspace");
   const navigate = useNavigate();
   const base = `/w/${encodeURIComponent(workspace.id)}`;
@@ -134,7 +137,7 @@ export default function WorkspaceGroupsRoute({ embedded = false } = {}) {
       setSelectedId(group.id);
       setCreateName("");
       setCreating(false);
-      setNotice({ kind: "success", text: `已创建用户组 ${group.name}。` });
+      setNotice({ kind: "success", text: t("workspaceGroupsRoute.createdGroupValue", { value1: group.name }) });
     } catch (error) {
       await handleError(error);
     } finally {
@@ -153,7 +156,7 @@ export default function WorkspaceGroupsRoute({ embedded = false } = {}) {
       const group = result.group;
       setGroups((items) => items.map((item) => item.id === group.id ? group : item));
       setRenaming(false);
-      setNotice({ kind: "success", text: `用户组已重命名为 ${group.name}。` });
+      setNotice({ kind: "success", text: t("workspaceGroupsRoute.groupRenamedToValue", { value1: group.name }) });
     } catch (error) {
       await handleError(error);
     } finally {
@@ -198,7 +201,7 @@ export default function WorkspaceGroupsRoute({ embedded = false } = {}) {
       setGroups(remaining);
       setSelectedId(remaining[0]?.id || "");
       setDeleteTarget(null);
-      setNotice({ kind: "success", text: `${target.name} 已删除。` });
+      setNotice({ kind: "success", text: t("workspaceGroupsRoute.valueWasDeleted", { value1: target.name }) });
     } catch (error) {
       await handleError(error);
     } finally {
@@ -206,46 +209,46 @@ export default function WorkspaceGroupsRoute({ embedded = false } = {}) {
     }
   }
 
-  if (!canManageWorkspace) return <Navigate replace to={`${base}/app`} state={{ workspaceNotice: "你没有权限访问工作区设置。" }} />;
+  if (!canManageWorkspace) return <Navigate replace to={`${base}/app`} state={{ workspaceNotice: t("settingsRoute.youDoNotHaveAccessToWorkspaceSettings") }} />;
   const selected = groups?.find((group) => group.id === selectedId) || null;
   const deleteBusy = deleteTarget ? busyKeys.has(`delete:${deleteTarget.id}`) : false;
 
   const content = <>
     <div className={`shWorkspaceSettingsPage ${embedded ? "isEmbedded" : ""}`}>
-      <header className="shWorkspaceSettingsHeader"><div><span>{workspace.name} · 工作区设置</span><h1>用户组</h1></div></header>
-      <nav className="shWorkspaceSettingsTabs" aria-label="权限设置">
-        <Link to={`${base}/settings/members`}>成员与邀请</Link>
-        <span className="isActive" aria-current="page">用户组</span>
+      <header className="shWorkspaceSettingsHeader"><div><span>{workspace.name}{" "}{t("workspaceGroupsRoute.workspaceSettings")}</span><h1>{t("settingsRoute.groups")}</h1></div></header>
+      <nav className="shWorkspaceSettingsTabs" aria-label={t("workspaceGroupsRoute.permissionSettings")}>
+        <Link to={`${base}/settings/members`}>{t("workspaceGroupsRoute.membersAndInvitations")}</Link>
+        <span className="isActive" aria-current="page">{t("settingsRoute.groups")}</span>
       </nav>
 
-      {loading ? <div className="shWorkspaceSettingsState" aria-live="polite">正在读取用户组…</div> : null}
-      {!loading && pageError ? <div className="shWorkspaceSettingsState isError" role="alert">无法读取用户组：{pageError}<button type="button" onClick={() => void load()}>重新加载</button></div> : null}
+      {loading ? <div className="shWorkspaceSettingsState" aria-live="polite">{t("workspaceGroupsRoute.loadingGroups")}</div> : null}
+      {!loading && pageError ? <div className="shWorkspaceSettingsState isError" role="alert">{t("workspaceGroupsRoute.unableToLoadGroups")}{pageError}<button type="button" onClick={() => void load()}>{t("router.reloadPage")}</button></div> : null}
       {!loading && !pageError && groups && members ? <div className="shWorkspaceGroupLayout">
-        <aside aria-label="用户组列表">
-          <header><strong>用户组</strong><button type="button" aria-label="新建用户组" onClick={() => setCreating(true)}><Plus aria-hidden="true" /></button></header>
-          {creating ? <form onSubmit={createGroup}><input autoFocus maxLength={160} required aria-label="新用户组名称" value={createName} onChange={(event) => setCreateName(event.target.value)} /><span><button type="button" onClick={() => { setCreating(false); setCreateName(""); }}>取消</button><button type="submit" disabled={busyKeys.has("create") || !createName.trim()}>创建</button></span></form> : null}
-          <nav>{groups.map((group) => <button className={group.id === selectedId ? "isActive" : ""} type="button" key={group.id} onClick={() => { setSelectedId(group.id); setRenaming(false); }}><span>{group.kind === "all_members" ? <ShieldCheck aria-hidden="true" /> : <UsersRound aria-hidden="true" />}{group.name}</span><small>{group.kind === "all_members" ? "系统" : "自定义"}</small></button>)}</nav>
+        <aside aria-label={t("workspaceGroupsRoute.groupList")}>
+          <header><strong>{t("settingsRoute.groups")}</strong><button type="button" aria-label={t("workspaceGroupsRoute.newGroup")} onClick={() => setCreating(true)}><Plus aria-hidden="true" /></button></header>
+          {creating ? <form onSubmit={createGroup}><input autoFocus maxLength={160} required aria-label={t("workspaceGroupsRoute.newGroupName")} value={createName} onChange={(event) => setCreateName(event.target.value)} /><span><button type="button" onClick={() => { setCreating(false); setCreateName(""); }}>{t("agentRunRow.cancel")}</button><button type="submit" disabled={busyKeys.has("create") || !createName.trim()}>{t("libraryRoute.create")}</button></span></form> : null}
+          <nav>{groups.map((group) => <button className={group.id === selectedId ? "isActive" : ""} type="button" key={group.id} onClick={() => { setSelectedId(group.id); setRenaming(false); }}><span>{group.kind === "all_members" ? <ShieldCheck aria-hidden="true" /> : <UsersRound aria-hidden="true" />}{group.name}</span><small>{group.kind === "all_members" ? t("libraryRoute.system") : t("workspaceGroupsRoute.custom")}</small></button>)}</nav>
         </aside>
 
         <section className="shWorkspaceGroupDetail">
           {selected ? <>
             <header>
-              <div>{renaming ? <form onSubmit={renameGroup}><input autoFocus maxLength={160} required aria-label="用户组名称" value={renameName} onChange={(event) => setRenameName(event.target.value)} /><button type="button" onClick={() => setRenaming(false)}>取消</button><button type="submit" disabled={busyKeys.has(`rename:${selected.id}`) || !renameName.trim()}>保存</button></form> : <><h2>{selected.name}</h2><p>{selected.kind === "all_members" ? "自动包含所有当前有效成员。" : `${groupMemberIds.size} 位成员`}</p></>}</div>
-              {selected.kind === "custom" && !renaming ? <span><button type="button" onClick={() => { setRenameName(selected.name); setRenaming(true); }}>重命名</button><button className="isDanger" type="button" aria-label={`删除 ${selected.name}`} onClick={() => setDeleteTarget(selected)}><Trash2 aria-hidden="true" />删除</button></span> : null}
+              <div>{renaming ? <form onSubmit={renameGroup}><input autoFocus maxLength={160} required aria-label={t("workspaceGroupsRoute.groupName")} value={renameName} onChange={(event) => setRenameName(event.target.value)} /><button type="button" onClick={() => setRenaming(false)}>{t("agentRunRow.cancel")}</button><button type="submit" disabled={busyKeys.has(`rename:${selected.id}`) || !renameName.trim()}>{t("modelSettings.save")}</button></form> : <><h2>{selected.name}</h2><p>{selected.kind === "all_members" ? t("workspaceGroupsRoute.automaticallyIncludesAllCurrentlyActiveMembers") : t("workspaceGroupsRoute.valueMembers", { value1: groupMemberIds.size })}</p></>}</div>
+              {selected.kind === "custom" && !renaming ? <span><button type="button" onClick={() => { setRenameName(selected.name); setRenaming(true); }}>{t("appRoute.rename")}</button><button className="isDanger" type="button" aria-label={t("workspaceGroupsRoute.deleteValue", { value1: selected.name })} onClick={() => setDeleteTarget(selected)}><Trash2 aria-hidden="true" />{t("appRoute.delete")}</button></span> : null}
             </header>
-            {rosterLoading ? <div className="shWorkspaceSettingsState">正在读取组成员…</div> : <div className="shWorkspaceGroupMembers">
+            {rosterLoading ? <div className="shWorkspaceSettingsState">{t("workspaceGroupsRoute.loadingGroupMembers")}</div> : <div className="shWorkspaceGroupMembers">
               {members.map((member) => {
                 const checked = selected.kind === "all_members" || groupMemberIds.has(member.membershipId);
                 const rowBusy = busyKeys.has(`member:${member.membershipId}`);
                 return <label key={member.membershipId}><input type="checkbox" checked={checked} disabled={selected.kind === "all_members" || rowBusy} onChange={() => void toggleMember(member)} /><span className="shWorkspaceMemberAvatar" aria-hidden="true">{member.email.slice(0, 1).toUpperCase()}</span><span><strong>{member.email}</strong><small>{roleLabel(member.role)}</small></span></label>;
               })}
             </div>}
-          </> : <div className="shWorkspaceSettingsEmpty">当前没有用户组。</div>}
+          </> : <div className="shWorkspaceSettingsEmpty">{t("workspaceGroupsRoute.noGroupsYet")}</div>}
         </section>
       </div> : null}
     </div>
     {notice ? <div className={`shWorkspaceToast ${notice.kind === "error" ? "isError" : ""}`} role={notice.kind === "error" ? "alert" : "status"}>{notice.text}</div> : null}
-    <ConfirmDialog open={Boolean(deleteTarget)} title="删除用户组" message={deleteTarget ? `确认删除 ${deleteTarget.name}？当前成员关系和所有 Source 授权会一起删除，历史事实不会改写。` : ""} confirmLabel="删除" busy={deleteBusy} onCancel={() => setDeleteTarget(null)} onConfirm={() => void deleteGroup()} />
+    <ConfirmDialog open={Boolean(deleteTarget)} title={t("workspaceGroupsRoute.deleteGroup")} message={deleteTarget ? t("workspaceGroupsRoute.deleteValueCurrentMembershipsAndAllSourceGrantsWill", { value1: deleteTarget.name }) : ""} confirmLabel={t("appRoute.delete")} busy={deleteBusy} onCancel={() => setDeleteTarget(null)} onConfirm={() => void deleteGroup()} />
   </>;
   return embedded ? content : <ShellPage>{content}</ShellPage>;
 }

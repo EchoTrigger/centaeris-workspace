@@ -58,51 +58,51 @@ test("workspace uses separate Plugin and direct Skill APIs", async ({ page }) =>
   });
 
   await page.goto("/w/ws_1/settings/plugins");
-  await expect(page.getByRole("dialog", { name: "工作空间插件" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "工作空间插件", exact: true })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Workspace plugins" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Workspace plugins", exact: true })).toBeVisible();
   await expect(page.locator(".workspaceSettingsFeature > header > p")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "重新检查插件", exact: true })).toHaveCount(0);
   await expect(page.getByText("Banana Extension", { exact: true })).toBeVisible();
   await expect(page.getByText("Synthetic extension fixture.", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Lifecycle Hooks" })).toHaveCount(0);
-  await page.getByRole("button", { name: "查看 Banana Extension 详细信息" }).click();
+  await page.getByRole("button", { name: "View details for Banana Extension" }).click();
   await expect(page.getByText("Word、Excel、PowerPoint、PDF", { exact: true })).toBeVisible();
   await expect(page.locator(".pluginSettingsProperty small")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Lifecycle Hooks" })).toHaveCount(0);
-  await page.getByText("开发者信息", { exact: true }).click();
+  await page.getByText("Developer information", { exact: true }).click();
   await expect(page.getByRole("heading", { name: "Lifecycle Hooks" })).toBeVisible();
   await expect(page.getByText("guard-write", { exact: true })).toBeVisible();
   await expect(page.getByText("write", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "启用 Banana Extension" }).click();
-  await expect(page.getByRole("button", { name: "停用 Banana Extension" })).toHaveText("已启用");
+  await page.getByRole("button", { name: "Enable Banana Extension" }).click();
+  await expect(page.getByRole("button", { name: "Disable Banana Extension" })).toHaveText("Enabled");
   expect(enablementBody).toEqual({ enabled: true });
   await expect(page.getByRole("link", { name: "Skills", exact: true })).toHaveCount(0);
 
-  await page.getByRole("button", { name: "关闭" }).click();
+  await page.getByRole("button", { name: "Close" }).click();
   await page.goto("/w/ws_1/library?view=skills");
   await expect(page.getByRole("table", { name: "Skills" })).toContainText("banana");
-  await expect(page.getByRole("table", { name: "Skills" })).toContainText("自动");
+  await expect(page.getByRole("table", { name: "Skills" })).toContainText("Auto");
   await expect(page.getByRole("heading", { name: "文档创作" })).toHaveCount(0);
   expect(skillDetailRequests).toBe(0);
   const libraryWidth = (await page.locator(".libraryMain").boundingBox()).width;
-  await page.getByRole("row", { name: "预览 banana", exact: true }).click();
-  await expect(page.getByRole("complementary", { name: "Skill 预览" })).toBeVisible();
+  await page.getByRole("row", { name: "Preview banana", exact: true }).click();
+  await expect(page.getByRole("complementary", { name: "Skill preview" })).toBeVisible();
   await page.waitForTimeout(400);
   expect((await page.locator(".libraryMain").boundingBox()).width).toBeLessThan(libraryWidth);
   await expect(page.getByRole("heading", { name: "文档创作" })).toBeVisible();
   await expect(page.getByText("创建并检查文档", { exact: true })).toBeVisible();
-  const closeButton = page.getByRole("button", { name: "关闭 Skill 预览" });
+  const closeButton = page.getByRole("button", { name: "Close skill preview" });
   const closeBox = await closeButton.boundingBox();
   const titleBox = await page.locator(".librarySkillPeek > header").getByText("Skill", { exact: true }).boundingBox();
   expect(closeBox.x).toBeLessThan(titleBox.x);
   await closeButton.hover();
-  await expect(closeButton).toHaveCSS("background-color", "rgb(233, 233, 230)");
-  await expect(closeButton).toHaveCSS("color", "rgb(55, 53, 47)");
+  await expect(closeButton).toHaveCSS("background-color", "rgb(238, 238, 236)");
+  await expect(closeButton).toHaveCSS("color", "rgb(32, 36, 40)");
   expect(skillDetailRequests).toBe(1);
   await expect(page.getByText("/opt/centaeris/plugins/banana/skills/banana/SKILL.md", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("navigation", { name: "Capabilities" })).toHaveCount(0);
   await page.keyboard.press("Escape");
-  await expect(page.getByRole("complementary", { name: "Skill 预览" })).toBeHidden();
+  await expect(page.getByRole("complementary", { name: "Skill preview" })).toBeHidden();
 });
 
 for (const prefix of ["", "Bearer "]) {
@@ -165,9 +165,9 @@ test(`superuser manages one Plugin credential input (${prefix ? "prefixed" : "ba
   });
 
   await page.goto("/w/ws_1/settings/plugins");
-  await page.getByRole("button", { name: "查看 Banana Extension 详细信息" }).click();
-  await expect(page.getByText("需要凭证", { exact: true })).toBeVisible();
-  await page.getByText("开发者信息", { exact: true }).click();
+  await page.getByRole("button", { name: "View details for Banana Extension" }).click();
+  await expect(page.getByText("Credentials required", { exact: true })).toBeVisible();
+  await page.getByText("Developer information", { exact: true }).click();
   await expect(page.getByText("https://banana.invalid/mcp", { exact: true })).toBeVisible();
   await expect(page.getByText("banana_search", { exact: true })).toBeVisible();
   await expect(page.getByText("search_article", { exact: true })).toBeVisible();
@@ -176,8 +176,8 @@ test(`superuser manages one Plugin credential input (${prefix ? "prefixed" : "ba
   await expect(page.getByLabel("新凭据引用", { exact: true })).toHaveCount(0);
   await expect(page.getByText("支持粘贴纯 Token 或 Bearer Token（带 Bearer 前缀）。", { exact: true })).toHaveCount(0);
   await page.getByLabel("banana-token Bearer Token").fill(`${prefix}first-secret`);
-  await page.getByRole("button", { name: "保存" }).click();
-  await expect(page.getByText("已配置 · v1", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByText("Configured · v1", { exact: true })).toBeVisible();
   expect(createdBody).toEqual({
     pluginName: "banana",
     credentialRef: "banana-token",
@@ -187,14 +187,14 @@ test(`superuser manages one Plugin credential input (${prefix ? "prefixed" : "ba
 
   await expect(page.getByLabel("banana-token Bearer Token")).toHaveValue("");
   await page.getByLabel("banana-token Bearer Token").fill(`${prefix}replacement-secret`);
-  await page.getByRole("button", { name: "轮换" }).click();
-  await expect(page.getByText("已配置 · v2", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Rotate" }).click();
+  await expect(page.getByText("Configured · v2", { exact: true })).toBeVisible();
   expect(rotatedBody).toEqual({ secret: `${prefix}replacement-secret` });
   await expect(page.getByLabel("banana-token Bearer Token")).toHaveValue("");
-  await page.getByRole("button", { name: "删除" }).click();
-  const dialog = page.getByRole("dialog", { name: "删除 Bearer 凭证？" });
-  await dialog.getByRole("button", { name: "删除" }).click();
-  await expect(page.getByText("尚未配置", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Delete" }).click();
+  const dialog = page.getByRole("dialog", { name: "Delete bearer credential?" });
+  await dialog.getByRole("button", { name: "Delete" }).click();
+  await expect(page.getByText("Not configured yet", { exact: true })).toBeVisible();
 });
 }
 
@@ -238,9 +238,9 @@ test(`Plugin details expand in place and dismiss outside (${width}px)`, async ({
   });
 
   await page.goto("/w/ws_1/settings/plugins");
-  const bananaToggle = page.getByRole("button", { name: "查看 banana 详细信息", exact: true });
-  const kiwiToggle = page.getByRole("button", { name: "查看 kiwi 详细信息", exact: true });
-  const bananaAction = page.getByRole("button", { name: "启用 banana", exact: true });
+  const bananaToggle = page.getByRole("button", { name: "View details for banana", exact: true });
+  const kiwiToggle = page.getByRole("button", { name: "View details for kiwi", exact: true });
+  const bananaAction = page.getByRole("button", { name: "Enable banana", exact: true });
   const kiwiAction = page.locator(".pluginSettingsEntry").nth(1).locator(".pluginEnableButton");
   await expect(kiwiAction).toBeEnabled();
   const actionNode = await kiwiAction.elementHandle();
@@ -272,18 +272,18 @@ test(`Plugin details expand in place and dismiss outside (${width}px)`, async ({
   const controls = await kiwiToggle.getAttribute("aria-controls");
   await expect(page.locator(`[id="${controls}"]`)).toBeVisible();
   await kiwiAction.click();
-  await expect(kiwiAction).toHaveText("正在保存…");
+  await expect(kiwiAction).toHaveText("Saving…");
   await unchanged("saving label", kiwiAction, kiwiBefore);
   finishEnablement();
-  await expect(kiwiAction).toHaveText("已启用");
+  await expect(kiwiAction).toHaveText("Enabled");
   await unchanged("enabled label", kiwiAction, kiwiBefore);
   await expect(kiwiToggle).toHaveAttribute("aria-expanded", "true");
   await page.getByLabel("kiwi-token Bearer Token").fill("synthetic-unsaved-draft");
   await expect(kiwiToggle).toHaveAttribute("aria-expanded", "true");
-  await page.getByRole("heading", { name: "工作空间插件", exact: true }).click();
+  await page.getByRole("heading", { name: "Workspace plugins", exact: true }).click();
   await expect(bananaToggle).toHaveAttribute("aria-expanded", "false");
   await expect(kiwiToggle).toHaveAttribute("aria-expanded", "false");
-  await expect(page.getByRole("dialog", { name: "工作空间插件" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Workspace plugins" })).toBeVisible();
   await kiwiToggle.focus();
   await page.keyboard.press("Space");
   await expect(page.getByLabel("kiwi-token Bearer Token")).toHaveValue("synthetic-unsaved-draft");
@@ -293,7 +293,7 @@ test(`Plugin details expand in place and dismiss outside (${width}px)`, async ({
   await kiwiToggle.click();
   await page.locator(".workspaceSettingsContent").click({ position: { x: 8, y: 120 } });
   await expect(kiwiToggle).toHaveAttribute("aria-expanded", "false");
-  await expect(page.getByRole("dialog", { name: "工作空间插件" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Workspace plugins" })).toBeVisible();
   await testInfo.attach("button-layout", { body: JSON.stringify(measurements, null, 2), contentType: "application/json" });
   console.log(`Plugin layout ${width}px: max delta ${Math.max(...measurements.flatMap((item) => Object.values(item.delta)))}px`);
 });
@@ -361,38 +361,38 @@ for (const failedPart of ["mcpServers", "hooks", "credentials"]) {
       return route.fulfill({ status: 404, json: { error: "not_found" } });
     });
     await page.goto("/w/ws_1/settings/plugins");
-    await expect(page.getByRole("button", { name: "启用 Banana", exact: true })).toBeEnabled();
-    await page.getByRole("button", { name: "停用 Kiwi", exact: true }).click();
-    await expect(page.getByRole("button", { name: "启用 Kiwi", exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Enable Banana", exact: true })).toBeEnabled();
+    await page.getByRole("button", { name: "Disable Kiwi", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Enable Kiwi", exact: true })).toBeDisabled();
     finishInspection();
-    await expect(page.getByRole("status")).toContainText(failedPart === "hooks" ? "Hooks 无法校验" : "MCP 声明无法校验");
+    await expect(page.getByRole("status")).toContainText(failedPart === "hooks" ? "Unable to validate hooks" : "Unable to validate MCP declarations");
     // An older inspection must not resurrect enablement after a successful disable.
-    await expect(page.getByRole("button", { name: "启用 Kiwi", exact: true })).toBeDisabled();
-    await page.getByRole("button", { name: "启用 Banana", exact: true }).click();
-    await expect(page.getByRole("button", { name: "停用 Banana", exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "查看 Kiwi 详细信息" }).click();
-    await expect(page.getByRole("alert").filter({ hasText: "不影响其他插件" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Enable Kiwi", exact: true })).toBeDisabled();
+    await page.getByRole("button", { name: "Enable Banana", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Disable Banana", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "View details for Kiwi" }).click();
+    await expect(page.getByRole("alert").filter({ hasText: "Other plugins are unaffected" })).toBeVisible();
     await expect(page.locator(".pluginCredentialForm input")).toHaveCount(1);
     await expect(page.getByLabel("新凭据引用", { exact: true })).toHaveCount(0);
     if (failedPart === "credentials") {
-      await expect(page.getByRole("alert").filter({ hasText: "凭据操作失败" })).toBeVisible();
-      await expect(page.getByRole("button", { name: "保存", exact: true })).toBeDisabled();
+      await expect(page.getByRole("alert").filter({ hasText: "Credential action failed" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
       expect(credentialReads).toBe(1);
       credentialStoreUnavailable = false;
-      await page.getByRole("button", { name: "重新读取凭据", exact: true }).click();
+      await page.getByRole("button", { name: "Reload credentials", exact: true }).click();
       await expect.poll(() => credentialReads).toBe(2);
-      await expect(page.getByRole("alert").filter({ hasText: "凭据操作失败" })).toHaveCount(0);
-      await page.getByRole("button", { name: "查看 Kiwi 详细信息" }).click();
-      await expect(page.getByText("已配置 · v1", { exact: true })).toBeVisible();
+      await expect(page.getByRole("alert").filter({ hasText: "Credential action failed" })).toHaveCount(0);
+      await page.getByRole("button", { name: "View details for Kiwi" }).click();
+      await expect(page.getByText("Configured · v1", { exact: true })).toBeVisible();
     } else {
       if (failedPart === "mcpServers") {
         await page.getByLabel("kiwi-token Bearer Token", { exact: true }).fill("Bearer synthetic-created-token");
-        await page.getByRole("button", { name: "保存", exact: true }).click();
-        await expect(page.getByText("已配置 · v1", { exact: true })).toBeVisible();
+        await page.getByRole("button", { name: "Save", exact: true }).click();
+        await expect(page.getByText("Configured · v1", { exact: true })).toBeVisible();
       }
       await page.getByLabel("kiwi-token Bearer Token", { exact: true }).fill("synthetic-rotated-token");
-      await page.getByRole("button", { name: "轮换", exact: true }).click();
-      await expect(page.getByText("已配置 · v2", { exact: true })).toBeVisible();
+      await page.getByRole("button", { name: "Rotate", exact: true }).click();
+      await expect(page.getByText("Configured · v2", { exact: true })).toBeVisible();
       await expect(page.locator(".pluginCredentialForm input")).toHaveCount(1);
     }
     expect(pageErrors).toEqual([]);
@@ -461,21 +461,21 @@ test("superuser uploads and removes globally installed Plugins", async ({ page }
   });
 
   await page.goto("/w/ws_1/settings/global-plugins");
-  const settingsDialog = page.getByRole("dialog", { name: "平台插件" });
+  const settingsDialog = page.getByRole("dialog", { name: "Platform plugins" });
   await expect(settingsDialog).toBeVisible();
-  await expect(settingsDialog.getByRole("link", { name: "模型", exact: true }).locator("svg")).toHaveClass(/lucide-cpu/);
-  await expect(settingsDialog.getByRole("link", { name: "平台插件", exact: true }).locator("svg")).toHaveClass(/lucide-boxes/);
+  await expect(settingsDialog.getByRole("link", { name: "Models", exact: true }).locator("svg")).toHaveClass(/lucide-cpu/);
+  await expect(settingsDialog.getByRole("link", { name: "Platform plugins", exact: true }).locator("svg")).toHaveClass(/lucide-boxes/);
   await expect(page.getByLabel("插件生命周期层级")).toHaveCount(0);
   await expect(page.locator(".workspaceSettingsFeature > header > p")).toHaveCount(0);
-  await expect(page.getByText("已安装", { exact: true })).toHaveCount(2);
-  await expect(page.getByText("1 个工作区已启用", { exact: true })).toBeVisible();
-  await expect(page.getByText("1 个工作区仍在使用", { exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "移除 Office Extension" })).toBeDisabled();
+  await expect(page.getByText("Installed", { exact: true })).toHaveCount(2);
+  await expect(page.getByText("Enabled in 1 workspace", { exact: true })).toBeVisible();
+  await expect(page.getByText("Still used by 1 workspace", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Remove Office Extension" })).toBeDisabled();
   const fileChooserPromise = page.waitForEvent("filechooser");
-  await page.getByRole("button", { name: "上传 ZIP", exact: true }).click();
+  await page.getByRole("button", { name: "Upload ZIP", exact: true }).click();
   const fileChooser = await fileChooserPromise;
   await fileChooser.setFiles({ name: "orange.zip", mimeType: "application/zip", buffer: Buffer.from("PK synthetic plugin") });
-  await expect(page.getByText("Orange Extension 已安装。", { exact: true })).toBeVisible();
+  await expect(page.getByText("Orange Extension was installed.", { exact: true })).toBeVisible();
   await expect(page.getByText("Orange Extension", { exact: true })).toBeVisible();
   expect(uploadRequest.contentType).toContain("multipart/form-data");
   expect(uploadRequest.body.toString()).toContain('name="file"; filename="orange.zip"');
@@ -488,11 +488,17 @@ test("superuser uploads and removes globally installed Plugins", async ({ page }
   expect(primaryFactsBox.x).toBe(secondaryFactsBox.x);
   await expect(pluginRows.nth(1).locator(".globalPluginActions")).toHaveCSS("justify-content", "center");
   const secondaryActionsBox = await pluginRows.nth(1).locator(".globalPluginActions").boundingBox();
-  const removeButtonBox = await page.getByRole("button", { name: "移除 Banana Extension" }).boundingBox();
+  const removeButtonBox = await page.getByRole("button", { name: "Remove Banana Extension" }).boundingBox();
   expect(Math.abs((secondaryActionsBox.x + secondaryActionsBox.width / 2) - (removeButtonBox.x + removeButtonBox.width / 2))).toBeLessThan(1);
-  await page.getByRole("button", { name: "移除 Banana Extension" }).click();
-  const dialog = page.getByRole("dialog", { name: "移除全局插件？" });
-  await dialog.getByRole("button", { name: "移除" }).click();
+  await page.getByRole("button", { name: "Remove Banana Extension" }).click();
+  const dialog = page.getByRole("dialog", { name: "Remove global plugin?" });
+  await dialog.getByRole("button", { name: "Remove" }).click();
   await expect(page.getByText("Banana Extension", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("Banana Extension 已移除。", { exact: true })).toBeVisible();
+  await expect(page.getByText("Banana Extension was removed.", { exact: true })).toBeVisible();
+});
+
+
+
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("centaeris:language:v1", "en"));
 });

@@ -1,3 +1,5 @@
+
+import { useTranslation } from "../i18n";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link, useRevalidator } from "react-router";
@@ -6,6 +8,7 @@ import { apiJson } from "../api";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 
 function useTrashFeed(path, field, enabled) {
+  useTranslation();
   const [items, setItems] = useState([]);
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -57,6 +60,7 @@ function useTrashFeed(path, field, enabled) {
 }
 
 function LazySentinel({ feed }) {
+  const { t } = useTranslation();
   const ref = useRef(null);
   useEffect(() => {
     if (!ref.current || !feed.hasMore) return undefined;
@@ -67,41 +71,46 @@ function LazySentinel({ feed }) {
     return () => observer.disconnect();
   }, [feed.hasMore, feed.loadMore]);
   if (!feed.hasMore) return null;
-  return <div className="shTrashSentinel" ref={ref}>{feed.loading ? <LoaderCircle className="statusIcon" aria-label="正在加载" /> : null}</div>;
+  return <div className="shTrashSentinel" ref={ref}>{feed.loading ? <LoaderCircle className="statusIcon" aria-label={t("trashPopover.loading")} /> : null}</div>;
 }
 
 function RemainingDays({ deletedAt }) {
+  const { t } = useTranslation();
   const deleted = new Date(deletedAt).valueOf();
-  if (!Number.isFinite(deleted)) return <span>删除时间未知</span>;
+  if (!Number.isFinite(deleted)) return <span>{t("trashPopover.deletionTimeUnknown")}</span>;
   const days = Math.max(1, Math.ceil((deleted + 30 * 86400000 - Date.now()) / 86400000));
-  return <span>还剩 {days} 天</span>;
+  return <span>{t("trash.days", { count: days })}</span>;
 }
 
 function TrashMetadata({ item }) {
+  const { t } = useTranslation();
   return <small>
-    {item.location?.label || "原位置未知"} · {item.deletedBy?.email || "删除者未知"} · <RemainingDays deletedAt={item.deletedAt} />
+    {item.location?.label || t("trashPopover.originalLocationUnknown")} · {item.deletedBy?.email || t("trashPopover.deletedByUnknownUser")} · <RemainingDays deletedAt={item.deletedAt} />
   </small>;
 }
 
 function RowActions({ label, busy, onRestore, onPurge }) {
+  const { t } = useTranslation();
   return <span className="shTrashActions">
-    <button type="button" disabled={busy} aria-label={`恢复${label}`} title="恢复" onClick={onRestore}><RotateCcw aria-hidden="true" /></button>
-    <button type="button" disabled={busy} aria-label={`永久删除${label}`} title="永久删除" onClick={onPurge}><Trash2 aria-hidden="true" /></button>
+    <button type="button" disabled={busy} aria-label={t("trashPopover.restoreValue", { value1: label })} title={t("trashPopover.restore")} onClick={onRestore}><RotateCcw aria-hidden="true" /></button>
+    <button type="button" disabled={busy} aria-label={t("trashPopover.permanentlyDeleteValue", { value1: label })} title={t("trashSessionRoute.deletePermanently")} onClick={onPurge}><Trash2 aria-hidden="true" /></button>
   </span>;
 }
 
 function TrashSection({ feed, children }) {
+  const { t } = useTranslation();
   if (feed.loaded && !feed.items.length && !feed.error) return null;
   return <section className="shTrashSection">
     <div className="shTrashSectionBody">
       {feed.items.map(children)}
-      {feed.error ? <button className="shTrashRetry" type="button" onClick={feed.retry}>读取失败，重试</button> : null}
+      {feed.error ? <button className="shTrashRetry" type="button" onClick={feed.retry}>{t("trashPopover.unableToLoadTryAgain")}</button> : null}
       <LazySentinel feed={feed} />
     </div>
   </section>;
 }
 
 function AgentTrashFolder({ item, base, busy, onClose, onRestore, onPurge, onPurgeSession }) {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const feed = useTrashFeed(`/api/agents/${encodeURIComponent(item.id)}/trash/sessions`, "sessions", expanded);
   return <article className="shTrashFolder">
@@ -114,17 +123,18 @@ function AgentTrashFolder({ item, base, busy, onClose, onRestore, onPurge, onPur
     </div>
     {expanded ? <div className="shTrashChildren">
       {feed.items.map((session) => <div className="shTrashChild" key={session.id}>
-        <Link to={`${base}/trash/sessions/${encodeURIComponent(session.id)}`} onClick={onClose}><strong>{session.title}</strong><small>{session.status === "deleted" ? "已单独删除" : "随代理隐藏"}</small></Link>
-        {session.status === "deleted" ? <button type="button" aria-label={`永久删除${session.title}`} title="永久删除" onClick={() => onPurgeSession(session, feed)}><Trash2 aria-hidden="true" /></button> : null}
+        <Link to={`${base}/trash/sessions/${encodeURIComponent(session.id)}`} onClick={onClose}><strong>{session.title}</strong><small>{session.status === "deleted" ? t("trashPopover.deletedSeparately") : t("trashPopover.hiddenWithAgent")}</small></Link>
+        {session.status === "deleted" ? <button type="button" aria-label={t("trashPopover.permanentlyDeleteValue", { value1: session.title })} title={t("trashSessionRoute.deletePermanently")} onClick={() => onPurgeSession(session, feed)}><Trash2 aria-hidden="true" /></button> : null}
       </div>)}
-      {feed.loaded && !feed.items.length && !feed.error ? <p>没有会话</p> : null}
-      {feed.error ? <button className="shTrashRetry" type="button" onClick={feed.retry}>读取失败，重试</button> : null}
+      {feed.loaded && !feed.items.length && !feed.error ? <p>{t("trashPopover.noConversations")}</p> : null}
+      {feed.error ? <button className="shTrashRetry" type="button" onClick={feed.retry}>{t("trashPopover.unableToLoadTryAgain")}</button> : null}
       <LazySentinel feed={feed} />
     </div> : null}
   </article>;
 }
 
 function TrashItemRow({ item, base, busy, onClose, onRestore, onPurge }) {
+  useTranslation();
   const content = <span><strong>{item.title}</strong><TrashMetadata item={item} /></span>;
   return <div className="shTrashRow">
     {item.kind === "session"
@@ -135,6 +145,7 @@ function TrashItemRow({ item, base, busy, onClose, onRestore, onPurge }) {
 }
 
 export function TrashPopover({ open, workspace, anchorRef, onClose }) {
+  const { t } = useTranslation();
   const panelRef = useRef(null);
   const [position, setPosition] = useState(null);
   const [searchDraft, setSearchDraft] = useState("");
@@ -232,7 +243,7 @@ export function TrashPopover({ open, workspace, anchorRef, onClose }) {
       }
     } catch (requestError) {
       if (requestError.status === 404 || requestError.status === 410 || requestError.message.endsWith("_not_deleted") || requestError.message === "source_not_restorable") await trash.reload();
-      else setError(requestError.message === "agent_deleted" ? "请先恢复该会话所属的代理。" : `恢复失败：${requestError.message}`);
+      else setError(requestError.message === "agent_deleted" ? t("trashSessionRoute.restoreThisConversationSAgentFirst") : t("trashSessionRoute.unableToRestoreValue", { value1: requestError.message }));
     } finally {
       setBusyKey("");
     }
@@ -258,7 +269,7 @@ export function TrashPopover({ open, workspace, anchorRef, onClose }) {
       if (requestError.status === 404 || requestError.status === 410 || requestError.message.endsWith("_not_deleted")) {
         await (feed || trash).reload();
         setPurgeTarget(null);
-      } else setError(`永久删除失败：${requestError.message}`);
+      } else setError(t("trashSessionRoute.unableToDeletePermanentlyValue", { value1: requestError.message }));
     } finally {
       setBusyKey("");
     }
@@ -268,49 +279,49 @@ export function TrashPopover({ open, workspace, anchorRef, onClose }) {
   const allLoaded = trash.loaded || trash.error;
   const empty = allLoaded && !trash.items.length && !trash.error;
   const purgeTitle = {
-    agent: "确定要删除此代理及其对话？",
-    session: "确定要删除此对话？",
-    source: "确定要删除此来源？",
-    library: "确定要删除此资料？",
-  }[purgeTarget?.kind] || "确定要删除此项目？";
+    agent: t("trashPopover.deleteThisAgentAndItsConversations"),
+    session: t("appRoute.deleteThisConversation"),
+    source: t("trashPopover.deleteThisSource"),
+    library: t("trashPopover.deleteThisMaterial"),
+  }[purgeTarget?.kind] || t("trashPopover.deleteThisProject");
 
   return createPortal(<>
-    <section className="shTrashPopover" ref={panelRef} role="dialog" aria-label="垃圾桶" style={position}>
-      <header><strong>垃圾桶</strong></header>
+    <section className="shTrashPopover" ref={panelRef} role="dialog" aria-label={t("shellSidebar.trash")} style={position}>
+      <header><strong>{t("shellSidebar.trash")}</strong></header>
       <div className="shTrashTools">
-        <input aria-label="搜索垃圾桶" placeholder="在垃圾桶中搜索" value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)} />
+        <input aria-label={t("trashPopover.searchTrash")} placeholder={t("trashPopover.searchInTrash")} value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)} />
         <div className="shTrashFilters">
-          <select aria-label="类型" value={kind} onChange={(event) => setKind(event.target.value)}>
-            <option value="">类型</option>
-            <option value="agent">代理</option>
-            <option value="session">会话</option>
+          <select aria-label={t("trashPopover.type")} value={kind} onChange={(event) => setKind(event.target.value)}>
+            <option value="">{t("trashPopover.type")}</option>
+            <option value="agent">{t("agentRunRow.agent")}</option>
+            <option value="session">{t("searchOverlay.conversations")}</option>
             <option value="source">Source</option>
             <option value="library">Library</option>
           </select>
-          <select aria-label="原位置" value={location} onChange={(event) => setLocation(event.target.value)}>
-            <option value="">原位置</option>
-            {trash.filterOptions.locations.map((item) => <option key={`${item.kind}:${item.id || "root"}`} value={`${item.kind}|${item.id || ""}`}>{item.scope === "privateLibrary" ? "私人" : "工作区"} · {item.label}</option>)}
+          <select aria-label={t("trashPopover.originalLocation")} value={location} onChange={(event) => setLocation(event.target.value)}>
+            <option value="">{t("trashPopover.originalLocation")}</option>
+            {trash.filterOptions.locations.map((item) => <option key={`${item.kind}:${item.id || "root"}`} value={`${item.kind}|${item.id || ""}`}>{item.scope === "privateLibrary" ? t("agentRoute.private") : t("workspaceChooserRoute.workspace")} · {item.label}</option>)}
           </select>
-          <select aria-label="范围" value={scope} onChange={(event) => setScope(event.target.value)}>
-            <option value="">范围</option>
-            <option value="privateLibrary">私人 Library</option>
-            <option value="workspace">当前工作区</option>
+          <select aria-label={t("trashPopover.scope")} value={scope} onChange={(event) => setScope(event.target.value)}>
+            <option value="">{t("trashPopover.scope")}</option>
+            <option value="privateLibrary">{t("trashPopover.privateLibrary")}</option>
+            <option value="workspace">{t("trashPopover.currentWorkspace")}</option>
           </select>
-          <select aria-label="删除者" value={deletedByUserId} onChange={(event) => setDeletedByUserId(event.target.value)}>
-            <option value="">删除者</option>
+          <select aria-label={t("trashPopover.deletedBy")} value={deletedByUserId} onChange={(event) => setDeletedByUserId(event.target.value)}>
+            <option value="">{t("trashPopover.deletedBy")}</option>
             {trash.filterOptions.deletedBy.map((item) => <option key={item.userId} value={item.userId}>{item.email}</option>)}
           </select>
         </div>
       </div>
       <div className="shTrashPopoverBody">
         {error ? <div className="errorBanner" role="alert">{error}</div> : null}
-        {!allLoaded ? <div className="shTrashLoading"><LoaderCircle className="statusIcon" aria-hidden="true" />正在读取…</div> : null}
+        {!allLoaded ? <div className="shTrashLoading"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("trashPopover.loading2")}</div> : null}
         <TrashSection feed={trash}>{(item) => item.kind === "agent"
           ? <AgentTrashFolder key={item.id} item={item} base={base} busy={Boolean(busyKey)} onClose={onClose} onRestore={restore} onPurge={(kind, target) => setPurgeTarget({ kind, item: target })} onPurgeSession={(target, feed) => setPurgeTarget({ kind: "session", item: target, feed })} />
           : <TrashItemRow key={`${item.kind}:${item.id}`} item={item} base={base} busy={Boolean(busyKey)} onClose={onClose} onRestore={restore} onPurge={(kind, target) => setPurgeTarget({ kind, item: target })} />}</TrashSection>
-        {empty ? <div className="shTrashAllEmpty"><p>垃圾桶是空的</p></div> : null}
+        {empty ? <div className="shTrashAllEmpty"><p>{t("trashPopover.trashIsEmpty")}</p></div> : null}
       </div>
-      <footer>项目在垃圾桶中保留 30 天，之后自动删除。</footer>
+      <footer>{t("trashPopover.itemsStayInTrashFor30DaysBeforeBeing")}</footer>
     </section>
     <ConfirmDialog open={Boolean(purgeTarget)} title={purgeTitle} busy={Boolean(busyKey)} onCancel={() => setPurgeTarget(null)} onConfirm={() => void purge()} />
   </>, document.body);

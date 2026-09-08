@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { AgentRunRow } from "../../src/chat/AgentRunRow";
+import { LanguageSelector } from "../../src/components/LanguageSelector";
 import { createChatViewStore } from "../../src/chat/chatViewStore";
 import { hydrateAgentRun } from "../../src/chat/sessionEvents";
 import "../../src/globals.css";
@@ -26,7 +27,7 @@ const run = {
 };
 store.replaceAll([run]);
 let root = createRoot(document.getElementById("root"));
-const render = () => root.render(<AgentRunRow store={store} agentRunId={run.id} />);
+const render = () => root.render(<><LanguageSelector /><AgentRunRow store={store} agentRunId={run.id} /></>);
 render();
 window.reasoningFixture = {
   liveSnapshot(revision, text) {
@@ -36,17 +37,17 @@ window.reasoningFixture = {
       live: { messageId: "answer", turnId: "fixture-turn", afterSequence: 0, revision, text: "Streaming answer", reasoning: { blockId: "reasoning:request-1", requestId: "request-1", text } },
     }));
   },
-  committedHistory() {
+  committedHistory(status = "done") {
     const event = (type, sequence, payload) => ({ sequence, event: {
       schemaVersion: "session.event.v1", eventVersion: 1, type, sequence,
       eventId: `event:${sequence}`, sessionId: "fixture-session", agentRunId: run.id,
       turnId: "fixture-turn", createdAtMs: sequence, payload,
     } });
     store.replaceAgentRun(hydrateAgentRun({
-      id: run.id, status: "completed", model: {}, createdAt: run.createdAt,
+      id: run.id, status: status === "interrupted" ? "cancelled" : "completed", model: {}, createdAt: run.createdAt,
       startedAt: run.startedAt, completedAt: "2026-09-05T00:00:02Z",
       live: null, streamCursor: "1-0", events: [
-        event("reasoning_block", 1, { blockId: "reasoning:request-1", requestId: "request-1", text: "Committed thinking", status: "done" }),
+        event("reasoning_block", 1, { blockId: "reasoning:request-1", requestId: "request-1", text: "Committed thinking", status }),
         event("assistant_message", 2, { messageId: "answer", modelMarkdown: "Committed answer", artifactRefs: [], status: "done" }),
       ],
     }));

@@ -1,5 +1,7 @@
 # Centaeris Workspace
 
+English | [简体中文](README.zh-CN.md)
+
 Hosted product for running Centaeris agents with workspace membership, durable
 jobs, managed execution, document processing, a Django control plane, and a web
 client. The public source is developed under `AGPL-3.0-only`.
@@ -14,6 +16,23 @@ Compose passes only the Runtime source through an additional named build
 context for Rust service images. The API image context contains only this
 repository. Superusers install or update Plugins by uploading a validated ZIP;
 extension source repositories are not included in a Workspace image context.
+
+## Appearance
+
+Choose **System default**, **Dark theme**, or **Light theme** in **Settings → General → Theme**. System default is the initial choice. Manual choices persist on this device and override system changes. Replies and process headings use 14px; process details, code, and tables use 13px. Process headings and content share one gray in each theme.
+
+## Interface language
+
+Workspace supports English and Simplified Chinese through `react-i18next`.
+The default is Simplified Chinese. Change it in **Settings → General → Language**;
+the choice is saved in this browser. Sign-in pages also provide a language selector.
+Changing the interface language preserves drafts and does not translate user content,
+model responses, commands, or protocol identifiers.
+
+Translation resources live in `packages/web/src/locales/`. Run
+`npm run test:unit --workspace packages/web` for resource parity and plural checks.
+The main browser regression suite explicitly selects English; dedicated language
+tests cover the Chinese default, switching, and persistence.
 
 ## Develop
 

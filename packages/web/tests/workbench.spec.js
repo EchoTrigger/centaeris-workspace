@@ -170,8 +170,8 @@ test("running input queues without inventing a committed session message", async
   }
   await page.locator(".workspaceContextMcpTools > summary").click();
   await expect(page.getByText("mcp:banana:banana · banana_search", { exact: true })).toBeVisible();
-  const composer = page.getByLabel("输入消息");
-  await expect(page.getByRole("button", { name: "停止" })).toBeEnabled();
+  const composer = page.getByLabel("Message", { exact: true });
+  await expect(page.getByRole("button", { name: "Stop" })).toBeEnabled();
   await composer.fill("check the cancellation edge");
   await composer.press("Enter");
 
@@ -512,9 +512,9 @@ test("keeps route-intended layouts while session navigation is loading", async (
   await page.goto("/w/ws_1/app");
   await homeSessionsStarted;
   await expect(page.locator(".workspaceComposer")).toHaveClass(/shComposerHero/);
-  await expect(page.getByText("正在读取会话…", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Loading conversation…", { exact: true })).toHaveCount(0);
   releaseHomeSessions();
-  await expect(page.getByRole("button", { name: "AI 模型", exact: true })).toContainText("Clinical");
+  await expect(page.getByRole("button", { name: "AI model", exact: true })).toContainText("Clinical");
 
   await page.goto("/w/ws_1/agents/centaeris?sessionId=sess_1");
   await conversationSessionsStarted;
@@ -556,11 +556,11 @@ test("isolates a broken AgentRun while rendering contracted dynamic tools", asyn
   await page.goto("/w/ws_1/agents/centaeris?sessionId=sess_1");
 
   await expect(page.getByRole("heading", { name: "页面加载失败" })).toHaveCount(0);
-  const isolatedFailure = page.getByRole("alert").filter({ hasText: "此轮内容暂时无法显示" });
-  await expect(isolatedFailure).toContainText("其他会话功能仍可使用");
-  await expect(isolatedFailure.getByRole("button", { name: "重新读取" })).toBeVisible();
+  const isolatedFailure = page.getByRole("alert").filter({ hasText: "This run is temporarily unavailable" });
+  await expect(isolatedFailure).toContainText("Other conversation features are still available");
+  await expect(isolatedFailure.getByRole("button", { name: "Reload" })).toBeVisible();
   await expect(page.getByText("Using 上海市校规", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "停止", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
 });
 
 test("keeps a failed run usable without a red retry banner", async ({ page }) => {
@@ -583,7 +583,7 @@ test("keeps a failed run usable without a red retry banner", async ({ page }) =>
   await expect(page.getByText("已有可继续使用的结果。", { exact: true })).toBeVisible();
   await expect(page.getByText("本轮运行未完成，请重试。", { exact: true })).toHaveCount(0);
   await expect(page.locator(".workspaceRunNotice.isError")).toHaveCount(0);
-  await expect(page.getByRole("textbox", { name: "输入消息", exact: true })).toBeEnabled();
+  await expect(page.getByRole("textbox", { name: "Message", exact: true })).toBeEnabled();
 });
 
 test("composer reverses Enter behavior when the preference is enabled", async ({ page }) => {
@@ -591,7 +591,7 @@ test("composer reverses Enter behavior when the preference is enabled", async ({
   const fixture = await installChatFixture(page);
   await page.goto("/w/ws_1/agents/centaeris");
 
-  const composer = page.getByRole("textbox", { name: "输入消息", exact: true });
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
   await composer.fill("检查发送快捷键");
   await composer.press("Enter");
   await expect(composer).toHaveValue("检查发送快捷键\n");
@@ -610,17 +610,17 @@ test("switching models resets a user override even when both defaults match", as
   });
   await page.goto("/w/ws_1/agents/centaeris");
 
-  await page.getByRole("button", { name: "思考力度", exact: true }).click();
-  let thinkingPicker = page.getByLabel("选择思考力度", { exact: true });
-  await thinkingPicker.getByRole("button", { name: "低", exact: true }).click();
+  await page.getByRole("button", { name: "Reasoning effort", exact: true }).click();
+  let thinkingPicker = page.getByLabel("Select reasoning effort", { exact: true });
+  await thinkingPicker.getByRole("button", { name: "Low", exact: true }).click();
 
-  await page.getByRole("button", { name: "AI 模型", exact: true }).click();
-  await page.getByLabel("选择 AI 模型", { exact: true }).getByRole("button", { name: "Beta", exact: true }).click();
+  await page.getByRole("button", { name: "AI model", exact: true }).click();
+  await page.getByLabel("Select AI model", { exact: true }).getByRole("button", { name: "Beta", exact: true }).click();
 
-  await page.getByRole("button", { name: "思考力度", exact: true }).click();
-  thinkingPicker = page.getByLabel("选择思考力度", { exact: true });
-  await expect(thinkingPicker.getByRole("button", { name: "高", exact: true })).toHaveAttribute("aria-pressed", "true");
-  await expect(thinkingPicker.getByRole("button", { name: "低", exact: true })).toHaveAttribute("aria-pressed", "false");
+  await page.getByRole("button", { name: "Reasoning effort", exact: true }).click();
+  thinkingPicker = page.getByLabel("Select reasoning effort", { exact: true });
+  await expect(thinkingPicker.getByRole("button", { name: "High", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(thinkingPicker.getByRole("button", { name: "Low", exact: true })).toHaveAttribute("aria-pressed", "false");
 });
 
 test("composer uploads multiple materials in one request", async ({ page }) => {
@@ -628,7 +628,7 @@ test("composer uploads multiple materials in one request", async ({ page }) => {
   await page.goto("/w/ws_1/agents/centaeris");
   await expect(page.getByTestId("active-session")).toContainText("New chat");
 
-  await page.getByLabel("选择一个或多个材料").setInputFiles([
+  await page.getByLabel("Select one or more materials").setInputFiles([
     { name: "第一份.txt", mimeType: "text/plain", buffer: Buffer.from("first") },
     { name: "第二份.md", mimeType: "text/markdown", buffer: Buffer.from("second") },
   ]);
@@ -637,14 +637,14 @@ test("composer uploads multiple materials in one request", async ({ page }) => {
   await expect(page.getByText("第二份.md", { exact: true })).toBeVisible();
   expect(fixture.uploadBody.match(/name="files"/g)).toHaveLength(2);
 
-  await page.getByRole("button", { name: "思考力度", exact: true }).click();
-  const thinkingPicker = page.getByLabel("选择思考力度", { exact: true });
+  await page.getByRole("button", { name: "Reasoning effort", exact: true }).click();
+  const thinkingPicker = page.getByLabel("Select reasoning effort", { exact: true });
   await expect(thinkingPicker.getByRole("button", { name: "模型默认", exact: true })).toHaveCount(0);
-  await expect(thinkingPicker.getByRole("button", { name: "高", exact: true })).toHaveAttribute("aria-pressed", "true");
-  await thinkingPicker.getByRole("button", { name: "低", exact: true }).click();
+  await expect(thinkingPicker.getByRole("button", { name: "High", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await thinkingPicker.getByRole("button", { name: "Low", exact: true }).click();
 
-  await page.getByRole("textbox", { name: "输入消息", exact: true }).fill("读取这两份材料");
-  await page.getByRole("textbox", { name: "输入消息", exact: true }).press("Enter");
+  await page.getByRole("textbox", { name: "Message", exact: true }).fill("读取这两份材料");
+  await page.getByRole("textbox", { name: "Message", exact: true }).press("Enter");
   await expect.poll(() => fixture.messageBody?.attachmentRefs).toEqual(["asset_1", "asset_2"]);
   expect(fixture.messageBody.thinkingMode).toBe("low");
 });
@@ -652,17 +652,17 @@ test("composer uploads multiple materials in one request", async ({ page }) => {
 test("new-session first message submits attachments atomically", async ({ page }) => {
   const fixture = await installChatFixture(page);
   await page.goto("/w/ws_1/agents/centaeris");
-  await page.getByRole("button", { name: "新建一般会话", exact: true }).click();
+  await page.getByRole("button", { name: "New general conversation", exact: true }).click();
 
-  await expect(page.getByRole("button", { name: "添加", exact: true })).toBeEnabled();
-  await page.getByLabel("选择一个或多个材料").setInputFiles({
+  await expect(page.getByRole("button", { name: "Add", exact: true })).toBeEnabled();
+  await page.getByLabel("Select one or more materials").setInputFiles({
     name: "policy.pdf",
     mimeType: "application/pdf",
     buffer: Buffer.from("%PDF-1.4 real text fixture"),
   });
   await expect(page.getByText("policy.pdf", { exact: true })).toBeVisible();
-  await page.getByRole("textbox", { name: "输入消息", exact: true }).fill("读取 PDF");
-  await page.getByRole("textbox", { name: "输入消息", exact: true }).press("Enter");
+  await page.getByRole("textbox", { name: "Message", exact: true }).fill("读取 PDF");
+  await page.getByRole("textbox", { name: "Message", exact: true }).press("Enter");
 
   await expect.poll(() => fixture.messageContentType).toMatch(/^multipart\/form-data;/);
   expect(fixture.uploadBody).toBe("");
@@ -679,12 +679,12 @@ test("late batch upload response cannot contaminate a different session", async 
   await page.goto("/w/ws_1/agents/centaeris");
   await expect(page.getByTestId("active-session")).toContainText("New chat");
 
-  const uploadAction = page.getByLabel("选择一个或多个材料").setInputFiles([
+  const uploadAction = page.getByLabel("Select one or more materials").setInputFiles([
     { name: "第一份.txt", mimeType: "text/plain", buffer: Buffer.from("first") },
     { name: "第二份.md", mimeType: "text/markdown", buffer: Buffer.from("second") },
   ]);
   await fixture.uploadStarted;
-  await page.getByRole("button", { name: "新建一般会话", exact: true }).click();
+  await page.getByRole("button", { name: "New general conversation", exact: true }).click();
   fixture.releaseUpload();
   await uploadAction;
 
@@ -695,17 +695,17 @@ test("late batch upload response cannot contaminate a different session", async 
 test("streams one answer block, ignores a stale active-session summary, and restores durable history", async ({ page }) => {
   await installChatFixture(page, { staleSessionAfterFinal: true });
   await page.goto("/w/ws_1/agents/centaeris");
-  await page.getByRole("button", { name: "新建一般会话", exact: true }).click();
+  await page.getByRole("button", { name: "New general conversation", exact: true }).click();
   await expect(page.getByTestId("active-session")).toHaveCount(0);
   await expect(page.locator(".shHomeAvatar")).toBeVisible();
-  const composer = page.getByRole("textbox", { name: "输入消息", exact: true });
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
   await composer.fill("Playwright 工作台回归");
   await composer.press("Enter");
 
   const currentRun = page.getByRole("article").filter({ hasText: "Playwright 工作台回归" });
   await expect(currentRun.getByText("这是最小纵切响应。", { exact: true })).toBeVisible();
   await expect(currentRun.getByText("正在生成回答…", { exact: true })).toHaveCount(0);
-  await expect(page.getByLabel("运行中", { exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("Running", { exact: true })).toHaveCount(0);
   await expect(page.getByTestId("active-session")).toContainText("Playwright 工作台回归");
   await expect(currentRun).not.toContainText("准备上下文");
   await expect(currentRun).not.toContainText("生成回答");
@@ -778,7 +778,7 @@ test("unlocks drafting after 202 and renders sealed Markdown while streaming", a
   });
 
   await page.goto("/w/ws_1/agents/centaeris");
-  const composer = page.getByRole("textbox", { name: "输入消息", exact: true });
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
   await expect(composer).toBeEnabled();
   await composer.fill("检查流式渲染");
   await composer.press("Enter");
@@ -811,8 +811,8 @@ test("unlocks drafting after 202 and renders sealed Markdown while streaming", a
   await expect(currentRun.locator(".workspaceLiveStatus")).toHaveCount(0);
   await expect(composer).toBeEnabled();
   await composer.fill("下一条草稿");
-  await expect(page.getByRole("button", { name: "停止", exact: true })).toBeEnabled();
-  await expect(page.getByRole("button", { name: "输入", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Input", exact: true })).toHaveCount(0);
 
   releaseFinal();
   await expect(currentRun.getByText("终态加粗", { exact: true })).toBeVisible();
@@ -821,10 +821,10 @@ test("unlocks drafting after 202 and renders sealed Markdown while streaming", a
   await expect(currentRun.getByText("伪造附件", { exact: true })).toBeVisible();
   await expect(currentRun.getByRole("link", { name: "伪造附件", exact: true })).toHaveCount(0);
   await currentRun.getByRole("link", { name: "报告.docx", exact: true }).click();
-  await expect(page.getByRole("complementary", { name: "文件预览", exact: true })).toBeVisible();
-  await expect(page.getByRole("complementary", { name: "文件预览", exact: true })).toContainText("预览正文内容");
+  await expect(page.getByRole("complementary", { name: "File preview", exact: true })).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "File preview", exact: true })).toContainText("预览正文内容");
   await expect(composer).toHaveValue("下一条草稿");
-  await expect(page.getByRole("button", { name: "输入", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Input", exact: true })).toBeEnabled();
 });
 
 test("renders coalesced live Markdown without remounting or losing the end anchor", async ({ page }) => {
@@ -931,7 +931,7 @@ test("renders coalesced live Markdown without remounting or losing the end ancho
   });
 
   await page.goto("/w/ws_1/agents/centaeris?sessionId=sess_1");
-  const composer = page.getByRole("textbox", { name: "输入消息", exact: true });
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
   await composer.fill(userText);
   await composer.press("Enter");
   await firstRequested;
@@ -981,7 +981,7 @@ test("renders coalesced live Markdown without remounting or losing the end ancho
     );
     element.dispatchEvent(new Event("scroll", { bubbles: true }));
   });
-  await expect(page.getByRole("button", { name: "回到最新", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toBeVisible();
   const detachedScrollTop = await messageList.evaluate((element) => element.scrollTop);
   expect(detachedScrollTop).toBeGreaterThan(0);
   await page.waitForTimeout(250);
@@ -997,8 +997,8 @@ test("renders coalesced live Markdown without remounting or losing the end ancho
     sealedBlockOffsetIsStable: true,
   });
   expect(Math.abs(await messageList.evaluate((element) => element.scrollTop) - detachedScrollTop)).toBeLessThanOrEqual(1);
-  await expect(page.getByRole("button", { name: "回到最新", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "回到最新", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Jump to latest", exact: true }).click();
   await expect.poll(() => messageList.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(2);
   expect(await page.evaluate(() => window.__latestScrollBehaviors[0])).toBe("auto");
 
@@ -1007,8 +1007,8 @@ test("renders coalesced live Markdown without remounting or losing the end ancho
     element.scrollTop = element.scrollHeight - element.clientHeight - 100;
     element.dispatchEvent(new Event("scroll", { bubbles: true }));
   });
-  await expect(page.getByRole("button", { name: "回到最新", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "回到最新", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Jump to latest", exact: true }).click();
   expect(await page.evaluate(() => window.__latestScrollBehaviors[0])).toBe("smooth");
   await expect.poll(() => messageList.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(2);
 
@@ -1060,18 +1060,18 @@ test("keeps an accepted AgentRun owned by durable truth after a renderer reducer
   });
 
   await page.goto("/w/ws_1/agents/centaeris");
-  const composer = page.getByRole("textbox", { name: "输入消息", exact: true });
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
   await expect(composer).toBeEnabled();
   await composer.fill("触发显示链失败");
   await composer.press("Enter");
 
   const currentRun = page.getByRole("article").filter({ hasText: "触发显示链失败" });
-  await expect(currentRun.getByRole("alert")).toContainText("此轮内容暂时无法显示");
-  await expect(currentRun.getByRole("button", { name: "重新读取" })).toBeVisible();
+  await expect(currentRun.getByRole("alert")).toContainText("This run is temporarily unavailable");
+  await expect(currentRun.getByRole("button", { name: "Reload" })).toBeVisible();
   await expect(currentRun.getByText("运行已终止。", { exact: true })).toHaveCount(0);
   await composer.fill("仍可继续起草");
-  await expect(page.getByRole("button", { name: "停止", exact: true })).toBeEnabled();
-  await expect(page.getByRole("button", { name: "输入", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Input", exact: true })).toHaveCount(0);
 });
 
 test("rejects a history page bound to a different workspace", async ({ page }) => {
@@ -1092,19 +1092,19 @@ test("rejects a history page bound to a different workspace", async ({ page }) =
   });
 
   await page.goto("/w/ws_1/agents/centaeris");
-  await expect(page.getByText("无法读取会话记录，请刷新后重试。", { exact: true })).toBeVisible();
+  await expect(page.getByText("Unable to load conversation history. Refresh the page and try again.", { exact: true })).toBeVisible();
   await expect(page.getByRole("article")).toHaveCount(0);
 });
 
 test("moves the first input into the conversation before startup and preserves it across acceptance", async ({ page }) => {
   const fixture = await installChatFixture(page, { deferMessage: true, deferEvents: true });
   await page.goto("/w/ws_1/app");
-  await page.getByRole("textbox", { name: "输入消息", exact: true }).evaluate((element) => { window.__entryComposer = element; });
+  await page.getByRole("textbox", { name: "Message", exact: true }).evaluate((element) => { window.__entryComposer = element; });
 
-  const composer = page.getByRole("textbox", { name: "输入消息", exact: true }).locator("..");
+  const composer = page.getByRole("textbox", { name: "Message", exact: true }).locator("..");
   const startBox = await composer.boundingBox();
-  await page.getByRole("textbox", { name: "输入消息", exact: true }).fill("首条消息连续动效");
-  await page.getByRole("textbox", { name: "输入消息", exact: true }).press("Enter");
+  await page.getByRole("textbox", { name: "Message", exact: true }).fill("首条消息连续动效");
+  await page.getByRole("textbox", { name: "Message", exact: true }).press("Enter");
   await fixture.messageStarted;
 
   const pendingRun = page.locator('[data-agent-run-id^="pending:"]');
@@ -1129,7 +1129,7 @@ test("moves the first input into the conversation before startup and preserves i
   const acceptedRun = page.locator('[data-agent-run-id="agent_run_sess_2"]');
   await expect(acceptedRun.locator(".workspaceUserMessage")).toHaveText("首条消息连续动效");
   await expect(acceptedRun.locator(".workspaceLiveStatus")).toBeVisible();
-  expect(await page.getByRole("textbox", { name: "输入消息", exact: true }).evaluate((element) => element === window.__entryComposer)).toBe(true);
+  expect(await page.getByRole("textbox", { name: "Message", exact: true }).evaluate((element) => element === window.__entryComposer)).toBe(true);
 
   fixture.releaseEvents();
   await expect(acceptedRun.getByText("这是最小纵切响应。", { exact: true })).toBeVisible();
@@ -1145,9 +1145,9 @@ test("accepts the first session behind settings without replacing the draft host
   await composer.evaluate((element) => { window.__acceptComposer = element; });
   await composer.press("Enter");
   await fixture.messageStarted;
-  await page.getByRole("button", { name: "默认工作区 工作区菜单" }).click();
-  await page.getByRole("link", { name: "设置", exact: true }).click();
-  const preferences = page.getByRole("dialog", { name: "偏好", exact: true });
+  await page.getByRole("button", { name: "默认工作区 workspace menu" }).click();
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  const preferences = page.getByRole("dialog", { name: "Preferences", exact: true });
   await expect(preferences).toBeVisible();
   fixture.releaseMessage();
   await fixture.eventsStarted;
@@ -1155,7 +1155,7 @@ test("accepts the first session behind settings without replacing the draft host
   await expect(page).toHaveURL(/\/w\/ws_1\/settings\/preferences$/);
   const acceptedRun = page.locator('[data-agent-run-id="agent_run_sess_2"]');
   await expect(acceptedRun.locator(".workspaceUserMessage")).toHaveText("Accept behind settings");
-  await preferences.getByRole("button", { name: "关闭", exact: true }).click();
+  await preferences.getByRole("button", { name: "Close", exact: true }).click();
   await expect(page).toHaveURL(/\/agents\/centaeris\?sessionId=sess_2$/);
   await expect(acceptedRun.locator(".workspaceLiveStatus")).toBeVisible();
   expect(await composer.evaluate((element) => element === window.__acceptComposer)).toBe(true);
@@ -1175,13 +1175,13 @@ test(`ignores late first-message acceptance after navigating to ${destination}`,
   await page.locator("#messageDraft").press("Enter");
   await fixture.messageStarted;
   if (destination === "session") {
-    await page.getByRole("tab", { name: "对话", exact: true }).click();
+    await page.getByRole("tab", { name: "Chat", exact: true }).click();
     await page.getByRole("button", { name: "Existing conversation", exact: true }).click();
     await expect(page).toHaveURL(/sessionId=sess_1$/);
     await expect(page.locator("#messageDraft")).toBeEnabled();
     await page.locator("#messageDraft").fill("New view draft");
   } else {
-    await page.getByRole("link", { name: "添加代理", exact: true }).click();
+    await page.getByRole("link", { name: "Add agent", exact: true }).click();
     await expect(page).toHaveURL(/\/agents\/new$/);
   }
   const response = page.waitForResponse((item) => new URL(item.url()).pathname.endsWith("/sessions/new/messages"));
@@ -1261,7 +1261,7 @@ test("keeps paged history DOM bounded while loading older AgentRuns", async ({ p
   await expect(page.getByText("user-001", { exact: true })).toBeVisible();
   expect(await list.getByRole("article").count()).toBeLessThan(24);
   await expect(latestRun).toHaveCount(0);
-  await page.getByRole("button", { name: "回到最新", exact: true }).click();
+  await page.getByRole("button", { name: "Jump to latest", exact: true }).click();
   await expect(latestRun.locator(".workspaceActivityGroup")).toHaveAttribute("aria-expanded", "true");
   await expect(latestRun.getByRole("button", { name: "history.txt", exact: true })).toHaveAttribute("aria-expanded", "true");
   await expect(latestRun.getByText("Preserved evidence", { exact: true })).toBeVisible();
@@ -1298,7 +1298,7 @@ test("keeps one live chat through sidebar tabs, settings, history navigation and
   const run = page.locator('[data-agent-run-id="agent_run_settings"]');
   await run.locator(".workspaceActivityGroup").click();
   await run.getByRole("button", { name: "evidence.txt", exact: true }).click();
-  const composer = page.getByRole("textbox", { name: "输入消息", exact: true });
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
   await composer.fill("Retained draft");
   await run.evaluate((element) => {
     window.__settingsRun = element;
@@ -1307,7 +1307,7 @@ test("keeps one live chat through sidebar tabs, settings, history navigation and
   });
   const sessionUrl = page.url();
   const historyLength = await page.evaluate(() => history.length);
-  for (const name of ["主页", "对话", "主页", "对话"]) {
+  for (const name of ["Home", "Chat", "Home", "Chat"]) {
     await page.getByRole("tab", { name, exact: true }).click();
     await expect(page.getByRole("tab", { name, exact: true })).toHaveAttribute("aria-selected", "true");
     await expect(page).toHaveURL(sessionUrl);
@@ -1323,13 +1323,13 @@ test("keeps one live chat through sidebar tabs, settings, history navigation and
     }))).toEqual({ run: true, body: true, composer: true, connections: 1, aborts: 0, historyLength });
     expect(historyRequests).toBe(1);
   }
-  await page.getByRole("button", { name: "默认工作区 工作区菜单" }).click();
-  await page.getByRole("link", { name: "设置", exact: true }).click();
-  const preferences = page.getByRole("dialog", { name: "偏好", exact: true });
+  await page.getByRole("button", { name: "默认工作区 workspace menu" }).click();
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  const preferences = page.getByRole("dialog", { name: "Preferences", exact: true });
   await expect(preferences).toBeVisible();
-  await preferences.getByRole("switch", { name: "使用 Enter 键开始新的一行" }).check();
-  await preferences.getByRole("link", { name: "安全", exact: true }).click();
-  await expect(page.getByRole("dialog", { name: "安全", exact: true })).toBeVisible();
+  await preferences.getByRole("switch", { name: "Use Enter to start a new line" }).check();
+  await preferences.getByRole("link", { name: "Security", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Security", exact: true })).toBeVisible();
   await page.goBack();
   await expect(preferences).toBeVisible();
   await page.goBack();
@@ -1343,7 +1343,7 @@ test("keeps one live chat through sidebar tabs, settings, history navigation and
   const item = committedStreamItem("sess_1", "agent_run_settings", 6, "phase_event", { stage: "model_process_summary", message: "Still streaming behind settings." }, "turn_1");
   await page.evaluate((text) => window.__pushSettingsEvent(text), `id: 6-0\ndata: ${JSON.stringify(item)}\n\n`);
   await expect(run).toContainText("Still streaming behind settings.");
-  await preferences.getByRole("button", { name: "关闭", exact: true }).click();
+  await preferences.getByRole("button", { name: "Close", exact: true }).click();
   await expect(composer).toHaveValue("Retained draft\n");
   expect(await run.evaluate((element) => ({
     run: element === window.__settingsRun,
@@ -1361,20 +1361,20 @@ test(`sidebar tabs retain an image draft at ${path} until explicit new chat`, as
   const writes = [];
   page.on("request", (request) => { if (["POST", "PATCH", "DELETE"].includes(request.method())) writes.push(request.url()); });
   await page.goto(path);
-  const composer = page.getByRole("textbox", { name: "输入消息", exact: true });
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
   await composer.fill("Unsent image draft");
-  await page.getByLabel("选择一个或多个材料").setInputFiles({
+  await page.getByLabel("Select one or more materials").setInputFiles({
     name: "sidebar-draft.svg", mimeType: "image/svg+xml",
     buffer: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="blue"/></svg>'),
   });
-  const thumbnail = page.getByRole("button", { name: "预览 sidebar-draft.svg", exact: true }).locator("img");
+  const thumbnail = page.getByRole("button", { name: "Preview sidebar-draft.svg", exact: true }).locator("img");
   await expect(thumbnail).toBeVisible();
   const source = await thumbnail.getAttribute("src");
   expect(source).toMatch(/^blob:/);
   await thumbnail.evaluate((element) => { window.__sidebarThumbnail = element; window.__sidebarComposer = document.querySelector("#messageDraft"); });
   const draftUrl = page.url();
   const historyLength = await page.evaluate(() => history.length);
-  for (const name of ["主页", "对话", "主页", "对话"]) {
+  for (const name of ["Home", "Chat", "Home", "Chat"]) {
     await page.getByRole("tab", { name, exact: true }).click();
     await expect(page.getByRole("tab", { name, exact: true })).toHaveAttribute("aria-selected", "true");
     await expect(page).toHaveURL(draftUrl);
@@ -1387,7 +1387,7 @@ test(`sidebar tabs retain an image draft at ${path} until explicit new chat`, as
     }))).toEqual({ image: true, composer: true, historyLength });
   }
   expect(writes).toEqual([]);
-  await page.getByRole("button", { name: /^新对话/ }).click();
+  await page.getByRole("button", { name: /^New conversation/ }).click();
   await expect(composer).toHaveValue("");
   await expect(page.locator(".workspaceComposerAttachments .attachmentCard")).toHaveCount(0);
   expect(writes).toEqual([]);
@@ -1416,8 +1416,8 @@ test("redirects a member from Models to the neutral workspace home", async ({ pa
 
   await page.goto("/w/ws_1/settings/models");
   await expect(page).toHaveURL(/\/settings\/general$/);
-  await expect(page.getByRole("heading", { name: "通用" })).toBeVisible();
-  await expect(page.getByRole("textbox", { name: "输入消息", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "General" })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Message", exact: true })).toHaveCount(0);
   await expect(page.getByTestId("active-session")).toHaveCount(0);
   expect(createdSessions).toBe(0);
 });
@@ -1436,12 +1436,12 @@ test("permanently deletes a session after one concise confirmation", async ({ pa
   await expect(sessionButton).toHaveCSS("padding-right", "34px");
   await expect(sessionActions).toHaveCSS("opacity", "1");
 
-  await page.getByRole("button", { name: "会话操作 某市一所公办中学规定：学生在校期间一律不得携带手机", exact: true }).click();
-  await page.getByRole("menuitem", { name: "删除", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "确定要删除此对话？", exact: true });
+  await page.getByRole("button", { name: "Conversation actions for 某市一所公办中学规定：学生在校期间一律不得携带手机", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Delete this conversation?", exact: true });
   await expect(dialog).toBeVisible();
   await expect.poll(() => fixture.deletedSessionIds).toEqual([]);
-  await dialog.getByRole("button", { name: "确认", exact: true }).click();
+  await dialog.getByRole("button", { name: "Confirm", exact: true }).click();
   await expect.poll(() => fixture.deletedSessionIds).toEqual(["sess_1"]);
   await expect(page.getByRole("button", { name: /归档/ })).toHaveCount(0);
 });
@@ -1452,13 +1452,13 @@ test("edits session metadata without changing its row height", async ({ page }) 
   const row = page.locator(".workspaceSessionRow").first();
   const rowHeight = (await row.boundingBox()).height;
   await expect(row.locator("small")).toHaveCount(0);
-  await page.getByRole("button", { name: "会话操作 New chat", exact: true }).click();
-  await page.getByRole("menuitem", { name: "重命名", exact: true }).click();
+  await page.getByRole("button", { name: "Conversation actions for New chat", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
   await expect(page.locator(".workspaceSessionEdit")).toHaveCount(1);
   expect((await page.locator(".workspaceSessionEdit").boundingBox()).height).toBe(rowHeight);
-  const titleInput = page.getByRole("textbox", { name: "重命名 New chat", exact: true });
-  await expect(page.getByRole("button", { name: "保存", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "取消", exact: true })).toHaveCount(0);
+  const titleInput = page.getByRole("textbox", { name: "Rename New chat", exact: true });
+  await expect(page.getByRole("button", { name: "Save", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Cancel", exact: true })).toHaveCount(0);
   await titleInput.press("Control+A");
   await titleInput.pressSequentially("输错了");
   await titleInput.press("Control+Z");
@@ -1473,21 +1473,21 @@ test("edits session metadata without changing its row height", async ({ page }) 
   await expect(row).toContainText("已重命名");
   expect((await row.boundingBox()).height).toBe(rowHeight);
 
-  await page.getByRole("button", { name: "会话操作 已重命名", exact: true }).click();
-  await page.getByRole("menuitem", { name: "重命名", exact: true }).click();
-  await page.getByRole("textbox", { name: "重命名 已重命名", exact: true }).fill("点击空白保存");
-  await page.getByText("代理", { exact: true }).click();
+  await page.getByRole("button", { name: "Conversation actions for 已重命名", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
+  await page.getByRole("textbox", { name: "Rename 已重命名", exact: true }).fill("点击空白保存");
+  await page.getByText("Agent", { exact: true }).click();
   await expect(row).toContainText("点击空白保存");
 
-  await page.getByRole("button", { name: "会话操作 点击空白保存", exact: true }).click();
-  await page.getByRole("menuitem", { name: "置顶", exact: true }).click();
+  await page.getByRole("button", { name: "Conversation actions for 点击空白保存", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Pin", exact: true }).click();
   await expect.poll(() => fixture.sessions[0].isPinned).toBe(true);
-  await expect(row.getByLabel("已置顶", { exact: true })).toBeVisible();
+  await expect(row.getByLabel("Pinned", { exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: "会话操作 点击空白保存", exact: true }).click();
-  await page.getByRole("menuitem", { name: "标为未读", exact: true }).click();
+  await page.getByRole("button", { name: "Conversation actions for 点击空白保存", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Mark as unread", exact: true }).click();
   await expect.poll(() => fixture.sessions[0].isUnread).toBe(true);
-  await expect(row.getByLabel("未读", { exact: true })).toBeVisible();
+  await expect(row.getByLabel("Unread", { exact: true })).toBeVisible();
 });
 
 test("groups pinned, project, and recent sessions and lazily creates project children", async ({ page }) => {
@@ -1509,21 +1509,21 @@ test("groups pinned, project, and recent sessions and lazily creates project chi
 
   await page.goto("/w/ws_1/agents/centaeris");
 
-  const pinned = page.getByRole("navigation", { name: "置顶会话" });
-  const project = page.getByRole("navigation", { name: "Lumi 会话" });
-  const recent = page.getByRole("navigation", { name: "最近会话" });
+  const pinned = page.getByRole("navigation", { name: "Pinned conversations" });
+  const project = page.getByRole("navigation", { name: "Lumi conversations" });
+  const recent = page.getByRole("navigation", { name: "Recent conversations" });
   await expect(pinned.getByText("顶部置顶", { exact: true })).toBeVisible();
   await expect(pinned.getByText("项目内置顶", { exact: true })).toHaveCount(0);
   await expect(pinned.locator(".workspaceSessionKindIcon")).toHaveCount(1);
   await expect(project.getByText("项目内置顶", { exact: true })).toBeVisible();
-  await expect(project.getByLabel("已置顶", { exact: true })).toBeVisible();
+  await expect(project.getByLabel("Pinned", { exact: true })).toBeVisible();
   await expect(recent.getByText("自动化最近", { exact: true })).toBeVisible();
-  await expect(recent.getByText("自动", { exact: true })).toBeVisible();
+  await expect(recent.getByText("Auto", { exact: true })).toBeVisible();
 
   const sessionSections = page.locator(".shSessionSection");
   const pinnedHeader = sessionSections.nth(0).locator(".shDisclosureSummary");
   const projectHeader = sessionSections.nth(1).locator(".shDisclosureSummary");
-  const projectAdd = page.getByRole("button", { name: "创建项目", exact: true });
+  const projectAdd = page.getByRole("button", { name: "Create project", exact: true });
   const projectRow = sessionSections.nth(1).locator(".shProject").first();
   const projectChevron = projectRow.locator(".shProjectSummary > svg").first();
   for (const header of [pinnedHeader, projectHeader, sessionSections.nth(2).locator(".shDisclosureSummary")]) {
@@ -1551,43 +1551,43 @@ test("groups pinned, project, and recent sessions and lazily creates project chi
   await expect(projectChevron).toHaveCSS("opacity", "1");
 
   await projectAdd.click();
-  const dialog = page.getByRole("dialog", { name: "创建项目", exact: true });
+  const dialog = page.getByRole("dialog", { name: "Create project", exact: true });
   const projectDialogBox = await dialog.boundingBox();
-  const projectCloseBox = await dialog.getByRole("button", { name: "关闭创建项目", exact: true }).boundingBox();
-  const projectHeadingBox = await dialog.getByRole("heading", { name: "创建项目", exact: true }).boundingBox();
+  const projectCloseBox = await dialog.getByRole("button", { name: "Close project creation", exact: true }).boundingBox();
+  const projectHeadingBox = await dialog.getByRole("heading", { name: "Create project", exact: true }).boundingBox();
   expect(projectCloseBox.x).toBeLessThan(projectHeadingBox.x);
   expect(projectCloseBox.x - projectDialogBox.x).toBeLessThanOrEqual(12);
   expect(projectCloseBox.y - projectDialogBox.y).toBeLessThanOrEqual(12);
   expect(projectDialogBox.width).toBeLessThanOrEqual(380);
   await expect(dialog.locator(".shProjectNameField")).toHaveCount(0);
-  const projectNameInput = dialog.getByRole("textbox", { name: "项目名称", exact: true });
+  const projectNameInput = dialog.getByRole("textbox", { name: "Project name", exact: true });
   await expect(projectNameInput).toHaveCSS("outline-style", "none");
   await projectNameInput.fill("新项目");
-  await dialog.getByRole("button", { name: "创建项目", exact: true }).click();
+  await dialog.getByRole("button", { name: "Create project", exact: true }).click();
   await expect(page.getByText("新项目", { exact: true })).toBeVisible();
 
   const sessionCount = fixture.sessions.length;
-  await page.getByRole("button", { name: "在 新项目 中新建会话", exact: true }).click();
+  await page.getByRole("button", { name: "New conversation in 新项目", exact: true }).click();
   await expect(page).toHaveURL(/new=1.*projectId=session_project_2/);
   await expect.poll(() => navigationRequests).toEqual({ sessions: 2, projects: 2 });
   expect(fixture.sessions).toHaveLength(sessionCount);
-  const composer = page.getByRole("textbox", { name: "输入消息", exact: true });
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
   await composer.fill("不应带进另一个项目");
-  await page.getByRole("button", { name: "在 Lumi 中新建会话", exact: true }).click();
+  await page.getByRole("button", { name: "New conversation in Lumi", exact: true }).click();
   await expect(page).toHaveURL(/new=1.*projectId=session_project_1/);
   await expect(composer).toHaveValue("");
   await expect.poll(() => navigationRequests).toEqual({ sessions: 3, projects: 3 });
   await composer.fill("仍不应带进新项目");
-  await page.getByRole("button", { name: "在 新项目 中新建会话", exact: true }).click();
+  await page.getByRole("button", { name: "New conversation in 新项目", exact: true }).click();
   await expect(page).toHaveURL(/new=1.*projectId=session_project_2/);
   await expect(composer).toHaveValue("");
   await expect.poll(() => navigationRequests).toEqual({ sessions: 4, projects: 4 });
   await composer.fill("项目中的新会话");
   await composer.press("Enter");
   await expect.poll(() => fixture.messageBody?.projectId).toBe("session_project_2");
-  await expect(page.getByRole("navigation", { name: "新项目 会话" }).getByText("项目中的新会话", { exact: true })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "新项目 conversations" }).getByText("项目中的新会话", { exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: "新建一般会话", exact: true }).click();
+  await page.getByRole("button", { name: "New general conversation", exact: true }).click();
   await expect(page).toHaveURL(/new=1$/);
 });
 
@@ -1628,16 +1628,16 @@ test("clears a deleted transcript before the next session history resolves", asy
     element.scrollTop = 0;
     element.dispatchEvent(new Event("scroll", { bubbles: true }));
   });
-  await expect(page.getByRole("button", { name: "回到最新", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "会话操作 旧会话", exact: true }).click();
-  await page.getByRole("menuitem", { name: "删除", exact: true }).click();
-  await page.getByRole("dialog", { name: "确定要删除此对话？", exact: true }).getByRole("button", { name: "确认", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Conversation actions for 旧会话", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
+  await page.getByRole("dialog", { name: "Delete this conversation?", exact: true }).getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByText("旧回答段落 80", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("正在读取会话…", { exact: true })).toBeVisible();
+  await expect(page.getByText("Loading conversation…", { exact: true })).toBeVisible();
   releaseNextHistory();
   await expect(page.getByText("新回答段落 80", { exact: true })).toBeVisible();
   await expect.poll(() => list.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(2);
-  await expect(page.getByRole("button", { name: "回到最新", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toHaveCount(0);
 });
 
 test("uses the URL workspace when the user has multiple memberships", async ({ page }) => {
@@ -1652,13 +1652,13 @@ test("uses the URL workspace when the user has multiple memberships", async ({ p
   });
 
   await page.goto("/w/ws_1/agents/centaeris");
-  const modelPicker = page.getByRole("button", { name: "AI 模型", exact: true });
+  const modelPicker = page.getByRole("button", { name: "AI model", exact: true });
   await expect(modelPicker).toBeDisabled();
-  await expect(modelPicker).toHaveText("未配置");
-  await expect(page.getByRole("textbox", { name: "输入消息", exact: true })).toBeEnabled();
-  await expect(page.getByRole("button", { name: "输入", exact: true })).toBeDisabled();
-  await page.getByRole("button", { name: "一 工作区菜单" }).click();
-  const switcher = page.getByRole("group", { name: "切换工作区" });
+  await expect(modelPicker).toHaveText("Not configured");
+  await expect(page.getByRole("textbox", { name: "Message", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Input", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "一 workspace menu" }).click();
+  const switcher = page.getByRole("group", { name: "Switch workspace" });
   await expect(switcher.locator("[aria-current=page]")).toContainText("一");
   await expect(switcher.getByRole("link", { name: "二" })).toBeVisible();
 });
@@ -1688,10 +1688,10 @@ test("keeps user and automation origins visible in recent sessions", async ({ pa
 
   await page.goto("/w/ws_1/agents/centaeris");
 
-  const recent = page.getByRole("navigation", { name: "最近会话" });
+  const recent = page.getByRole("navigation", { name: "Recent conversations" });
   await expect(recent.getByText("普通对话", { exact: true })).toBeVisible();
   await expect(recent.getByText("每日资料检查", { exact: true })).toBeVisible();
-  await expect(recent.getByText("自动", { exact: true })).toBeVisible();
+  await expect(recent.getByText("Auto", { exact: true })).toBeVisible();
 });
 
 test("marks the initially selected unread session exactly once across unrelated rerenders", async ({ page }) => {
@@ -1706,8 +1706,8 @@ test("marks the initially selected unread session exactly once across unrelated 
 
   await page.goto("/w/ws_1/agents/centaeris?sessionId=sess_1");
   await expect.poll(() => readPatches).toEqual([{ isUnread: false }]);
-  await page.getByRole("tab", { name: "主页", exact: true }).click();
-  await page.getByRole("tab", { name: "对话", exact: true }).click();
+  await page.getByRole("tab", { name: "Home", exact: true }).click();
+  await page.getByRole("tab", { name: "Chat", exact: true }).click();
   await page.setViewportSize({ width: 1000, height: 800 });
   await page.waitForTimeout(100);
   expect(readPatches).toEqual([{ isUnread: false }]);
@@ -1752,9 +1752,9 @@ test("keeps reconnecting until durable terminal history arrives", async ({ page 
   });
 
   await page.goto("/w/ws_1/agents/centaeris");
-  await expect(page.getByRole("button", { name: "AI 模型", exact: true })).toHaveText("Clinical");
-  await page.getByRole("textbox", { name: "输入消息", exact: true }).fill("断线恢复");
-  await page.getByRole("textbox", { name: "输入消息", exact: true }).press("Enter");
+  await expect(page.getByRole("button", { name: "AI model", exact: true })).toHaveText("Clinical");
+  await page.getByRole("textbox", { name: "Message", exact: true }).fill("断线恢复");
+  await page.getByRole("textbox", { name: "Message", exact: true }).press("Enter");
   await expect(page.getByText("已经生成完整回答", { exact: true })).toBeVisible({ timeout: 10_000 });
   expect(streamAttempt).toBe(5);
   await expect(page.locator(".errorBanner")).toHaveCount(0);
@@ -1860,7 +1860,7 @@ test("reloads history after an expired stream cursor", async ({ page }) => {
 
   await page.goto("/w/ws_1/agents/centaeris");
   await expect.poll(() => historyAttempt).toBe(1);
-  const composer = page.getByRole("textbox", { name: "输入消息", exact: true });
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
   await composer.fill("测试游标恢复");
   await composer.press("Enter");
   await expect(page.getByText("恢复完成", { exact: true })).toBeVisible();
@@ -1910,8 +1910,8 @@ test("keeps tool evidence inline and opens one resizable reference preview", asy
   });
 
   await page.goto("/w/ws_1/agents/centaeris");
-  const references = page.getByRole("region", { name: "引用", exact: true });
-  await expect(references.getByRole("button", { name: /术前须知\.md 引用/ })).toHaveCount(1);
+  const references = page.getByRole("region", { name: "References", exact: true });
+  await expect(references.getByRole("button", { name: /术前须知\.md References/ })).toHaveCount(1);
   await expect(page.getByText("我会先核对正式资料，再确认术前要求。", { exact: true })).toBeVisible();
   await expect(page.getByText(/Worked(?: for)?/, { exact: true })).toHaveCount(0);
   const toolGroup = page.getByRole("button", { name: "Ran commands · Edited files", exact: true });
@@ -1931,16 +1931,16 @@ test("keeps tool evidence inline and opens one resizable reference preview", asy
   await expect(details).not.toContainText("FAKE DIFF");
   await expect(details).not.toContainText("summary only");
   const keydownBeforePreview = await page.evaluate(() => ({ ...window.__windowKeydownSubscriptions }));
-  await references.getByRole("button", { name: /术前须知\.md 引用/ }).click();
-  const preview = page.getByRole("complementary", { name: "文件预览", exact: true });
-  await expect(preview.getByRole("navigation", { name: "文件预览路径" })).toContainText("库");
+  await references.getByRole("button", { name: /术前须知\.md References/ }).click();
+  const preview = page.getByRole("complementary", { name: "File preview", exact: true });
+  await expect(preview.getByRole("navigation", { name: "File preview path" })).toContainText("Library");
   await expect(preview.getByText("必须核对患者病史。", { exact: true })).toBeVisible();
   await expect(preview).toHaveCSS("width", "760px");
   expect(await page.evaluate(() => ({ ...window.__windowKeydownSubscriptions }))).toEqual({
     adds: keydownBeforePreview.adds + 1,
     removes: keydownBeforePreview.removes,
   });
-  await preview.getByRole("separator", { name: "调整浏览栏宽度" }).press("ArrowLeft");
+  await preview.getByRole("separator", { name: "Resize preview panel" }).press("ArrowLeft");
   await expect(preview).toHaveCSS("width", "776px");
   expect(await page.evaluate(() => ({ ...window.__windowKeydownSubscriptions }))).toEqual({
     adds: keydownBeforePreview.adds + 1,
@@ -1952,9 +1952,9 @@ test("keeps tool evidence inline and opens one resizable reference preview", asy
     adds: keydownBeforePreview.adds + 1,
     removes: keydownBeforePreview.removes + 1,
   });
-  await references.getByRole("button", { name: /术前须知\.md 引用/ }).click();
+  await references.getByRole("button", { name: /术前须知\.md References/ }).click();
   await expect(preview).toBeVisible();
-  await preview.getByRole("button", { name: "库", exact: true }).click();
+  await preview.getByRole("button", { name: "Library", exact: true }).click();
   await expect(preview).toBeHidden();
 });
 
@@ -2002,17 +2002,17 @@ test("shows historical attachments as named image and file records", async ({ pa
 
   await page.goto("/w/ws_1/agents/centaeris");
   await expect(page.getByText("术前须知.pdf", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "预览 牙片.png", exact: true })).toHaveAttribute("title", "牙片.png");
+  await expect(page.getByRole("button", { name: "Preview 牙片.png", exact: true })).toHaveAttribute("title", "牙片.png");
   await expect(page.getByText("已移除.txt", { exact: true })).toBeVisible();
-  await expect(page.getByText("不可用", { exact: true })).toBeVisible();
+  await expect(page.getByText("Unavailable", { exact: true })).toBeVisible();
   await expect(page.locator(".workspaceMessageAttachment.isFile")).toHaveCount(2);
   await expect(page.locator(".workspaceMessageAttachment.isImage img")).toHaveCount(1);
   await expect(page.locator(".workspaceMessageAttachment").first()).toHaveCSS("width", "84px");
   await expect(page.locator(".workspaceMessageAttachment").first()).toHaveCSS("height", "84px");
   await expect(page.locator(".workspaceMessageAttachments .attachmentCardRemove")).toHaveCount(0);
-  await page.getByRole("button", { name: "预览 术前须知.pdf", exact: true }).click();
-  await expect(page.getByRole("dialog", { name: "预览 术前须知.pdf", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "关闭预览", exact: true }).click();
+  await page.getByRole("button", { name: "Preview 术前须知.pdf", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Preview 术前须知.pdf", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Close preview", exact: true }).click();
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
 });
@@ -2033,15 +2033,15 @@ test("keeps first-message attachments available in a new-chat draft on a narrow 
     return response ? route.fulfill({ json: response }) : route.fulfill({ status: 404, json: { error: "not_found" } });
   });
   await page.goto("/w/ws_1/agents/centaeris");
-  await expect(page.getByRole("button", { name: "添加", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "添加", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Add", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Add", exact: true })).toBeEnabled();
   await expect(page.getByRole("complementary", { name: "资料选择器", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("complementary", { name: "会话导航", exact: true })).toHaveCSS("height", "91px");
-  await expect(page.getByRole("complementary", { name: "会话导航", exact: true })).toContainText("默认工作区");
-  await expect(page.getByRole("tab", { name: "主页", exact: true })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "对话", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "搜索会话和笔记", exact: true })).toBeVisible();
-  await expect(page.getByRole("textbox", { name: "输入消息", exact: true })).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "Conversation navigation", exact: true })).toHaveCSS("height", "91px");
+  await expect(page.getByRole("complementary", { name: "Conversation navigation", exact: true })).toContainText("默认工作区");
+  await expect(page.getByRole("tab", { name: "Home", exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Chat", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Search conversations and notes", exact: true })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Message", exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
 });
 
@@ -2064,33 +2064,33 @@ test("uses the Centaeris information architecture", async ({ page }) => {
   });
   await page.goto("/w/ws_1/agents/centaeris");
   await expect(page.getByText("附件仅在当前会话中有效", { exact: true })).toHaveCount(0);
-  const modelSelect = page.getByRole("button", { name: "AI 模型", exact: true });
-  await expect(page.getByRole("img", { name: "设置，待接入", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "思考力度", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "思考力度", exact: true })).toBeDisabled();
+  const modelSelect = page.getByRole("button", { name: "AI model", exact: true });
+  await expect(page.getByRole("img", { name: "Settings, coming soon", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reasoning effort", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reasoning effort", exact: true })).toBeDisabled();
   await expect(modelSelect).toHaveCSS("border-top-width", "0px");
   await expect(modelSelect).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
-  const sidebar = page.getByRole("complementary", { name: "会话导航", exact: true });
+  const sidebar = page.getByRole("complementary", { name: "Conversation navigation", exact: true });
   await expect(sidebar).toHaveCSS("width", "270px");
-  await expect(sidebar).toHaveCSS("background-color", "rgb(247, 247, 245)");
-  await expect(page.getByRole("button", { name: "新建一般会话", exact: true })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "主页", exact: true })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "对话", exact: true })).toBeVisible();
-  await expect(page.getByRole("navigation", { name: "当前会话", exact: true })).toContainText("Centaeris/术前提醒");
-  const leftSidebarToggle = page.getByRole("button", { name: "隐藏左侧栏", exact: true });
+  await expect(sidebar).toHaveCSS("background-color", "rgb(245, 245, 244)");
+  await expect(page.getByRole("button", { name: "New general conversation", exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Home", exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Chat", exact: true })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Current conversation", exact: true })).toContainText("Centaeris/术前提醒");
+  const leftSidebarToggle = page.getByRole("button", { name: "Hide sidebar", exact: true });
   await expect(leftSidebarToggle).toBeVisible();
   await expect(page.getByRole("button", { name: /右侧栏/ })).toHaveCount(0);
   await leftSidebarToggle.click();
   await expect(page.locator(".workspaceSidebarSlot")).toHaveCSS("width", "0px");
-  const showSidebar = page.getByRole("button", { name: "显示左侧栏", exact: true });
+  const showSidebar = page.getByRole("button", { name: "Show sidebar", exact: true });
   await expect(showSidebar).toHaveCSS("border-right-width", "0px");
   await expect(page.locator(".workspaceTopbar")).toHaveCSS("border-bottom-width", "0px");
-  await expect(page.getByRole("navigation", { name: "当前会话", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("navigation", { name: "Current conversation", exact: true })).toHaveCount(0);
   await showSidebar.click();
-  await expect(page.getByRole("navigation", { name: "当前会话", exact: true })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Current conversation", exact: true })).toBeVisible();
   await expect(page.locator(".workspaceSidebarSlot")).toHaveCSS("width", "270px");
-  await expect(page.getByRole("tab", { name: "对话", exact: true })).toBeVisible();
-  const composer = page.getByRole("textbox", { name: "输入消息", exact: true }).locator("..");
+  await expect(page.getByRole("tab", { name: "Chat", exact: true })).toBeVisible();
+  const composer = page.getByRole("textbox", { name: "Message", exact: true }).locator("..");
   expect((await composer.boundingBox())?.width).toBeLessThanOrEqual(820);
   await expect(page.locator(".workspaceChatColumn")).toHaveCSS("background-color", "rgb(255, 255, 255)");
   if (process.platform === "win32") {
@@ -2102,11 +2102,11 @@ test("uses the Centaeris information architecture", async ({ page }) => {
   }
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(sidebar).toHaveCSS("height", "91px");
-  await expect(page.getByRole("tab", { name: "对话", exact: true })).toBeVisible();
-  await expect(page.getByRole("textbox", { name: "输入消息", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "隐藏左侧栏", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Chat", exact: true })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Message", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Hide sidebar", exact: true }).click();
   await expect(page.locator(".workspaceSidebarSlot")).toHaveCSS("height", "0px");
-  await page.getByRole("button", { name: "显示左侧栏", exact: true }).click();
+  await page.getByRole("button", { name: "Show sidebar", exact: true }).click();
   await expect(page.locator(".workspaceSidebarSlot")).toHaveCSS("height", "91px");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
 });
@@ -2175,28 +2175,34 @@ test("opens a human-readable citation without exposing locator JSON", async ({ p
   await page.goto("/w/ws_1/agents/centaeris");
   const citationButton = page.getByRole("button", { name: /术前须知.md/ });
   await citationButton.click();
-  let preview = page.getByRole("complementary", { name: "文件预览", exact: true });
-  await expect(preview.getByRole("navigation", { name: "文件预览路径" })).toContainText("库");
-  await expect(preview.getByRole("link", { name: "下载 术前须知.md", exact: true })).toHaveAttribute("href", /\/api\/source-objects\/source_1\/download$/);
+  let preview = page.getByRole("complementary", { name: "File preview", exact: true });
+  await expect(preview.getByRole("navigation", { name: "File preview path" })).toContainText("Library");
+  await expect(preview.getByRole("link", { name: "Download 术前须知.md", exact: true })).toHaveAttribute("href", /\/api\/source-objects\/source_1\/download$/);
   await expect(preview.locator("mark")).toContainText("请核对患者病史。\n确认过敏史。\n完成签字。");
   await expect(preview).not.toContainText("startLine");
-  await preview.getByRole("button", { name: "库", exact: true }).click();
+  await preview.getByRole("button", { name: "Library", exact: true }).click();
   await expect(citationButton).toBeFocused();
   await page.setViewportSize({ width: 390, height: 844 });
   await citationButton.click();
-  preview = page.getByRole("complementary", { name: "文件预览", exact: true });
+  preview = page.getByRole("complementary", { name: "File preview", exact: true });
   await expect(preview).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-  await preview.getByRole("button", { name: "关闭预览", exact: true }).click();
+  await preview.getByRole("button", { name: "Close preview", exact: true }).click();
   previewFailure = true;
   await citationButton.click();
-  preview = page.getByRole("complementary", { name: "文件预览", exact: true });
-  await expect(preview.getByRole("alert")).toHaveText("此文件类型暂不支持内嵌预览。");
+  preview = page.getByRole("complementary", { name: "File preview", exact: true });
+  await expect(preview.getByRole("alert")).toHaveText("Inline preview is unavailable for this file type.");
   previewFailure = false;
   previewPdf = true;
-  await preview.getByRole("button", { name: "关闭预览", exact: true }).click();
+  await preview.getByRole("button", { name: "Close preview", exact: true }).click();
   await citationButton.click();
-  preview = page.getByRole("complementary", { name: "文件预览", exact: true });
-  await expect(preview.getByRole("navigation", { name: "文件预览路径" })).toContainText("单个任务时效性.xlsx");
+  preview = page.getByRole("complementary", { name: "File preview", exact: true });
+  await expect(preview.getByRole("navigation", { name: "File preview path" })).toContainText("单个任务时效性.xlsx");
   await expect(preview.locator("iframe")).toHaveAttribute("src", /#page=1$/);
+});
+
+
+
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("centaeris:language:v1", "en"));
 });
