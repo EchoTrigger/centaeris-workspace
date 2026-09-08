@@ -42,8 +42,7 @@ impl RequestCapacity {
         let listener = method == "POST" && path == "/internal/jobs/wait";
         // A step can contain long tools and provider streams. Its lifetime is
         // governed by the execution lease/cancellation protocol, not a short RPC timer.
-        let execution =
-            method == "POST" && matches!(path, "/agent-runs/step" | "/internal/knowledge/process");
+        let execution = method == "POST" && path == "/agent-runs/step";
         RequestLane {
             slots: if control {
                 self.control.clone()
@@ -108,9 +107,6 @@ mod tests {
             assert_eq!(control.deadline, Some(Duration::from_secs(5)));
             assert!(control.slots.try_acquire_owned().is_ok());
         }
-        assert!(limits
-            .lane("POST", "/internal/knowledge/process")
-            .deadline
-            .is_none());
+        assert!(limits.lane("POST", "/agent-runs/step").deadline.is_none());
     }
 }

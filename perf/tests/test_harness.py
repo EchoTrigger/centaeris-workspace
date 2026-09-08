@@ -30,6 +30,9 @@ class IsolationTests(unittest.TestCase):
             config = json.loads(control.run(command, env=env))
             control.validate_config(config, control.ROOT)
             self.assertEqual(config['services']['api']['image'], 'centaeris-perf-api:local')
+            self.assertEqual(config['services']['material-worker']['image'], 'centaeris-perf-api:local')
+            self.assertEqual(config['services']['material-worker']['environment']['MATERIAL_PROCESSOR_IMAGE'],
+                             config['services']['document-processor']['image'])
             self.assertEqual(config['services']['runtime']['environment']['PLUGIN_VOLUME_NAME'], 'centaeris-perf_plugin-data')
 
     def test_smoke_rejects_unsuccessful_terminals(self):

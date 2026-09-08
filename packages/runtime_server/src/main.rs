@@ -12,11 +12,9 @@ mod execution_recovery_schedule;
 mod failure_diagnostics;
 mod file_mutation_commit;
 mod job_protocol;
-mod knowledge_port;
-mod knowledge_processing;
-mod knowledge_types;
 mod lifecycle_hooks;
 mod mcp;
+mod platform_materials;
 mod postgres_store;
 mod request_capacity;
 mod skill_projection;
@@ -116,7 +114,6 @@ use file_mutation_commit::WorkspaceFileMutationCommitPort;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
-use knowledge_port::WorkspaceKnowledgePort;
 use lifecycle_hooks::{workspace_hook_catalog, workspace_lifecycle_hook_runtime};
 use postgres_store::{
     hydrate_session_wire_values, PostgresConnectionLimits, PostgresRuntimeStore, PostgresSessionLog,
@@ -377,7 +374,6 @@ fn cached_execution_control_reason(
 
 fn main() -> Result<(), String> {
     DockerExecutionHostRunner::validate_host()?;
-    knowledge_processing::validate_processor_image()?;
     let execution_profile = Arc::new(RuntimeExecutionProfile {
         schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
         image_capability: "workspace_general_v1",
@@ -1246,15 +1242,6 @@ fn handle_request(
     execution_profile: Arc<RuntimeExecutionProfile>,
 ) -> Result<RuntimeHttpResponse, String> {
     if let Some((status, response)) = job_protocol::handle(
-        request.method.as_str(),
-        request.path.as_str(),
-        &request.headers,
-        request.body.as_slice(),
-        job_store.as_ref(),
-    ) {
-        return Ok(http_response(status, "application/json", response));
-    }
-    if let Some((status, response)) = knowledge_processing::handle(
         request.method.as_str(),
         request.path.as_str(),
         &request.headers,
@@ -2404,23 +2391,42 @@ fn execute_agent_run(
             agent_run_start.authorization_digest.clone(),
         ))),
     )?);
-    let knowledge_port = if agent_run_start.authorization.asset_refs.is_empty() {
-        None
-    } else {
-        Some(Arc::new(WorkspaceKnowledgePort::new(
+    let platform_materials = match runtime.block_on(async {
+        if agent_run_start.authorization.asset_refs.is_empty() {
+            return Ok(None);
+        }
+        platform_materials::PlatformMaterialsProvider::connect_current(
             api_url.clone(),
             token.clone(),
             agent_run_start.agent_run_id.clone(),
             agent_run_start.authorization_digest.clone(),
-            agent_run_start.authorization.session_id.clone(),
-            job_store.clone(),
-        )?))
+        )
+        .await
+        .map(|provider| Some(Arc::new(provider)))
+    }) {
+        Ok(provider) => provider,
+        Err(error) => {
+            return commit_failed_agent_run(
+                runtime.as_ref(),
+                &session_log,
+                &agent_run_start,
+                &mut *sequence_guard(&session_record_sequence)?,
+                &mut *session_stream_guard(&session_stream)?,
+                error.as_str(),
+                "mcp_start_failed",
+                &AssistantTextProjection::default(),
+                &terminal_lease_fence,
+            )
+        }
     };
     let mut dynamic_tool_contracts = workspace_tool_contracts();
+    if let Some(provider) = &platform_materials {
+        dynamic_tool_contracts.extend(provider.contracts.clone());
+    }
     dynamic_tool_contracts.extend(mcp_bindings.contracts);
     let dynamic_tool_registry = match DynamicToolRegistry::from_contracts(dynamic_tool_contracts) {
         Ok(registry) => Arc::new(registry),
-        Err(error) if !mcp_bindings.providers.is_empty() => {
+        Err(error) if !mcp_bindings.providers.is_empty() || platform_materials.is_some() => {
             return commit_failed_agent_run(
                 runtime.as_ref(),
                 &session_log,
@@ -2446,15 +2452,14 @@ fn execute_agent_run(
     .with_execution_owner(agent_run_start.agent_run_id.clone())
     .with_resource_claim_store(Arc::new((*store).clone()))
     .with_resolved_input_manifest(resolved_inputs.clone());
-    // Authorized remote inputRefs always resolve through Knowledge, regardless of file type.
     tool_layer.register_dynamic_tool_provider(Arc::new(WorkspaceArtifactToolProvider::new(
         artifact_publication,
     )))?;
     for provider in mcp_bindings.providers {
         tool_layer.register_dynamic_tool_provider(provider)?;
     }
-    if let Some(knowledge_port) = knowledge_port {
-        tool_layer = tool_layer.with_resolved_input_reader(knowledge_port);
+    if let Some(provider) = platform_materials {
+        tool_layer.register_dynamic_tool_provider(provider)?;
     }
     let tool_layer =
         tool_layer.with_file_mutation_commit_port(Arc::new(WorkspaceFileMutationCommitPort::new(
@@ -4426,7 +4431,7 @@ fn model_user_message(
                     )
                 })?;
             Ok(format!(
-                "- {} (inputRef: {}; contentType: {}). Use canonical read(input_ref); the source is not a workspace file.",
+                "- {} (inputRef: {}; contentType: {}). Use read_material(input_ref) or search_materials; if pending use get_operation. Cite only citationIds returned by a successful material read.",
                 reference.display_name, reference.input_ref, reference.content_type
             ))
         })
@@ -5782,7 +5787,7 @@ mod tests {
         }
     }
 
-    fn hosted_context() -> HostedRuntimeContext {
+    pub(super) fn hosted_context() -> HostedRuntimeContext {
         let workspace_root = std::env::current_dir().expect("test workspace root");
         let execution_host_binding = Arc::new(
             ExecutionHostBinding::new(
@@ -6880,7 +6885,7 @@ mod tests {
             .expect("project model message");
         assert!(projected.contains("Attached session files for this message"));
         assert!(projected.contains("input_1"));
-        assert!(projected.contains("Use canonical read(input_ref)"));
+        assert!(projected.contains("Use read_material(input_ref)"));
         assert!(!projected.contains("search_knowledge"));
         assert!(!projected.contains("/mnt/data"));
         let events = started_session_records(

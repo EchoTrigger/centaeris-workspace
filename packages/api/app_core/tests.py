@@ -81,12 +81,12 @@ from .models import (
     WorkspaceMembership,
     WorkspacePluginEnablement,
 )
-from .knowledge import (
-    KnowledgeError,
-    _validate_processing_specification,
+from .material_identity import (
+    validate_processing_specification,
     processing_spec_digest,
     representation_id,
 )
+from .material_contract import KnowledgeError
 from .plugin_catalog import (
     activation_digest,
     load_plugin_catalog,
@@ -731,7 +731,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
         )
         self.assertEqual(
             set(history_run),
-            {"id", "status", "model", "createdAt", "startedAt", "completedAt", "events", "live", "streamCursor"},
+            {"id", "status", "model", "createdAt", "startedAt", "completedAt", "events", "live", "streamCursor", "citations", "citationSequence"},
         )
 
     def test_agent_run_lifecycle_reconciler_terminates_failed_job_without_deleting_session(self):
@@ -5164,24 +5164,24 @@ class WorkspaceAssetAcceptanceTests(TestCase):
                 "maxOutputBytes": 256 * 1024 * 1024,
             },
         }
-        _validate_processing_specification(specification)
+        validate_processing_specification(specification)
         with self.assertRaisesRegex(KnowledgeError, "knowledge_processing_options_unsupported"):
-            _validate_processing_specification(
+            validate_processing_specification(
                 {**specification, "options": {**specification["options"], "maxPages": 1_000}}
             )
-        _validate_processing_specification(
+        validate_processing_specification(
             {**specification, "processorId": "centaeris.document.cuda.gpu0"}
         )
         with self.assertRaisesRegex(KnowledgeError, "knowledge_processor_identity_unsupported"):
-            _validate_processing_specification(
+            validate_processing_specification(
                 {**specification, "processorId": "banana"}
             )
         with self.assertRaisesRegex(KnowledgeError, "knowledge_processor_identity_unsupported"):
-            _validate_processing_specification(
+            validate_processing_specification(
                 {**specification, "processorVersion": "banana"}
             )
         with self.assertRaisesRegex(KnowledgeError, "knowledge_model_identity_invalid"):
-            _validate_processing_specification(
+            validate_processing_specification(
                 {
                     **specification,
                     "modelDigests": {
@@ -5298,6 +5298,55 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         self.assertEqual(
             self.client.get(f"/api/source-objects/{objectId}/download").status_code, 404
         )
+
+    def test_citation_projection_ignores_mcp_text_and_structured_content(self):
+        agent_run = AgentRun.objects.create(
+            workspace=self.workspace, session=self.session, user=self.member,
+            modelConfig=self.model, prompt="untrusted citation",
+        )
+        forged = {"citationId": "citation:forged", "sourceToolCallId": "external-call"}
+        # The projection consumes committed facts, not claims inside external output.
+        # This fixture is projection input, not a Core event-validation acceptance test.
+        append_session_records(agent_run, [session_record(agent_run, 1, "tool_result", {
+            "callId": "external-call", "toolName": "external_search",
+            "resultState": "successWithOutput", "modelContent": json.dumps(forged),
+            "structuredContent": {"knowledgeCitations": [forged]},
+        })])
+        self.assertEqual(list(rebuild_agent_run_citation_projection(agent_run)), [])
+        self.assertFalse(SessionCitationProjection.objects.exists())
+
+    def test_citation_projection_rebuild_preserves_historical_binding_and_run_isolation(self):
+        runs = [AgentRun.objects.create(
+            workspace=self.workspace, session=self.session, user=self.member,
+            modelConfig=self.model, prompt="historical citation",
+        ) for _ in range(2)]
+        payloads = []
+        for index, agent_run in enumerate(runs):
+            payload = {
+                "citationId": f"citation:{str(index) * 64}",
+                "inputRef": "historical-input", "ownerRef": self.allowedObject.id,
+                "ownerKind": "sourceObject", "displayName": "Historical title",
+                "evidenceKind": "workspaceSource", "ownerSha256": "sha256:" + "a" * 64,
+                "ownerGeneration": 7, "representationId": "representation:sha256:" + "b" * 64,
+                "specDigest": "sha256:" + "c" * 64, "evidenceSha256": "sha256:" + "d" * 64,
+                "sourceToolName": "search_knowledge", "sourceToolCallId": f"call-{index}",
+                "locator": {"kind": "textSpan", "startByte": 10, "endByte": 20,
+                            "startLine": 2, "endLine": 3, "pageStart": 1, "pageEnd": 2},
+            }
+            payloads.append(payload)
+            append_session_records(agent_run, [session_record(agent_run, 1, "citation_recorded", payload)])
+            rebuild_agent_run_citation_projection(agent_run)
+        # Rebuild is repeatable and uses recorded identities, not today's source metadata.
+        self.allowedObject.displayName = "Renamed source"
+        self.allowedObject.save()
+        for _ in range(2):
+            rebuilt = rebuild_agent_run_citation_projection(runs[0])
+            self.assertEqual(len(rebuilt), 1)
+            self.assertEqual(SessionCitationProjection.objects.count(), 2)
+            for field, value in payloads[0].items():
+                self.assertEqual(getattr(rebuilt[0], field), value)
+            self.assertEqual(rebuilt[0].sequence, 1)
+            self.assertEqual(SessionCitationProjection.objects.get(pk=payloads[1]["citationId"]).sequence, 2)
 
     def test_citation_preview_streams_the_bound_source_through_current_authorization(self):
         content = b"Authorized preview evidence"
@@ -5665,8 +5714,36 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         self.assertEqual(second["displayName"], "报告(1).txt")
         self.assertEqual(reused["id"], second["id"])
         self.assertEqual(third["displayName"], "报告(2).txt")
-        self.assertEqual(same_hash_different_name["displayName"], "副本.txt")
-        self.assertEqual(UserLibraryObject.objects.filter(owner=self.member).count(), 4)
+        self.assertEqual(same_hash_different_name["id"], original["id"])
+        self.assertEqual(same_hash_different_name["displayName"], "报告.txt")
+        self.assertEqual(UserLibraryObject.objects.filter(owner=self.member).count(), 3)
+
+    def test_library_upload_hash_reuse_crosses_folders_but_not_owners_or_trash(self):
+        self.client.force_login(self.member)
+        folder = self.client.post("/api/library/folders", data=json.dumps({"displayName": "Folder"}),
+                                  content_type="application/json").json()["object"]
+
+        def upload(name, parent=""):
+            response = self.client.post("/api/library", data={"parentFolderId": parent,
+                "files": [SimpleUploadedFile(name, b"shared-content", content_type="text/plain")]})
+            self.assertEqual(response.status_code, 201)
+            return response.json()["objects"][0]
+
+        original = upload("original.txt", folder["id"])
+        reused = upload("renamed.txt")
+        self.assertEqual(reused["id"], original["id"])
+        stored = UserLibraryObject.objects.get(id=reused["id"])
+        self.assertEqual(stored.parentFolder_id, folder["id"])
+        self.assertEqual(stored.displayName, "original.txt")
+        self.client.force_login(self.admin)
+        other = upload("other.txt")
+        self.assertNotEqual(other["id"], original["id"])
+        self.client.force_login(self.member)
+        deleted = self.client.delete(f"/api/library/{original['id']}")
+        self.assertEqual(deleted.status_code, 200)
+        fresh = upload("fresh.txt")
+        self.assertNotEqual(fresh["id"], original["id"])
+        self.assertEqual(UserLibraryObject.objects.get(id=original["id"]).status, "deleted")
 
     def test_session_upload_reuses_matching_library_name_without_duplicate_link(self):
         self.client.force_login(self.member)
@@ -7245,7 +7322,162 @@ class WorkspaceAssetAcceptanceTests(TestCase):
             with self.assertRaisesRegex(ValueError, "unsupported Source.status"):
                 self.source.save()
 
-    def test_knowledge_commit_read_and_search_use_one_derived_representation(self):
+    def test_platform_mcp_scoped_credentials_and_current_source_revocation(self):
+        from asgiref.sync import async_to_sync
+        from .test_platform_mcp import call_material_tool, processing_specification
+
+        link = self.prepare_allowed_source_input()
+        run = AgentRun.objects.create(workspace=self.workspace, session=self.session, user=self.member, modelConfig=self.model, prompt="read")
+        authorization = create_agent_run_authorization(run)
+        specification = processing_specification()
+        body = {"schema": "workspace.mcp.credential.issue.v1", "agentRunId": run.id, "authorizationDigest": authorization.digest, "processingSpecification": specification, "specDigest": processing_spec_digest(specification)}
+        for headers in ({}, {"HTTP_X_INTERNAL_TOKEN": settings.INTERNAL_API_TOKEN, "HTTP_ORIGIN": "http://localhost"}):
+            rejected = self.client.post("/internal/mcp/credential", data=json.dumps(body), content_type="application/json", **headers)
+            self.assertEqual(rejected.status_code, 401)
+        headers = {"HTTP_X_INTERNAL_TOKEN": settings.INTERNAL_API_TOKEN}
+        invalid = self.client.post("/internal/mcp/credential", data=json.dumps({**body, "inputRefs": [link.id]}), content_type="application/json", **headers)
+        self.assertEqual(invalid.status_code, 400)
+        response = self.client.post("/internal/mcp/credential", data=json.dumps(body), content_type="application/json", **headers)
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response["Cache-Control"], "no-store")
+        token = response.json()["accessToken"]
+        listed = async_to_sync(call_material_tool)(token, "list_materials", {})
+        self.assertEqual(listed.status_code, 200, listed.text)
+        self.assertEqual([item["inputRef"] for item in listed.json()["result"]["structuredContent"]["items"]], [link.id])
+        pending = async_to_sync(call_material_tool)(token, "read_material", {"input_ref": link.id})
+        self.assertEqual(pending.json()["result"]["structuredContent"]["disposition"], "pending")
+        denied = async_to_sync(call_material_tool)(token, "read_material", {"input_ref": "foreign"})
+        self.assertTrue(denied.json()["result"]["isError"])
+        SourceGrant.objects.filter(source=self.source).delete()
+        revoked = async_to_sync(call_material_tool)(token, "list_materials", {})
+        self.assertTrue(revoked.json()["result"]["isError"])
+        self.member_membership.delete()
+        revoked = async_to_sync(call_material_tool)(token, "list_materials", {})
+        self.assertEqual(revoked.status_code, 401)
+
+    def test_platform_task_survives_waiter_cancel_and_revocation_but_not_source_loss(self):
+        from .material_access import MaterialAccessContext, bind_inputs
+        from .material_operations import create_operations, operation_result
+        from .material_task_source import admit_task, resolve_task_source
+        from .platform_mcp_auth import authorize_context
+        from .test_platform_mcp import processing_specification
+
+        link = self.prepare_allowed_source_input()
+        spec = processing_specification()
+        digest = processing_spec_digest(spec)
+        accesses = []
+        operations = []
+        for _ in range(2):
+            run = AgentRun.objects.create(workspace=self.workspace, session=self.session, user=self.member, modelConfig=self.model, prompt="read")
+            auth = create_agent_run_authorization(run)
+            access = authorize_context(MaterialAccessContext(run.id, auth.digest, spec, digest))
+            identity = auth.payload["assetRefs"][0]["inputIdentity"]
+            request = {"inputRef": link.id, "representationId": representation_id(identity, digest)}
+            task = admit_task(access, request)
+            operations.append(create_operations(access, [request])[0])
+            accesses.append(access)
+        self.assertEqual(task.operations.count(), 2)
+        for access, operation in zip(accesses, operations):
+            self.assertEqual(operation_result(access, operation["operationId"], cancel=True)["status"], "cancelled")
+        self.assertEqual(resolve_task_source(task).owner.pk, self.allowedObject.pk)
+        SourceGrant.objects.filter(source=self.source).delete()
+        for access in accesses:
+            with self.assertRaises(KnowledgeError):
+                bind_inputs(access.agent_run, access.authorization_digest, [request], digest)
+        self.member_membership.delete()
+        # Platform processing authority comes from the material lifecycle, not
+        # either run's now-revoked membership or permission.
+        self.assertEqual(resolve_task_source(task).owner.pk, self.allowedObject.pk)
+        Source.objects.filter(pk=self.source.pk).update(status="processing")
+        with self.assertRaisesRegex(KnowledgeError, "material_source_unavailable"):
+            resolve_task_source(task)
+
+    def test_platform_task_resolves_published_artifact_but_rejects_tombstone(self):
+        from .material_access import MaterialAccessContext
+        from .material_task_source import admit_task, resolve_task_source
+        from .platform_mcp_auth import authorize_context
+        from .test_platform_mcp import processing_specification
+
+        producer = AgentRun.objects.create(workspace=self.workspace, session=self.session, user=self.member, modelConfig=self.model, prompt="produce")
+        key, size, digest = self.store_bytes("platform-artifact.txt", b"artifact material")
+        artifact = Artifact.objects.create(workspace=self.workspace, session=self.session, agent_run=producer,
+            createdBy=self.member, displayName="artifact.txt", safeFilename="artifact.txt", contentType="text/plain",
+            sizeBytes=size, sha256=digest, storageKey=key, status="published", publishedAt=timezone.now())
+        link = SessionAssetLink.objects.create(workspace=self.workspace, session=self.session, artifact=artifact,
+            attachedBy=self.member, capturedDisplayName=artifact.displayName, capturedContentType=artifact.contentType,
+            **captured_input_fields(artifact))
+        reader = AgentRun.objects.create(workspace=self.workspace, session=self.session, user=self.member, modelConfig=self.model, prompt="read")
+        auth = create_agent_run_authorization(reader)
+        spec = processing_specification()
+        spec_digest = processing_spec_digest(spec)
+        access = authorize_context(MaterialAccessContext(reader.id, auth.digest, spec, spec_digest))
+        identity = auth.payload["assetRefs"][0]["inputIdentity"]
+        task = admit_task(access, {"inputRef": link.id, "representationId": representation_id(identity, spec_digest)})
+        self.assertEqual(resolve_task_source(task).owner.pk, artifact.pk)
+        tombstone_stored_object(artifact)
+        with self.assertRaisesRegex(KnowledgeError, "material_source_unavailable"):
+            resolve_task_source(task)
+
+    def test_material_operations_are_durable_scoped_and_cancel_only_one_waiter(self):
+        from asgiref.sync import async_to_sync
+        from .material_access import MaterialAccessContext
+        from .material_leases import claim
+        from .models import MaterialOperation, MaterialProcessingTask
+        from .platform_mcp_auth import issue_credential
+        from .test_platform_mcp import call_material_tool, processing_specification
+
+        link = self.prepare_allowed_source_input()
+        tokens = []
+        for _ in range(2):
+            run = AgentRun.objects.create(workspace=self.workspace, session=self.session, user=self.member, modelConfig=self.model, prompt="read")
+            authorization = create_agent_run_authorization(run)
+            specification = processing_specification()
+            tokens.append(issue_credential(MaterialAccessContext(run.id, authorization.digest, specification, processing_spec_digest(specification)))["accessToken"])
+        def call(token, name, args):
+            response = async_to_sync(call_material_tool)(token, name, args)
+            self.assertEqual(response.status_code, 200, response.text)
+            return response.json()["result"]
+        first = call(tokens[0], "read_material", {"input_ref": link.id})["structuredContent"]["operations"][0]
+        replay = call(tokens[0], "read_material", {"input_ref": link.id})["structuredContent"]["operations"][0]
+        second = call(tokens[1], "read_material", {"input_ref": link.id})["structuredContent"]["operations"][0]
+        self.assertEqual(first, replay)
+        self.assertNotEqual(first["operationId"], second["operationId"])
+        self.assertEqual(MaterialProcessingTask.objects.count(), 1)
+        self.assertEqual(MaterialOperation.objects.count(), 2)
+        self.assertTrue(call(tokens[1], "get_operation", {"operation_id": first["operationId"]})["isError"])
+        for _ in range(2):
+            self.assertEqual(call(tokens[0], "cancel_operation", {"operation_id": first["operationId"]})["structuredContent"]["status"], "cancelled")
+        task = MaterialProcessingTask.objects.get()
+        self.assertEqual(set(task.payload), {"schema", "inputIdentity", "specDigest", "sizeBytes"})
+        self.assertEqual(task.executionBackend, "platform")
+        self.assertIsNotNone(claim(task.pk, "acceptance-worker", 300))
+        self.assertEqual(call(tokens[1], "get_operation", {"operation_id": second["operationId"]})["structuredContent"]["status"], "running")
+        self.assertEqual(call(tokens[0], "get_operation", {"operation_id": first["operationId"]})["structuredContent"]["status"], "cancelled")
+        MaterialProcessingTask.objects.filter(pk=task.pk).update(status="failed", errorCode="processor_failed")
+        self.assertEqual(call(tokens[1], "get_operation", {"operation_id": second["operationId"]})["structuredContent"]["status"], "failed")
+
+    def test_platform_mcp_empty_scope_still_verifies_signature_and_run_binding(self):
+        from .material_access import MaterialAccessContext
+        from .platform_mcp_auth import CredentialRejected, issue_credential, verify_credential
+        from .test_platform_mcp import processing_specification
+
+        run = AgentRun.objects.create(workspace=self.workspace, session=self.session, user=self.member, modelConfig=self.model, prompt="read")
+        authorization = create_agent_run_authorization(run)
+        specification = processing_specification()
+        context = MaterialAccessContext(run.id, authorization.digest, specification, processing_spec_digest(specification))
+        token = issue_credential(context)["accessToken"]
+        self.assertEqual(verify_credential(token), context)
+        original_signature = authorization.signature
+        type(authorization).objects.filter(pk=authorization.pk).update(signature="invalid")
+        with self.assertRaises(CredentialRejected):
+            verify_credential(token)
+        type(authorization).objects.filter(pk=authorization.pk).update(signature=original_signature)
+        # Inject inconsistent persisted state to exercise defense in depth.
+        AgentRun.objects.filter(pk=run.pk).update(user=self.admin)
+        with self.assertRaises(CredentialRejected):
+            verify_credential(token)
+
+    def test_platform_commit_read_and_search_use_one_derived_representation(self):
         link = self.prepare_allowed_source_input(b"policy source")
         agent_run = AgentRun.objects.create(
             workspace=self.workspace,
@@ -7275,30 +7507,18 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         identity = authorization.payload["assetRefs"][0]["inputIdentity"]
         representation = representation_id(identity, specDigest)
         inputBinding = {"inputRef": link.id, "representationId": representation}
-        common = {
-            "agentRunId": agent_run.id,
-            "authorizationDigest": authorization.digest,
-            "processingSpecification": specification,
-            "specDigest": specDigest,
-        }
-        headers = {"HTTP_X_INTERNAL_TOKEN": settings.INTERNAL_API_TOKEN}
-
-        pending = self.client.post(
-            "/internal/knowledge/read",
-            data=json.dumps(
-                {
-                    **common,
-                    "schema": "knowledge.read.v1",
-                    "inputs": [inputBinding],
-                    "offset": 0,
-                    "limit": 20,
-                }
-            ),
-            content_type="application/json",
-            **headers,
-        )
-        self.assertEqual(pending.status_code, 200)
-        self.assertEqual(pending.json()["disposition"], "pending")
+        from io import BytesIO
+        from .material_access import MaterialAccessContext, authorize_material_access
+        from .material_contract import KnowledgeError
+        from .material_operations import create_operations
+        from .material_leases import claim
+        from .material_reads import read_materials, search_materials
+        from .platform_material_commit import ProcessingOutput, commit_processing_output
+        operation_access = authorize_material_access(MaterialAccessContext(agent_run.id, authorization.digest, specification, specDigest))
+        pending = read_materials(operation_access, [inputBinding], offset=0, limit=20)
+        self.assertEqual(pending["disposition"], "pending")
+        pending_operation = create_operations(operation_access, pending["missing"])[0]
+        lease = claim(representation, "acceptance-worker", 300)
 
         pageText = "policy text for research"
         secondPageText = "delivery terms on the second page"
@@ -7358,72 +7578,39 @@ class WorkspaceAssetAcceptanceTests(TestCase):
                 },
             ],
         }
-        metadata = {
-            **common,
-            "schema": "knowledge.processing.commit.v1",
-            "jobId": f"knowledge.process:{representation.removeprefix('representation:sha256:')}",
-            "inputRef": link.id,
-            "representationId": representation,
-            "canonicalSizeBytes": len(canonical),
-            "canonicalSha256": f"sha256:{hashlib.sha256(canonical).hexdigest()}",
-            "previewSizeBytes": 0,
-            "previewSha256": None,
-            "manifest": manifest,
-        }
-        metadataBytes = json.dumps(metadata, separators=(",", ":")).encode()
-        committed = self.client.post(
-            "/internal/knowledge/commit",
-            data=len(metadataBytes).to_bytes(4, "big") + metadataBytes + canonical,
-            content_type="application/octet-stream",
-            **headers,
-        )
-        self.assertEqual(committed.status_code, 201, committed.content)
+        output = ProcessingOutput(representation, len(canonical),
+                                  f"sha256:{hashlib.sha256(canonical).hexdigest()}",
+                                  0, None, manifest)
+        commit_processing_output(lease, output, BytesIO(canonical))
         self.assertEqual(DerivedRepresentation.objects.count(), 1)
         self.assertEqual(KnowledgeSegment.objects.count(), 2)
+        from .material_operations import operation_result
+        self.assertEqual(operation_result(operation_access, pending_operation["operationId"])["status"], "completed")
 
-        ready = self.client.post(
-            "/internal/knowledge/read",
-            data=json.dumps(
-                {
-                    **common,
-                    "schema": "knowledge.read.v1",
-                    "inputs": [inputBinding],
-                    "offset": 0,
-                    "limit": 20,
-                }
-            ),
-            content_type="application/json",
-            **headers,
-        )
-        self.assertEqual(ready.status_code, 200, ready.content)
-        self.assertEqual(ready.json()["disposition"], "ready")
-        self.assertIn(pageText, ready.json()["items"][0]["content"])
-        locator = ready.json()["items"][0]["locator"]
+        ready = read_materials(operation_access, [inputBinding], offset=0, limit=20)
+        self.assertEqual(ready["disposition"], "ready")
+        self.assertIn(pageText, ready["items"][0]["content"])
+        locator = ready["items"][0]["locator"]
         self.assertEqual(locator["kind"], "textSpan")
         self.assertEqual(locator["pageStart"], 1)
         self.assertEqual(locator["pageEnd"], 2)
         self.assertNotIn("page", locator)
 
-        searched = self.client.post(
-            "/internal/knowledge/search",
-            data=json.dumps(
-                {
-                    **common,
-                    "schema": "knowledge.search.v1",
-                    "inputs": [inputBinding],
-                    "query": "policy",
-                    "ranking": "relevance",
-                    "dateRange": None,
-                    "limit": 8,
-                }
-            ),
-            content_type="application/json",
-            **headers,
-        )
-        self.assertEqual(searched.status_code, 200, searched.content)
-        self.assertEqual(len(searched.json()["hits"]), 1)
-        self.assertNotIn("storageKey", searched.content.decode())
-        hit = searched.json()["hits"][0]
+        searched = search_materials(operation_access, [inputBinding], query="policy",
+                                    ranking="relevance", date_range=None, limit=8)
+        self.assertEqual(len(searched["hits"]), 1)
+        self.assertNotIn("storageKey", json.dumps(searched))
+        hit = searched["hits"][0]
+        # The real MCP transport must produce exactly the shared service evidence.
+        from asgiref.sync import async_to_sync
+        from .material_access import MaterialAccessContext
+        from .platform_mcp_auth import issue_credential
+        from .test_platform_mcp import call_material_tool
+        token = issue_credential(MaterialAccessContext(agent_run.id, authorization.digest, specification, specDigest))["accessToken"]
+        mcp_read = async_to_sync(call_material_tool)(token, "read_material", {"input_ref": link.id, "offset": 0, "limit": 20})
+        self.assertEqual(mcp_read.json()["result"]["structuredContent"]["items"], ready["items"])
+        mcp_search = async_to_sync(call_material_tool)(token, "search_materials", {"query": "policy", "limit": 8})
+        self.assertEqual(mcp_search.json()["result"]["structuredContent"]["hits"], searched["hits"])
         self.assertEqual(
             hit["evidenceSha256"],
             f"sha256:{hashlib.sha256(hit['content'].encode()).hexdigest()}",
@@ -7462,22 +7649,38 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         )
         self.assertEqual(streaming_response_bytes(derivedPreview), canonical)
 
-        badMetadata = json.loads(json.dumps(metadata))
-        badMetadata["manifest"]["pages"][0]["pageText"]["spans"][0][
-            "bbox"
-        ] = [10, 10, 10, 20]
-        badMetadataBytes = json.dumps(badMetadata, separators=(",", ":")).encode()
-        rejected = self.client.post(
-            "/internal/knowledge/commit",
-            data=(
-                len(badMetadataBytes).to_bytes(4, "big")
-                + badMetadataBytes
-                + canonical
-            ),
-            content_type="application/octet-stream",
-            **headers,
-        )
-        self.assertEqual(rejected.status_code, 400)
-        self.assertEqual(
-            rejected.json(), {"error": "knowledge_page_text_spans_invalid"}
-        )
+        # Real authorization, ASGI MCP, durable evidence, Session success, then preview.
+        from .material_receipts import PROVIDER_ID, MaterialEvidenceReceipt
+        call_arguments = {"query": "policy", "limit": 8}
+        append_session_records(agent_run, [session_record(agent_run, 1, "tool_call", {
+            "callId": "material-call", "toolName": "search_materials", "providerId": PROVIDER_ID,
+            "normalizedInput": call_arguments, "toolContractDigest": "sha256:" + "f" * 64,
+            "displayTarget": "policy",
+        })])
+        bound_response = async_to_sync(call_material_tool)(token, "search_materials", call_arguments, call_id="material-call")
+        bound_result = bound_response.json()["result"]
+        self.assertFalse(bound_result.get("isError", False))
+        receipt_output = bound_result["structuredContent"]
+        self.assertEqual(MaterialEvidenceReceipt.objects.count(), 1)
+        self.assertEqual(list(rebuild_agent_run_citation_projection(agent_run)), [])
+        model_content = json.dumps({"text": [item["text"] for item in bound_result["content"]], "structuredContent": receipt_output})
+        append_session_records(agent_run, [session_record(agent_run, 2, "tool_result", {
+            "callId": "material-call", "toolName": "search_materials", "resultState": "successWithOutput",
+            "modelContent": model_content, "outputComplete": True,
+            "fullOutputPath": None, "outputStartByte": None, "outputByteLength": len(model_content.encode()),
+            "summary": "Found material evidence", "operations": [], "modelInputImages": [], "latencyMs": 1,
+        })])
+        projected = rebuild_agent_run_citation_projection(agent_run)
+        self.assertEqual(len(projected), 1)
+        self.assertEqual(projected[0].citationId, receipt_output["citationIds"][0])
+        receipt_preview = self.client.get(f"/api/citations/{projected[0].citationId}/preview")
+        self.assertEqual(receipt_preview.status_code, 200)
+        self.assertEqual(streaming_response_bytes(receipt_preview), canonical)
+        self.assertEqual(len(rebuild_agent_run_citation_projection(agent_run)), 1)
+
+        from dataclasses import replace
+        bad_manifest = json.loads(json.dumps(manifest))
+        bad_manifest["pages"][0]["pageText"]["spans"][0]["bbox"] = [10, 10, 10, 20]
+        with self.assertRaises(KnowledgeError) as rejected:
+            commit_processing_output(lease, replace(output, manifest=bad_manifest), BytesIO(canonical))
+        self.assertEqual(rejected.exception.code, "knowledge_page_text_spans_invalid")

@@ -7,6 +7,8 @@ boundaries, and release verification.
 
 - [Architecture](architecture/Architecture.md): component ownership and request
   flow.
+- [Platform materials and MCP](architecture/PlatformMaterials.md): material
+  access, durable processing, evidence receipts and citation presentation.
 - [API](reference/API.md): REST, SSE, and internal service contracts.
 - [Configuration](reference/Configuration.md): environment variables and secret
   boundaries.

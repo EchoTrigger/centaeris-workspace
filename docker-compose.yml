@@ -127,8 +127,6 @@ services:
       RUNTIME_LIVE_STATE_TTL_SECONDS: ${RUNTIME_LIVE_STATE_TTL_SECONDS}
       OCI_RUNTIME: ${OCI_RUNTIME}
       WORKSPACE_GENERAL_IMAGE: *workspace-general-image
-      KNOWLEDGE_PROCESSOR_IMAGE: *document-processor-image
-      KNOWLEDGE_PROCESSOR_DEVICE: *processor-device
       PLUGIN_VOLUME_NAME: ${COMPOSE_PROJECT_NAME:-centaeris-workspace}_plugin-data
       AGENT_MEMORY_VOLUME_NAME: ${COMPOSE_PROJECT_NAME:-centaeris-workspace}_agent-memory
     entrypoint: ["runtime_server"]
@@ -141,8 +139,6 @@ services:
         read_only: true
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
-      document-processor:
-        condition: service_completed_successfully
       workspace-general:
         condition: service_completed_successfully
       postgres:
@@ -300,6 +296,32 @@ services:
     cap_drop:
       - ALL
     pids_limit: 64
+
+  material-worker:
+    image: centaeris-workspace-agent-api
+    entrypoint: ["python", "manage.py", "process_materials"]
+    restart: unless-stopped
+    environment:
+      <<: *api-environment
+      MATERIAL_PROCESSOR_NAMESPACE: ${COMPOSE_PROJECT_NAME:-centaeris-workspace}
+      MATERIAL_PROCESSOR_IMAGE: *document-processor-image
+      MATERIAL_PROCESSOR_DEVICE: *processor-device
+      OCI_RUNTIME: ${OCI_RUNTIME:-runc}
+    volumes:
+      - type: volume
+        source: storage-data
+        target: *storage-root
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      api-init:
+        condition: service_completed_successfully
+      document-processor:
+        condition: service_completed_successfully
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
 
   gc:
     image: centaeris-workspace-agent-api

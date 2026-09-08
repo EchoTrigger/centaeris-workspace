@@ -74,13 +74,13 @@ services, real Plugin content, or developer keys. Resource-builder tests isolate
 asset and Plugin lookup while retaining production construction and validation.
 
 The local gate also runs `scripts/deployment-contract.test.py` against rendered
-Compose configuration with synthetic inputs. It covers processor build/Runtime
+Compose configuration with synthetic inputs. It covers processor build/material-Worker
 identity, device mapping, Runtime port propagation, volume-path agreement,
-internal addresses, API security options, and exclusive Runtime socket access.
+internal addresses, API security options, and Docker socket access restricted to Runtime and the material Worker.
 It needs the Docker Compose CLI, but not a running deployment.
 
-The Docker fresh-start gate additionally verifies that Runtime references resolve
-to the built processor/general image IDs and that processor device metadata
+The Docker fresh-start gate additionally verifies that the material Worker and Runtime reference
+the built processor and general image IDs respectively and that processor device metadata
 matches. It checks the API's actual capability sets and no-new-privileges, writes
 synthetic upload and Plugin data, replaces the API container, and verifies reads
 and removal. For a bounded local API-only reproduction, run
@@ -131,7 +131,8 @@ Fill ordinary HTTP and database capacity, then exercise cancellation preflight,
 cancellation writes, heartbeat and job-status reads through control capacity.
 Fill listeners independently. Check 503 plus Retry-After, body/handler deadlines,
 and that timed-out blocking work retains its permit until exit. Long AgentRun
-steps and knowledge processing must not inherit the short-request deadline.
+steps must not inherit the short-request deadline. Material processing runs in its
+dedicated Worker with a bounded processing deadline, outside Runtime HTTP.
 These are acceptance requirements, not a claim that an isolated run was executed.
 Sibling Rust paths must become exact Git revisions before distribution.
 
@@ -171,8 +172,8 @@ limits/mount isolation, processor CPU/GPU configuration, and structured missing
 container errors. Production management, exec and archive operations must have
 no Docker CLI branch, and the Runtime image must not copy a Docker CLI binary.
 Check rendered Compose entrypoint/command as well as the image. With a missing
-processor image, direct Runtime startup must fail before listening via Engine
-inspection. No external entrypoint override may be used for acceptance.
+processor image, material Worker startup must fail through Engine inspection;
+Runtime must not contain a processor preflight or processing route. No external entrypoint override may be used for acceptance.
 Verify both explicit and omitted false for Mount.ReadOnly after create and start;
 a required read-only mount must still reject omission/false, and mismatched
 volume identity/subpath and missing security fields must still fail.

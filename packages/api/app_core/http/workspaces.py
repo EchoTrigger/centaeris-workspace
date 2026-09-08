@@ -56,6 +56,7 @@ from app_core.runtime_client import (
     schedule_agent_run_lifecycle,
 )
 from app_core.session_event import (
+    citation_snapshot,
     committed_session_terminal_state,
     project_committed_agent_run,
 )
@@ -796,6 +797,7 @@ def session_history(request, session_id: str):
                 extra={"agentRunId": agent_run.id},
             )
             return Status(409, {"error": str(error)})
+        citations = citation_snapshot(agent_run)
         agent_runs.append(
             {
                 "id": agent_run.id,
@@ -812,6 +814,8 @@ def session_history(request, session_id: str):
                 ],
                 "live": live_state,
                 "streamCursor": stream_cursor,
+                "citations": citations["citations"],
+                "citationSequence": citations["throughSequence"],
             }
         )
     next_cursor = _encode_session_history_cursor(page[0]) if has_more else None

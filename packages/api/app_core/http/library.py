@@ -705,6 +705,14 @@ def _create_uploaded_library_object(
     parent_folder=None,
 ) -> UserLibraryObject:
     _lock_library_owner(user)
+    # Serialize hash lookup and creation for this owner, across all folders.
+    # Reuse identity without renaming, moving, or reviving a deleted object.
+    reusable = UserLibraryObject.objects.filter(
+        owner=user, status="ready", sha256=metadata["sha256"],
+    ).order_by("createdAt", "id").first()
+    if reusable is not None:
+        delete_stored_object_for_gc(metadata["storageKey"])
+        return reusable
     display_name = metadata["displayName"]
     index = 0
     while True:
@@ -718,17 +726,6 @@ def _create_uploaded_library_object(
             .exclude(status="deleted")
             .order_by("createdAt", "id")
         )
-        reusable = next(
-            (
-                item
-                for item in collisions
-                if item.status == "ready" and item.sha256 == metadata["sha256"]
-            ),
-            None,
-        )
-        if reusable is not None:
-            delete_stored_object_for_gc(metadata["storageKey"])
-            return reusable
         if not collisions:
             break
         index += 1

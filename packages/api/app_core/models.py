@@ -1809,6 +1809,61 @@ class SessionAssetLink(models.Model):
         return super().save(*args, **kwargs)
 
 
+class MaterialProcessingTask(models.Model):
+    """Durable dispatch intent for one shared processed representation."""
+    representationId = models.CharField(primary_key=True, max_length=96)
+    processingSpecification = models.JSONField()
+    payload = models.JSONField()
+    status = models.CharField(max_length=16, default="pending", db_index=True)
+    errorCode = models.CharField(max_length=96, blank=True, default="")
+    executionBackend = models.CharField(max_length=16, default="platform", db_index=True)
+    leaseOwner = models.CharField(max_length=128, blank=True, default="")
+    leaseExpiresAt = models.DateTimeField(null=True, blank=True)
+    leaseEpoch = models.PositiveBigIntegerField(default=0)
+    attemptCount = models.PositiveIntegerField(default=0)
+    createdAt = models.DateTimeField(auto_now_add=True)
+    updatedAt = models.DateTimeField(auto_now=True)
+
+
+class MaterialProcessor(models.Model):
+    name = models.CharField(primary_key=True, max_length=64)
+    specification = models.ForeignKey("ProcessingSpecification", on_delete=models.PROTECT)
+
+
+class MaterialStagedObject(models.Model):
+    storageKey = models.CharField(primary_key=True, max_length=1000)
+    task = models.ForeignKey(MaterialProcessingTask, on_delete=models.PROTECT)
+    sizeBytes = models.PositiveBigIntegerField()
+    sha256 = models.CharField(max_length=71)
+    createdAt = models.DateTimeField(auto_now_add=True)
+
+
+class MaterialOperation(models.Model):
+    id = models.CharField(primary_key=True, max_length=96)
+    agent_run = models.ForeignKey(AgentRun, on_delete=models.CASCADE)
+    task = models.ForeignKey(MaterialProcessingTask, on_delete=models.PROTECT, related_name="operations")
+    inputRef = models.CharField(max_length=1024)
+    cancelledAt = models.DateTimeField(null=True, blank=True)
+    createdAt = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["agent_run", "task"], name="unique_run_material_operation")]
+
+
+class MaterialEvidenceReceipt(models.Model):
+    id = models.CharField(primary_key=True, max_length=96)
+    call = models.OneToOneField(SessionEvent, on_delete=models.CASCADE, related_name="materialReceipt")
+    authorizationDigest = models.CharField(max_length=71)
+    responseText = models.TextField()
+    evidence = models.JSONField()
+    createdAt = models.DateTimeField(auto_now_add=True)
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValueError("MaterialEvidenceReceipt is immutable")
+        return super().save(*args, **kwargs)
+
+
 class ModelRunLog(models.Model):
     id = models.CharField(primary_key=True, max_length=64, default=new_model_run_id)
     agentRunId = models.CharField(max_length=64)

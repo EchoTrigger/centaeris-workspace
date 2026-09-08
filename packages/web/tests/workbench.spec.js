@@ -49,6 +49,11 @@ function historyPage(session, agentRuns, { nextCursor = null, hasMore = false } 
         events,
         live: agentRun.live ? { messageId: agentRun.live.messageId, turnId: agentRun.live.turnId || agentRun.turnId, afterSequence: sequence, revision: agentRun.live.revision || 1, text: agentRun.live.text } : null,
         streamCursor: agentRun.streamCursor || "0-0",
+        citations: agentRun.citations || (agentRun.records || []).filter((record) => record.type === "citation_recorded").map(({ payload }) => ({
+          citationId: payload.citationId, inputRef: payload.inputRef, displayName: payload.displayName,
+          sourceToolCallId: payload.sourceToolCallId || "fixture-call", sourceUrl: `/api/citations/${payload.citationId}`,
+        })),
+        citationSequence: sequence,
       };
     }),
     nextCursor,
@@ -223,6 +228,8 @@ async function installChatFixture(page, {
   await page.route("http://localhost:8000/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    const citationMatch = path.match(/^\/api\/sessions\/([^/]+)\/agent-runs\/([^/]+)\/citations$/);
+    if (citationMatch) return route.fulfill({ json: { schema: "workspace.citations.v1", sessionId: citationMatch[1], agentRunId: citationMatch[2], throughSequence: 0, citations: [] } });
     if (path === "/api/csrf") return route.fulfill({ json: { csrfToken: "test-token" } });
     if (path === "/api/me") return route.fulfill({ json: { user: { id: "user_1", email: "member@example.com", isStaff: false } } });
     if (path === "/api/workspaces") return route.fulfill({ json: { workspaces: [workspace] } });
@@ -335,6 +342,42 @@ async function installChatFixture(page, {
   });
   return fixture;
 }
+
+test("shows a platform citation after committed tool success before the run terminates", async ({ page }) => {
+  const fixture = await installChatFixture(page);
+  fixture.setAgentRuns("sess_1", [{ id: "agent_run_live", turnId: "turn_1", status: "running",
+    model: { id: "model_1", displayName: "Clinical" }, createdAt: "2026-08-31T00:00:00Z",
+    startedAt: "2026-08-31T00:00:00Z", completedAt: null,
+    messages: [{ messageId: "user_1", role: "user", text: "read material" }],
+    records: [{ type: "tool_call", payload: { callId: "material_1", toolName: "read_material",
+      toolContractDigest: `sha256:${"a".repeat(64)}`, providerId: "workspace.materials",
+      normalizedInput: { input_ref: "input_1" }, displayTarget: "Material" } }],
+  }]);
+  await page.route("http://localhost:8000/api/sessions/sess_1/agent-runs/agent_run_live/citations", (route) => route.fulfill({ json: {
+    schema: "workspace.citations.v1", sessionId: "sess_1", agentRunId: "agent_run_live", throughSequence: 4,
+    citations: [{ citationId: "citation:live", inputRef: "input_1", displayName: "live-material.txt",
+      sourceToolCallId: "material_1", sourceUrl: "/api/citations/citation:live" }],
+  } }));
+  await page.addInitScript(() => {
+    const originalFetch = window.fetch;
+    window.fetch = (input, init) => {
+      if (!String(input).endsWith("/agent-runs/agent_run_live/events")) return originalFetch(input, init);
+      return Promise.resolve(new Response(new ReadableStream({ start(controller) {
+        window.__pushMaterialResult = (text) => controller.enqueue(new TextEncoder().encode(text));
+      } }), { headers: { "Content-Type": "text/event-stream" } }));
+    };
+  });
+  await page.goto("/w/ws_1/agents/centaeris?sessionId=sess_1");
+  await expect(page.locator('[data-agent-run-id="agent_run_live"]')).toBeVisible();
+  await expect(page.getByRole("button", { name: "live-material.txt 引用", exact: true })).toHaveCount(0);
+  await page.evaluate((text) => window.__pushMaterialResult(text), sse([
+    committedStreamItem("sess_1", "agent_run_live", 4, "tool_result", { callId: "material_1",
+      toolName: "read_material", resultState: "successWithOutput", modelContent: "trusted material",
+      outputComplete: true, summary: "read", latencyMs: 1, operations: [] }, "turn_1"),
+  ]));
+  await expect(page.getByRole("button", { name: "live-material.txt 引用", exact: true })).toBeVisible();
+  await expect(page.locator(".workspaceLiveStatus")).toBeVisible();
+});
 
 test("keeps live status at the latest progress and tool disclosures stable across stream updates", async ({ page }) => {
   const fixture = await installChatFixture(page);
@@ -1718,6 +1761,7 @@ test("keeps reconnecting until durable terminal history arrives", async ({ page 
   await page.route("http://localhost:8000/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path === "/api/sessions/sess_1/agent-runs/agent_run_1/citations") return route.fulfill({ json: { schema: "workspace.citations.v1", sessionId: "sess_1", agentRunId: "agent_run_1", throughSequence: 4, citations: [] } });
     if (path === "/api/csrf") return route.fulfill({ json: { csrfToken: "test-token" } });
     if (path === "/api/me") return route.fulfill({ json: { user: { id: "1", email: "member@example.com", isStaff: false } } });
     if (path === "/api/workspaces") return route.fulfill({ json: { workspaces: [{ id: "ws_1", name: "默认工作区", status: "active", role: "owner" }] } });
@@ -2111,7 +2155,8 @@ test("uses the Centaeris information architecture", async ({ page }) => {
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
 });
 
-test("opens a human-readable citation without exposing locator JSON", async ({ page }) => {
+for (const citationMode of ["legacy", "platform"]) {
+test(`opens a human-readable ${citationMode} citation without exposing locator JSON`, async ({ page }) => {
   let previewFailure = false;
   let previewPdf = false;
   await page.route("http://localhost:8000/api/**", async (route) => {
@@ -2143,15 +2188,10 @@ test("opens a human-readable citation without exposing locator JSON", async ({ p
             { messageId: "user_1", role: "user", status: "done", text: "术前提醒" },
             { messageId: "assistant_1", role: "assistant", status: "done", text: "请核对患者病史。" },
           ],
-          records: [{
-            type: "citation_recorded",
-            payload: {
-              citationId: "citation_1",
-              inputRef: "input_1",
-              displayName: "术前须知.md",
-              evidenceKind: "workspaceSource",
-            },
-          }],
+          citations: citationMode === "platform" ? [{ citationId: "citation_1", inputRef: "input_1", displayName: "术前须知.md", sourceToolCallId: "call_material", sourceUrl: "/api/citations/citation_1" }] : undefined,
+          records: citationMode === "platform" ? [] : [{ type: "citation_recorded", payload: {
+            citationId: "citation_1", inputRef: "input_1", displayName: "术前须知.md", evidenceKind: "workspaceSource",
+          } }],
         }],
       ),
       "/api/citations/citation_1": {
@@ -2200,3 +2240,4 @@ test("opens a human-readable citation without exposing locator JSON", async ({ p
   await expect(preview.getByRole("navigation", { name: "文件预览路径" })).toContainText("单个任务时效性.xlsx");
   await expect(preview.locator("iframe")).toHaveAttribute("src", /#page=1$/);
 });
+}

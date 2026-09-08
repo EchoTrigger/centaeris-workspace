@@ -1,13 +1,27 @@
 from ninja import Router, Status
+from django.http import HttpResponse
 
-from app_core.models import SessionCitationProjection
+from app_core.models import AgentRun, SessionCitationProjection
+from app_core.session_event import citation_snapshot
 from app_core.workspace_access import workspace_membership_for
 
-from .response_schema import CitationEnvelope, COMMON_ERROR_RESPONSES
+from .response_schema import CitationEnvelope, CitationSnapshotResponse, COMMON_ERROR_RESPONSES
 from .security import session_auth
 
 
 router = Router(tags=["citations"], by_alias=True)
+
+
+@router.get("/sessions/{session_id}/agent-runs/{agent_run_id}/citations", auth=session_auth,
+            response={200: CitationSnapshotResponse} | COMMON_ERROR_RESPONSES)
+def run_citations(request, response: HttpResponse, session_id: str, agent_run_id: str):
+    response["Cache-Control"] = "no-store"
+    run = AgentRun.objects.filter(pk=agent_run_id, session_id=session_id, user=request.user).first()
+    if run is None or workspace_membership_for(request.user, run.workspace_id) is None:
+        return Status(404, {"error": "agent_run_not_found"})
+    if request.GET:
+        return Status(400, {"error": "citation_snapshot_query_invalid"})
+    return citation_snapshot(run)
 
 
 @router.get(

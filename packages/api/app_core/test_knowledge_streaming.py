@@ -2,7 +2,8 @@ import hashlib
 
 from django.test import SimpleTestCase
 
-from .knowledge import KnowledgeError, _validate_manifest
+from .material_commit import _validate_manifest
+from .material_contract import KnowledgeError
 
 
 class KnowledgeStreamingTests(SimpleTestCase):

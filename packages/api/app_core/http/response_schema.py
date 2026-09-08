@@ -638,6 +638,22 @@ class LiveAssistantResponse(StrictSchema):
     text: str
 
 
+class CitationSummaryResponse(StrictSchema):
+    citation_id: str = Field(alias="citationId")
+    input_ref: str = Field(alias="inputRef")
+    display_name: str = Field(alias="displayName")
+    source_tool_call_id: str = Field(alias="sourceToolCallId")
+    source_url: str = Field(alias="sourceUrl")
+
+
+class CitationSnapshotResponse(StrictSchema):
+    schema_id: Literal["workspace.citations.v1"] = Field(alias="schema")
+    agent_run_id: str = Field(alias="agentRunId")
+    session_id: str = Field(alias="sessionId")
+    through_sequence: int = Field(alias="throughSequence", ge=0)
+    citations: list[CitationSummaryResponse]
+
+
 class AgentRunHistoryResponse(StrictSchema):
     id: str
     status: str
@@ -648,6 +664,8 @@ class AgentRunHistoryResponse(StrictSchema):
     events: list[StoredSessionEventResponse]
     live: LiveAssistantResponse | None
     stream_cursor: str = Field(alias="streamCursor")
+    citations: list[CitationSummaryResponse]
+    citation_sequence: int = Field(alias="citationSequence", ge=0)
 
 
 class SessionHistoryEnvelope(StrictSchema):

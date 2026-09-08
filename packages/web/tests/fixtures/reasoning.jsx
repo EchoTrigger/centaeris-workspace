@@ -15,7 +15,7 @@ const run = {
   ...hydrateAgentRun({
     id: "fixture-run", status: "running", model: {},
     createdAt: "2026-09-05T00:00:00Z", startedAt: "2026-09-05T00:00:00Z",
-    completedAt: null, events: [], live: null, streamCursor: "0-0",
+    completedAt: null, events: [], live: null, streamCursor: "0-0", citations: [], citationSequence: 0,
   }),
   activities: [tool("a", 1), tool("b", 3)],
   messages: [{ messageId: "user", role: "user", text: "Inspect this task", phase: "user", sequence: 0, attachments: [], artifacts: [] }],
@@ -32,7 +32,7 @@ window.reasoningFixture = {
   liveSnapshot(revision, text) {
     store.replaceAgentRun(hydrateAgentRun({
       id: run.id, status: "running", model: {}, createdAt: "2026-09-05T00:00:00Z", startedAt: "2026-09-05T00:00:00Z", completedAt: null,
-      events: [], streamCursor: "0-0",
+      events: [], streamCursor: "0-0", citations: [], citationSequence: 0,
       live: { messageId: "answer", turnId: "fixture-turn", afterSequence: 0, revision, text: "Streaming answer", reasoning: { blockId: "reasoning:request-1", requestId: "request-1", text } },
     }));
   },
@@ -45,7 +45,7 @@ window.reasoningFixture = {
     store.replaceAgentRun(hydrateAgentRun({
       id: run.id, status: "completed", model: {}, createdAt: run.createdAt,
       startedAt: run.startedAt, completedAt: "2026-09-05T00:00:02Z",
-      live: null, streamCursor: "1-0", events: [
+      live: null, streamCursor: "1-0", citations: [], citationSequence: 0, events: [
         event("reasoning_block", 1, { blockId: "reasoning:request-1", requestId: "request-1", text: "Committed thinking", status: "done" }),
         event("assistant_message", 2, { messageId: "answer", modelMarkdown: "Committed answer", artifactRefs: [], status: "done" }),
       ],

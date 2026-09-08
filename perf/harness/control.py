@@ -73,7 +73,7 @@ def validate_config(config, root):
                 raise ValueError('unowned volume mount')
             if mount['type'] == 'bind':
                 source = mount['source'].replace('\\', '/')
-                if source == '/var/run/docker.sock' and name == 'runtime':
+                if source == '/var/run/docker.sock' and name in {'runtime', 'material-worker'}:
                     continue
                 permitted = {ca, (root / 'perf/certs/out/isolated/mock-model-bundle.pem').as_posix()}
                 if source not in permitted or not mount.get('read_only'):

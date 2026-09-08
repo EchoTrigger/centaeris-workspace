@@ -2,11 +2,17 @@
 
 ## Required service
 
-The document-processor image is a required Runtime dependency. Runtime verifies
-that the configured image exists before serving AgentRuns. The image uses a
-read-only root, no network, dropped capabilities, and bounded temporary space
-for its specification check; per-document processing receives a separate
-request-bound execution profile.
+The document-processor image is a required material-worker dependency. The
+dedicated Python service inspects its image and specification, then registers the
+current specification with the platform. Runtime obtains that identity from the
+API when registering material MCP tools; it has no processor implementation.
+Missing/invalid processor configuration fails Worker startup. Material tool
+registration fails closed until a platform specification is available.
+
+Specification checks and document containers use a read-only root, no network,
+dropped capabilities, a non-root user, and fixed CPU/memory/process limits.
+Each document receives fresh anonymous input/output volumes. Processing is owned
+by a durable platform task, not by a user's run or a Rust scheduling job.
 
 ## Supported classes
 
@@ -23,9 +29,11 @@ accepted, while pixel, output-size, timeout, process, and memory budgets remain
 enforced. A permanent error stops immediately; repeated transient I/O or timeout
 errors stop after the bounded retry policy.
 
-Tool completion follows terminal processor state. The browser activity row must
-disappear on success, failure, cancellation, interruption, or terminal
-AgentRun state.
+MCP reads/searches return a durable operation handle while processing is pending.
+The model polls get_operation and reads again after completion. Cancellation
+detaches that run's operation; even cancelling all waiters does not stop a live
+platform material. Source deletion/version changes prevent stale publication.
+Worker restart reclaims expired leases without accepting results from an old epoch.
 
 ## Measurement boundary
 

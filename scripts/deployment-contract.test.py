@@ -34,6 +34,26 @@ def compose_config(**overrides):
 
 
 class DeploymentContractTests(unittest.TestCase):
+    def test_docker_release_gate_accepts_current_processor_ownership(self):
+        source = (ROOT / "scripts/docker-release-gate.sh").read_text(encoding="utf-8")
+        validator = source.split("python3 -c '\n", 1)[1].split("\n'\n", 1)[0]
+        config = compose_config()
+        env = {**os.environ, "WORKSPACE_ROOT": str(ROOT), "CORE_ROOT": str(ROOT.parent / "centaeris")}
+        def validate(value):
+            return subprocess.run([os.sys.executable, "-c", validator],
+                                  input=json.dumps(value), env=env, capture_output=True, text=True)
+        accepted = validate(config)
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        del config["services"]["material-worker"]["depends_on"]["document-processor"]
+        self.assertNotEqual(validate(config).returncode, 0)
+
+    def test_docker_release_gate_starts_and_checks_material_worker(self):
+        source = (ROOT / "scripts/docker-release-gate.sh").read_text(encoding="utf-8")
+        start = next(line for line in source.splitlines() if line.startswith('"${compose[@]}" up -d --wait '))
+        checked = next(line for line in source.splitlines() if line.startswith("for service in postgres "))
+        self.assertIn("material-worker", start.split())
+        self.assertIn("material-worker", checked.split())
+
     def test_runtime_image_does_not_bundle_docker_cli(self):
         dockerfile = (ROOT / "packages/runtime_server/Dockerfile").read_text(encoding="utf-8")
         self.assertNotIn("docker-cli", dockerfile)
@@ -86,25 +106,25 @@ class DeploymentContractTests(unittest.TestCase):
             "old-but-present:tag": {"Id": "sha256:old"},
         }
         gate.verify_images(config, images.__getitem__)
-        services["runtime"]["environment"]["KNOWLEDGE_PROCESSOR_IMAGE"] = "old-but-present:tag"
+        services["material-worker"]["environment"]["MATERIAL_PROCESSOR_IMAGE"] = "old-but-present:tag"
         with self.assertRaisesRegex(ValueError, "different image"):
             gate.verify_images(config, images.__getitem__)
-        services["runtime"]["environment"]["KNOWLEDGE_PROCESSOR_IMAGE"] = processor_ref
-        services["runtime"]["environment"]["KNOWLEDGE_PROCESSOR_DEVICE"] = "gpu:0"
+        services["material-worker"]["environment"]["MATERIAL_PROCESSOR_IMAGE"] = processor_ref
+        services["material-worker"]["environment"]["MATERIAL_PROCESSOR_DEVICE"] = "gpu:0"
         with self.assertRaisesRegex(ValueError, "built device differs"):
             gate.verify_images(config, images.__getitem__)
 
-    def test_processor_build_and_runtime_have_one_identity(self):
+    def test_processor_build_and_material_worker_have_one_identity(self):
         for device in ("cpu", "gpu:0"):
             with self.subTest(device=device):
                 config = compose_config(KNOWLEDGE_PROCESSOR_DEVICE=device,
                                         KNOWLEDGE_PROCESSOR_IMAGE="stale-image:old")
                 processor = config["services"]["document-processor"]
-                runtime = config["services"]["runtime"]["environment"]
-                self.assertEqual(processor["image"], runtime["KNOWLEDGE_PROCESSOR_IMAGE"])
-                self.assertNotEqual(runtime["KNOWLEDGE_PROCESSOR_IMAGE"], "stale-image:old")
+                runtime = config["services"]["material-worker"]["environment"]
+                self.assertEqual(processor["image"], runtime["MATERIAL_PROCESSOR_IMAGE"])
+                self.assertNotEqual(runtime["MATERIAL_PROCESSOR_IMAGE"], "stale-image:old")
                 self.assertEqual(processor["build"]["args"]["PROCESSOR_DEVICE"], device)
-                self.assertEqual(runtime["KNOWLEDGE_PROCESSOR_DEVICE"], device)
+                self.assertEqual(runtime["MATERIAL_PROCESSOR_DEVICE"], device)
 
     def test_runtime_port_change_reaches_api_and_worker(self):
         services = compose_config(RUNTIME_PORT="9100")["services"]
@@ -144,11 +164,11 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertEqual(api.get("cap_drop"), ["ALL"])
         self.assertIn("no-new-privileges:true", api.get("security_opt", []))
 
-    def test_only_runtime_mounts_docker_socket(self):
+    def test_only_execution_services_mount_docker_socket(self):
         services = compose_config()["services"]
         holders = [name for name, service in services.items()
                    if any(v.get("source") == "/var/run/docker.sock" for v in service.get("volumes", []))]
-        self.assertEqual(holders, ["runtime"])
+        self.assertEqual(set(holders), {"runtime", "material-worker"})
 
 
 if __name__ == "__main__":

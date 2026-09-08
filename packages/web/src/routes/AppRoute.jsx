@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, matchPath, useNavigate, useRouteLoaderData } from "react-router";
 import { apiResponse } from "../api";
+import { createCitationRefresher } from "../chat/citationSnapshot";
 import { WorkspaceContextPanel } from "../components/WorkspaceContextPanel";
 import { ContextUsagePicker } from "../components/ContextUsagePicker";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -504,12 +505,24 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
 
   async function connectAgentRun(agentRunId, targetWorkspaceId, targetSessionId, abortController, resume = {}) {
     chatControllerRef.current?.dispose();
+    const citations = createCitationRefresher({ sessionId: targetSessionId, agentRunId,
+      load: async (signal) => (await apiResponse(`/api/sessions/${targetSessionId}/agent-runs/${agentRunId}/citations`, { signal })).json(),
+      apply: (snapshot) => {
+        if (!abortController.signal.aborted && activeSessionIdRef.current === targetSessionId) chatStore.applyCitationSnapshot(snapshot);
+      },
+    });
+    const disposeCitations = () => citations.dispose();
+    abortController.signal.addEventListener("abort", disposeCitations, { once: true });
+    const refreshCitations = () => citations.request().catch((error) => {
+      if (error?.name !== "AbortError" && !abortController.signal.aborted) setError("无法刷新引用，请重新打开会话重试");
+    });
     const controller = new WorkspaceChatController({
       store: chatStore,
       workspaceId: targetWorkspaceId,
       sessionId: targetSessionId,
       agentRunId,
       initialCursor: resume.cursor || "0-0",
+      onCitationsChanged: () => { void refreshCitations(); },
     });
     chatControllerRef.current = controller;
     let streamCompleted = false;
@@ -524,6 +537,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     } finally {
       try {
         await controller.whenIdle();
+        if (!abortController.signal.aborted) await refreshCitations();
         const agentRun = chatStore.getAgentRunSnapshot(agentRunId);
         if (streamCompleted && agentRun && !isAgentRunActive(agentRun)) {
           try {
@@ -539,6 +553,8 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       } finally {
         if (chatControllerRef.current === controller) chatControllerRef.current = null;
         controller.dispose();
+        citations.dispose();
+        abortController.signal.removeEventListener("abort", disposeCitations);
       }
     }
   }
@@ -749,6 +765,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       activities: [],
       reasoningBlocks: [],
       citations: [],
+      citationSequence: 0,
       startedAtMs: Date.now(),
       finishedAtMs: null,
     };
@@ -816,6 +833,8 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         eventIds: [],
         live: null,
         streamCursor: "0-0",
+        citations: [],
+        citationSequence: 0,
         messages: pendingAgentRun.messages.map((message) => ({
           ...message,
           messageId: `message:${messageData.turnId}:user`,

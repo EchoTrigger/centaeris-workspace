@@ -94,16 +94,16 @@ capabilities.
 
 ## Deployment trust boundary
 
-Only Runtime mounts the Docker socket in the bundled Compose configuration.
-That socket makes Runtime part of the host's trusted infrastructure; container
+Only Runtime and the dedicated material Worker mount the Docker socket.
+That socket makes both services part of the host's trusted infrastructure; container
 mount separation does not isolate other container secrets from a compromised
 Docker controller. The deployment contract gate protects against accidentally
-adding socket access to another service.
+adding socket access to an API, lifecycle Worker or another service.
 
 API owns credential storage, authorization decisions and credential release.
 This does not mean it is the only process holding secrets: the shared API
 environment also supplies the signing/encryption keys and database credentials
-to api-init, gc and mail-sender. Runtime shares the HMAC authorization key and
+to api-init, gc, mail-sender and the material Worker. Runtime shares the HMAC authorization key and
 receives authorized MCP bearer tokens for HTTP connections. Worker receives the
 internal API token, not the HMAC key through Compose. Narrowing those inherited
 credentials is a separate design and test task, not a guarantee of the current
@@ -120,8 +120,9 @@ upload storage and Plugin lifecycle writes, then replaces the API container and
 checks persistence. Only Runtime inspection of a synthetic Plugin is mocked in
 that probe; filesystem operations, catalog validation and database locking run
 normally. Runtime `main()` already resolves the general image with
-the Docker Engine image-inspect API before binding its listener. The processor
-image receives the same presence check without starting a processor container.
+the Docker Engine image-inspect API before binding its listener. The material
+Worker separately inspects its processor image and runs an isolated specification
+check before claiming platform tasks.
 Compose starts Runtime directly; it has no shell/CLI image preflight. Direct Runtime startup with
 a missing image fails before listening; this does not depend on the Compose
 entrypoint. No duplicate entrypoint check is needed.
