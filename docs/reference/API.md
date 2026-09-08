@@ -22,6 +22,73 @@ specifications use the immutable Centaeris processor version `1.0.0`.
 
 Secrets never belong in responses, logs, documentation, or checked-in examples.
 
+Hosted message submission atomically enforces the Workspace initial-queue budget
+and the global initial-queue budget. A full Workspace returns HTTP 429 with
+`workspace_execution_queue_full`; global saturation returns HTTP 503 with
+`execution_queue_full`. Contention on the cross-replica admission transaction
+returns HTTP 503 with `execution_admission_busy`. These responses carry
+`Retry-After: 5`; a rejected request creates no Session, AgentRun or authorization.
+An initially queued run that expires records `execution_queue_expired` and follows
+Runtime's normal cancellation protocol; logical waits do not expire this way.
+
+`POST /internal/jobs/schedule` keeps `runtime.job.schedule.v1`. For
+`agent_run.lifecycle`, `workspaceId` is required and commits with the job as an
+immutable tenant binding. Other kinds omit it. Reusing an idempotency key with a
+different job, session, payload reference or tenant fails. Hosted lifecycle claim
+and wait routes enforce the shared execution limits; saturation returns an empty
+claim result, not a failed job. Capacity release wakes existing job listeners.
+Contention on the atomic claim transaction returns HTTP 503
+`execution_claim_busy` with `Retry-After: 5`; worker slots back off before claiming
+again rather than spinning on a due job whose claim transaction is still locked.
+
+Runtime HTTP saturation returns HTTP 503 `runtime_busy` with `Retry-After: 5`.
+An absolute handler response deadline returns HTTP 504
+`request_deadline_exceeded`; a body deadline returns HTTP 408. Timeout does not
+establish whether a write committed. Cancellation, heartbeat and job-status RPCs
+use reserved HTTP capacity and the reserved database pool for their complete path,
+including cancellation's terminal-state preflight reads.
+
+`POST /internal/agent-run-lifecycle/reconcile` accepts
+`runtime.agent_run_lifecycle.reconcile.v1`, `limit` (1–100), and optional
+`activeAfter` / `deadLetterAfter` cursors. Each cursor is null (start a pass) or
+`{createdAt, id}` with an offset-aware timestamp. Unknown fields and malformed
+cursors fail. The response contains `scheduled`, `terminalized`, `pending`,
+`activeNext`, and `deadLetterNext`. The two populations advance independently in
+`(createdAt, id)` order, with at most `limit` attempts per population per call.
+Null next cursors finish that population's pass; the next tick starts a new pass.
+Failed individual attempts still advance the page and retry on a later pass.
+The worker retains cursors across ticks, including when later waiter recovery
+fails, and starts from null after process restart. These are scan-progress hints,
+not execution checkpoints; durable jobs and session facts remain authoritative.
+
+`POST /internal/jobs/reconcile` accepts `runtime.job.reconcile.v1` with `nowMs`
+and returns `{reclaimed}` for expired job leases. It does not reactivate published
+terminal notifications. Pending outbox deliveries persist until generation-checked
+acknowledgement, which follows durable waiter wake handling. A crash before that
+acknowledgement permits duplicate delivery; duplicate wake and acknowledgement
+remain idempotent.
+
+`POST /internal/job-outbox/reconcile-waiters` recovers late or missed wakes from
+the durable waiting-relationship index and terminal source jobs, including
+waiters registered after notification acknowledgement. Both this endpoint and
+`POST /internal/job-outbox/wake-waiter` accept `after`: null or an exact object
+`{checkpointId, toolCallId}`. Wake requests additionally retain `jobId` and
+`generation`; their lookup selects only that source job's indexed relationships.
+
+Responses contain exactly `disposition`, `checked`, `waiters`, and `next`.
+`next` is null at the end of a pass, otherwise it is the cursor to send as
+`after`. A request processes at most 256 relationships and yields after a 200ms
+scheduling budget between operations. It always finishes at least one available
+relationship; this budget does not interrupt database transactions or impose a
+hard request deadline. Large checkpoints paginate within their tool-call set.
+
+The worker retains independent cursors for reconciliation and each pending
+notification generation. It does not acknowledge a notification until `next`
+is null. Failed requests repeat their last page safely. A worker restart begins
+new idempotent passes from null; durable pending notifications and waiting
+relationships remain authoritative. Late registrations behind a cursor are
+covered on the next reconciliation pass, without replaying terminal history.
+
 Model completion results carry optional `reasoningContent` for display and
 `continuationReasoningContent` for provider-approved plain-text continuation.
 These fields are independent; Runtime must not reconstruct continuation from
@@ -57,6 +124,18 @@ them. Creating these resources through the ORM retries generated primary-key
 collisions up to three total attempts; explicit IDs and other integrity errors
 fail. Possession of an ID does not grant access: ownership and workspace
 membership checks still apply.
+
+## Execution recovery scheduling
+
+The internal `runtime.agent_run.step.result.v1` response requires `retryAtMs`
+(a nonnegative integer Unix timestamp in milliseconds) when `transitionReason`
+is `execution_recovery_checkpoint_committed`. This response has `disposition`
+`waiting` and `terminalState` null. Other step outcomes omit `retryAtMs`.
+The worker yields its current lease until that deadline while keeping the
+AgentRun running. The Runtime derives the deadline from committed recovery
+facts, reserves an attempt under the lifecycle lease before preparation, and
+terminalizes exhaustion as `execution_recovery_exhausted`. Retry scheduling
+does not permit replaying tool calls beyond a checkpoint.
 
 ## Plugin management isolation
 

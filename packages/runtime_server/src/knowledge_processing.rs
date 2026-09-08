@@ -3,10 +3,8 @@ use std::env;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::OnceLock;
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::knowledge_types::{
     representation_id, ProcessingOptionsV1, ProcessingSpecificationV1,
@@ -19,11 +17,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::docker_execution_host::{bounded_diagnostic, docker_owned, OciRuntime};
+use crate::docker_execution_host::{bounded_diagnostic, OciRuntime};
 
 pub(crate) const KNOWLEDGE_PROCESS_JOB_KIND: &str = "knowledge.process";
 const PAYLOAD_PREFIX: &str = "knowledge.process.v1:";
-const MAX_DIAGNOSTIC_BYTES: usize = 64 * 1024;
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const API_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -60,9 +57,10 @@ impl ProcessorDevice {
         }
     }
 
-    fn append_docker_args(self, args: &mut Vec<String>) {
-        if self == Self::Gpu0 {
-            args.extend(["--gpus".to_string(), "device=0".to_string()]);
+    fn device_requests(self) -> Value {
+        match self {
+            Self::Cpu => json!([]),
+            Self::Gpu0 => json!([{"Driver":"", "DeviceIDs":["0"], "Capabilities":[["gpu"]]}]),
         }
     }
 }
@@ -151,39 +149,47 @@ pub(crate) fn processor_specification() -> Result<ProcessingSpecificationV1, Str
         .clone()
 }
 
+/// Preserve the deployment's image-presence preflight without a CLI dependency
+/// or starting a processor container before Runtime begins listening.
+pub(crate) fn validate_processor_image() -> Result<(), String> {
+    crate::docker_engine::image_id(&processor_image()?).map(|_| ())
+}
+
 fn load_processor_specification() -> Result<ProcessingSpecificationV1, String> {
     let device = ProcessorDevice::from_environment()?;
     let image = processor_image()?;
-    let image_digest = docker_owned(&[
-        "image".to_string(),
-        "inspect".to_string(),
-        "--format".to_string(),
-        "{{.Id}}".to_string(),
-        image.clone(),
-    ])?;
-    let execution_image_digest = String::from_utf8(image_digest.stdout)
-        .map_err(|_| "processor image digest is not UTF-8".to_string())?
-        .trim()
-        .to_string();
-    let runtime = oci_runtime()?.docker_runtime_name();
-    let mut args = vec![
-        "run".to_string(),
-        "--rm".to_string(),
-        "--runtime".to_string(),
-        runtime.to_string(),
-        "--network".to_string(),
-        "none".to_string(),
-        "--read-only".to_string(),
-        "--tmpfs".to_string(),
-        "/tmp:rw,nosuid,nodev,mode=1777".to_string(),
-        "--cap-drop".to_string(),
-        "ALL".to_string(),
-        "--security-opt".to_string(),
-        "no-new-privileges".to_string(),
-    ];
-    device.append_docker_args(&mut args);
-    args.extend([image, "spec".to_string()]);
-    let output = run_command_with_timeout("docker", args.as_slice(), Duration::from_secs(30))?;
+    let execution_image_digest = crate::docker_engine::image_id(&image)?;
+    let name = format!(
+        "centaeris-processor-spec-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos()
+    );
+    let mut body = json!({"Image":execution_image_digest,"Cmd":["spec"],
+        "Labels":{"centaeris.processor":"true","centaeris.processor_instance":name},
+        "HostConfig":{"Runtime":oci_runtime()?.docker_runtime_name(), "NetworkMode":"none",
+            "ReadonlyRootfs":true,"Tmpfs":{"/tmp":"rw,nosuid,nodev,mode=1777"},
+            "CapDrop":["ALL"],"SecurityOpt":["no-new-privileges"],"DeviceRequests":device.device_requests()}});
+    if device == ProcessorDevice::Cpu {
+        body["HostConfig"]
+            .as_object_mut()
+            .unwrap()
+            .remove("DeviceRequests");
+    }
+    let id = crate::docker_engine::ensure_created(&name, body)?;
+    let result = crate::docker_engine::start(&id)
+        .and_then(|()| crate::docker_engine::wait_output(&id, Duration::from_secs(30)));
+    let removed = crate::docker_engine::remove(&id, true);
+    let output = match (result, removed) {
+        (Ok(output), Ok(())) => output,
+        (Ok(_), Err(error)) => return Err(format!("processor spec cleanup failed: {error}")),
+        (Err(error), Ok(())) => return Err(error),
+        (Err(error), Err(cleanup)) => {
+            return Err(format!("{error}; processor spec cleanup failed: {cleanup}"))
+        }
+    };
     if output.exit_code != 0 {
         return Err(format!(
             "processor spec command failed: {}",
@@ -308,7 +314,8 @@ fn process(payload: KnowledgeProcessPayloadV1) -> Result<(), String> {
     match (result, cleanup) {
         (Ok(()), Ok(())) => Ok(()),
         (Ok(()), Err(error)) => Err(format!("cleanup knowledge work root failed: {error}")),
-        (Err(error), _) => Err(error),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(cleanup)) => Err(format!("{error}; processor cleanup failed: {cleanup}")),
     }
 }
 
@@ -336,46 +343,31 @@ fn process_in_work_root(payload: &KnowledgeProcessPayloadV1, root: &Path) -> Res
             .expect("validated representation prefix")[..12],
         now_ms()?
     );
-    create_processor_container(container_name.as_str())?;
+    let container_id = create_processor_container(container_name.as_str())?;
     let result = (|| {
-        docker_owned(&[
-            "cp".to_string(),
-            source.to_string_lossy().into_owned(),
-            format!("{container_name}:/data/input/source"),
-        ])?;
-        docker_owned(&[
-            "cp".to_string(),
-            request_path.to_string_lossy().into_owned(),
-            format!("{container_name}:/data/input/request.json"),
-        ])?;
-        let output = run_command_with_timeout(
-            "docker",
-            &[
-                "start".to_string(),
-                "-a".to_string(),
-                container_name.clone(),
-            ],
-            PROCESS_TIMEOUT,
+        crate::docker_engine::upload_file(&container_id, &source, "/data/input", "source")?;
+        crate::docker_engine::upload_file(
+            &container_id,
+            &request_path,
+            "/data/input",
+            "request.json",
         )?;
+        crate::docker_engine::start(&container_id)?;
+        let output = crate::docker_engine::wait_output(&container_id, PROCESS_TIMEOUT)?;
         if output.exit_code != 0 {
             return Err(format!(
                 "document processor failed: {}",
                 bounded_diagnostic(output.stderr.as_slice())
             ));
         }
-        docker_owned(&[
-            "cp".to_string(),
-            format!("{container_name}:/data/output/."),
-            root.join("output").to_string_lossy().into_owned(),
-        ])?;
+        crate::docker_engine::download_processor_outputs(
+            &container_id,
+            &root.join("output"),
+            processor_specification()?.options.max_output_bytes,
+        )?;
         commit_outputs(payload, root.join("output").as_path())
     })();
-    let removed = docker_owned(&[
-        "rm".to_string(),
-        "--force".to_string(),
-        "--volumes".to_string(),
-        container_name,
-    ]);
+    let removed = crate::docker_engine::remove(&container_id, true);
     match (result, removed) {
         (Ok(()), Ok(_)) => Ok(()),
         (Ok(()), Err(error)) => Err(format!("remove processor container failed: {error}")),
@@ -383,59 +375,37 @@ fn process_in_work_root(payload: &KnowledgeProcessPayloadV1, root: &Path) -> Res
     }
 }
 
-fn create_processor_container(name: &str) -> Result<(), String> {
-    let device = ProcessorDevice::from_environment()?;
-    let args = processor_container_args(
+fn create_processor_container(name: &str) -> Result<String, String> {
+    let body = processor_container_body(
         name,
         oci_runtime()?.docker_runtime_name(),
-        processor_image()?,
-        device,
+        processor_specification()?.execution_image_digest,
+        ProcessorDevice::from_environment()?,
     );
-    docker_owned(args.as_slice())?;
-    Ok(())
+    crate::docker_engine::ensure_created(name, body)
 }
 
-fn processor_container_args(
+fn processor_container_body(
     name: &str,
     runtime: &str,
     image: String,
     device: ProcessorDevice,
-) -> Vec<String> {
-    let mut args = vec![
-        "create".to_string(),
-        "--name".to_string(),
-        name.to_string(),
-        "--runtime".to_string(),
-        runtime.to_string(),
-        "--network".to_string(),
-        "none".to_string(),
-        "--read-only".to_string(),
-        "--tmpfs".to_string(),
-        "/tmp:rw,nosuid,nodev,mode=1777".to_string(),
-        "--memory".to_string(),
-        "4294967296".to_string(),
-        "--cpus".to_string(),
-        "8".to_string(),
-        "--pids-limit".to_string(),
-        "64".to_string(),
-        "--cap-drop".to_string(),
-        "ALL".to_string(),
-        "--security-opt".to_string(),
-        "no-new-privileges".to_string(),
-        "--user".to_string(),
-        "10001:10001".to_string(),
-        "--mount".to_string(),
-        "type=volume,target=/data/input".to_string(),
-        "--mount".to_string(),
-        "type=volume,target=/data/output".to_string(),
-    ];
-    device.append_docker_args(&mut args);
-    args.extend([
-        image,
-        "process".to_string(),
-        "/data/input/request.json".to_string(),
-    ]);
-    args
+) -> Value {
+    let mut body = json!({"Image":image,"Cmd":["process","/data/input/request.json"],"User":"10001:10001",
+        "Labels":{"centaeris.processor":"true","centaeris.processor_instance":name},
+        "HostConfig":{"Runtime":runtime,"NetworkMode":"none","ReadonlyRootfs":true,
+            "Tmpfs":{"/tmp":"rw,nosuid,nodev,mode=1777"},"Memory":4294967296_i64,
+            "NanoCpus":8000000000_i64,"PidsLimit":64,"CapDrop":["ALL"],
+            "SecurityOpt":["no-new-privileges"], "DeviceRequests":device.device_requests(),
+            "Mounts":[{"Type":"volume","Target":"/data/input"},
+                      {"Type":"volume","Target":"/data/output"}]}});
+    if device == ProcessorDevice::Cpu {
+        body["HostConfig"]
+            .as_object_mut()
+            .unwrap()
+            .remove("DeviceRequests");
+    }
+    body
 }
 
 fn download_source(payload: &KnowledgeProcessPayloadV1, path: &Path) -> Result<(), String> {
@@ -684,79 +654,6 @@ fn copy_file(path: &Path, destination: &mut File) -> Result<(), String> {
         .map_err(|error| format!("copy processor output into commit failed: {error}"))
 }
 
-struct CommandOutput {
-    exit_code: i32,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-}
-
-fn run_command_with_timeout(
-    program: &str,
-    args: &[String],
-    timeout: Duration,
-) -> Result<CommandOutput, String> {
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("start {program} failed: {error}"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| format!("{program} stdout is unavailable"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| format!("{program} stderr is unavailable"))?;
-    let stdout = thread::spawn(move || read_bounded(stdout));
-    let stderr = thread::spawn(move || read_bounded(stderr));
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| format!("poll {program} failed: {error}"))?
-        {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!(
-                "{program} timed out after {}ms",
-                timeout.as_millis()
-            ));
-        }
-        thread::sleep(Duration::from_millis(100));
-    };
-    Ok(CommandOutput {
-        exit_code: status.code().unwrap_or(-1),
-        stdout: stdout
-            .join()
-            .map_err(|_| format!("{program} stdout reader panicked"))??,
-        stderr: stderr
-            .join()
-            .map_err(|_| format!("{program} stderr reader panicked"))??,
-    })
-}
-
-fn read_bounded(mut source: impl Read) -> Result<Vec<u8>, String> {
-    let mut output = Vec::new();
-    let mut buffer = [0u8; 8 * 1024];
-    loop {
-        let read = source
-            .read(&mut buffer)
-            .map_err(|error| format!("read process output failed: {error}"))?;
-        if read == 0 {
-            break;
-        }
-        let remaining = MAX_DIAGNOSTIC_BYTES.saturating_sub(output.len());
-        output.extend_from_slice(&buffer[..read.min(remaining)]);
-    }
-    Ok(output)
-}
-
 fn response(status: u16, value: Value) -> (u16, Vec<u8>) {
     (
         status,
@@ -812,19 +709,32 @@ mod tests {
 
     #[test]
     fn processor_uses_read_only_root_and_external_data_volumes() {
-        let args = processor_container_args(
+        let body = processor_container_body(
             "processor",
             "runsc",
-            "processor:latest".to_string(),
+            "sha256:test".to_string(),
             ProcessorDevice::Cpu,
         );
-        assert!(args.iter().any(|argument| argument == "--read-only"));
-        assert!(args.windows(2).any(|pair| pair == ["--pids-limit", "64"]));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["--mount", "type=volume,target=/data/input"]));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["--mount", "type=volume,target=/data/output"]));
+        assert_eq!(body["HostConfig"]["ReadonlyRootfs"], true);
+        assert_eq!(body["HostConfig"]["PidsLimit"], 64);
+        assert_eq!(body["HostConfig"]["Memory"], 4294967296_i64);
+        assert_eq!(body["HostConfig"]["NanoCpus"], 8000000000_i64);
+        assert_eq!(
+            body["HostConfig"]["Mounts"],
+            json!([
+                {"Type":"volume","Target":"/data/input"}, {"Type":"volume","Target":"/data/output"}
+            ])
+        );
+        assert!(body["HostConfig"].get("DeviceRequests").is_none());
+        let gpu = processor_container_body(
+            "processor",
+            "runc",
+            "sha256:test".to_string(),
+            ProcessorDevice::Gpu0,
+        );
+        assert_eq!(
+            gpu["HostConfig"]["DeviceRequests"][0]["DeviceIDs"],
+            json!(["0"])
+        );
     }
 }

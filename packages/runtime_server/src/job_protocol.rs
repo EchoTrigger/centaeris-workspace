@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::postgres_store::PostgresRuntimeStore;
-use centaeris_core::runtime::contracts::RuntimeAwaitJobCheckpointV1;
+
 use centaeris_core::session::reliability::{
     agent_run_lifecycle_job_id, runtime_job_retry_delay_ms, ClaimDueRuntimeJobsRequest,
     CompleteRuntimeJobRequest, CreateDeadLetterRequest, DeadLetterRecord, DeadLetterReplayPolicy,
@@ -15,7 +15,7 @@ use centaeris_core::session::reliability::{
 use centaeris_core::session::store::{
     CreateDeadLetterAndFailJobRequest, RuntimeStoreTransactionPort,
 };
-use centaeris_core::session::store::{RuntimeJobWaitCheckpointCursor, RuntimeStore};
+use centaeris_core::session::store::{RuntimeJobWaiter, RuntimeJobWaiterCursor, RuntimeStore};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -82,6 +82,7 @@ struct ScheduleRequest {
     idempotency_key: String,
     session_id: Option<String>,
     payload_ref: Option<String>,
+    workspace_id: Option<String>,
 }
 
 fn schedule(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
@@ -91,35 +92,46 @@ fn schedule(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
     }
     let now = now_ms().map_err(|_| (500, "clock_unavailable"))?;
     let result = store
-        .schedule_runtime_job(ScheduleRuntimeJobRequest {
-            job: RuntimeJobRecord {
-                job_id: request.job_id,
-                job_kind: request.job_kind,
-                status: RuntimeJobStatus::Queued,
-                run_at_ms: request.run_at_ms,
-                lease_owner: None,
-                lease_expires_at_ms: None,
-                heartbeat_at_ms: None,
-                retry_count: 0,
-                max_retries: request.max_retries,
-                backoff_policy: RuntimeBackoffPolicy::default(),
-                idempotency_key: request.idempotency_key,
-                session_id: request.session_id,
-                branch_id: None,
-                checkpoint_id: None,
-                payload_ref: request.payload_ref,
-                output_refs: vec![],
-                last_error: None,
-                created_at_ms: now,
-                updated_at_ms: now,
+        .schedule_worker_job(
+            ScheduleRuntimeJobRequest {
+                job: RuntimeJobRecord {
+                    job_id: request.job_id,
+                    job_kind: request.job_kind,
+                    status: RuntimeJobStatus::Queued,
+                    run_at_ms: request.run_at_ms,
+                    lease_owner: None,
+                    lease_expires_at_ms: None,
+                    heartbeat_at_ms: None,
+                    retry_count: 0,
+                    max_retries: request.max_retries,
+                    backoff_policy: RuntimeBackoffPolicy::default(),
+                    idempotency_key: request.idempotency_key,
+                    session_id: request.session_id,
+                    branch_id: None,
+                    checkpoint_id: None,
+                    payload_ref: request.payload_ref,
+                    output_refs: vec![],
+                    last_error: None,
+                    created_at_ms: now,
+                    updated_at_ms: now,
+                },
             },
-        })
+            request.workspace_id.as_deref(),
+        )
         .map_err(|_| (409, "job_schedule_conflict"))?;
     Ok(json!({"disposition":result.disposition,"job":result.job}))
 }
 
 fn valid_schedule_request(request: &ScheduleRequest) -> bool {
     request.schema == "runtime.job.schedule.v1"
+        && (if request.job_kind == AGENT_RUN_LIFECYCLE_JOB_KIND {
+            request
+                .workspace_id
+                .as_deref()
+                .is_some_and(|value| bounded(value, 1, 64))
+        } else {
+            request.workspace_id.is_none()
+        })
         && runtime_job_id(&request.job_id)
         && kind(&request.job_kind)
         && request.max_retries <= 10
@@ -171,7 +183,7 @@ fn claim(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
         return Err((400, "job_claim_invalid"));
     }
     let jobs = store
-        .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
+        .claim_worker_jobs(ClaimDueRuntimeJobsRequest {
             now_ms: request.now_ms,
             worker_id: request.worker_id,
             job_id: request.job_id,
@@ -180,7 +192,13 @@ fn claim(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
             limit: request.limit,
             lease_ms: request.lease_ms,
         })
-        .map_err(|_| (409, "job_claim_rejected"))?;
+        .map_err(|error| {
+            if error == "execution claim busy" {
+                (503, "execution_claim_busy")
+            } else {
+                (409, "job_claim_rejected")
+            }
+        })?;
     Ok(json!({"jobs":jobs}))
 }
 
@@ -480,10 +498,9 @@ fn reconcile(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
     let reclaimed = store
         .reclaim_expired_runtime_job_leases(request.now_ms)
         .map_err(|_| (500, "job_reconcile_failed"))?;
-    let requeued = store
-        .requeue_runtime_job_notifications(request.now_ms.saturating_sub(30_000))
-        .map_err(|_| (500, "job_reconcile_failed"))?;
-    Ok(json!({"reclaimed":reclaimed,"requeued":requeued}))
+    // Late waiters are recovered from durable wait checkpoints by reconcile_waiters.
+    // Replaying acknowledged notifications would turn completed history into work.
+    Ok(json!({"reclaimed":reclaimed}))
 }
 
 #[derive(Deserialize)]
@@ -539,6 +556,21 @@ struct WakeWaiterRequest {
     schema: String,
     job_id: String,
     generation: u32,
+    after: Option<RuntimeJobWaiterCursor>,
+}
+
+const WAITER_SCAN_LIMIT: usize = 256;
+const WAITER_SCAN_BUDGET: Duration = Duration::from_millis(200);
+
+fn validate_waiter_cursor(
+    after: Option<&RuntimeJobWaiterCursor>,
+) -> Result<(), (u16, &'static str)> {
+    if after.is_some_and(|cursor| {
+        cursor.checkpoint_id.trim().is_empty() || cursor.tool_call_id.trim().is_empty()
+    }) {
+        return Err((400, "job_waiter_cursor_invalid"));
+    }
+    Ok(())
 }
 
 fn wake_waiter(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
@@ -546,71 +578,27 @@ fn wake_waiter(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
     if request.schema != "runtime.job.waiter_wake.v1" || !runtime_job_id(&request.job_id) {
         return Err((400, "job_waiter_wake_invalid"));
     }
+    validate_waiter_cursor(request.after.as_ref())?;
     let _delivery_generation = request.generation;
     let source = store
-        .get_runtime_job(request.job_id.as_str())
+        .get_runtime_job(&request.job_id)
         .map_err(|_| (500, "job_store_failed"))?
         .ok_or((404, "job_not_found"))?;
     if !source.status.is_terminal() {
         return Err((409, "job_waiter_wake_source_not_terminal"));
     }
-    const PAGE_SIZE: usize = 256;
-    let mut after = None;
-    let mut seen_lifecycle_jobs = HashSet::new();
-    let mut waiters = Vec::new();
-    loop {
-        // ponytail: this reconstructs the multi-waiter index from durable checkpoints; add a
-        // materialized waiter table only when waiting-checkpoint volume makes the scan measurable.
-        let checkpoints = store
-            .list_waiting_runtime_job_checkpoints(after.as_ref(), PAGE_SIZE)
-            .map_err(|_| (500, "job_waiter_checkpoint_failed"))?;
-        let count = checkpoints.len();
-        let next_after = checkpoints
-            .last()
-            .map(|checkpoint| RuntimeJobWaitCheckpointCursor {
-                session_id: checkpoint.session_id.clone(),
-                turn_id: checkpoint.turn_id.clone(),
-            });
-        for checkpoint in checkpoints {
-            let wait = serde_json::from_str::<RuntimeAwaitJobCheckpointV1>(
-                checkpoint.payload_json.as_str(),
-            )
-            .map_err(|_| (409, "job_waiter_checkpoint_invalid"))?;
-            wait.validate()
-                .map_err(|_| (409, "job_waiter_checkpoint_invalid"))?;
-            if !wait
-                .waits
-                .iter()
-                .any(|item| item.job_id == source.job_id && item.job_kind == source.job_kind)
-            {
-                continue;
-            }
-            if let Some(waiter) = wake_lifecycle_waiter(
-                checkpoint.session_id.as_str(),
-                &wait,
-                &source,
-                &mut seen_lifecycle_jobs,
-                store,
-            )? {
-                waiters.push(waiter);
-            }
-        }
-        if count < PAGE_SIZE {
-            break;
-        }
-        after = next_after;
-    }
-    if waiters.is_empty() {
-        Ok(json!({"disposition":"no_waiter"}))
-    } else {
-        Ok(json!({"disposition":"woken","waiters":waiters}))
-    }
+    let (checked, waiters, next) =
+        process_waiter_page(store, Some(source), request.after.as_ref())?;
+    Ok(
+        json!({"disposition": if waiters.is_empty() {"no_waiter"} else {"woken"}, "checked":checked, "waiters":waiters, "next":next}),
+    )
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReconcileWaitersRequest {
     schema: String,
+    after: Option<RuntimeJobWaiterCursor>,
 }
 
 fn reconcile_waiters(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
@@ -618,63 +606,71 @@ fn reconcile_waiters(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResul
     if request.schema != "runtime.job.waiters.reconcile.v1" {
         return Err((400, "job_waiters_reconcile_invalid"));
     }
-    const PAGE_SIZE: usize = 256;
-    let mut after = None;
-    let mut checked = 0usize;
-    let mut seen_lifecycle_jobs = HashSet::new();
-    let mut waiters = Vec::new();
-    loop {
-        let checkpoints = store
-            .list_waiting_runtime_job_checkpoints(after.as_ref(), PAGE_SIZE)
-            .map_err(|_| (500, "job_waiter_checkpoint_failed"))?;
-        let count = checkpoints.len();
-        let next_after = checkpoints
-            .last()
-            .map(|checkpoint| RuntimeJobWaitCheckpointCursor {
-                session_id: checkpoint.session_id.clone(),
-                turn_id: checkpoint.turn_id.clone(),
-            });
-        for checkpoint in checkpoints {
-            let wait = serde_json::from_str::<RuntimeAwaitJobCheckpointV1>(
-                checkpoint.payload_json.as_str(),
-            )
-            .map_err(|_| (409, "job_waiter_checkpoint_invalid"))?;
-            wait.validate()
-                .map_err(|_| (409, "job_waiter_checkpoint_invalid"))?;
-            for item in &wait.waits {
-                checked = checked.saturating_add(1);
-                let source = store
-                    .get_runtime_job(item.job_id.as_str())
-                    .map_err(|_| (500, "job_store_failed"))?
-                    .ok_or((409, "job_waiter_source_missing"))?;
-                if source.job_kind != item.job_kind {
-                    return Err((409, "job_waiter_binding_mismatch"));
-                }
-                if !source.status.is_terminal() {
-                    continue;
-                }
-                if let Some(waiter) = wake_lifecycle_waiter(
-                    checkpoint.session_id.as_str(),
-                    &wait,
-                    &source,
-                    &mut seen_lifecycle_jobs,
-                    store,
-                )? {
-                    waiters.push(waiter);
-                }
-            }
-        }
-        if count < PAGE_SIZE {
-            break;
-        }
-        after = next_after;
-    }
-    Ok(json!({"disposition":"reconciled","checked":checked,"waiters":waiters}))
+    validate_waiter_cursor(request.after.as_ref())?;
+    let (checked, waiters, next) = process_waiter_page(store, None, request.after.as_ref())?;
+    Ok(json!({"disposition":"reconciled", "checked":checked, "waiters":waiters, "next":next}))
 }
 
+type WaiterPage = (usize, Vec<Value>, Option<RuntimeJobWaiterCursor>);
+
+fn process_waiter_page(
+    store: &PostgresRuntimeStore,
+    source: Option<RuntimeJobRecord>,
+    after: Option<&RuntimeJobWaiterCursor>,
+) -> Result<WaiterPage, (u16, &'static str)> {
+    let started = Instant::now();
+    let page = store
+        .list_runtime_job_waiters(
+            source.as_ref().map(|job| job.job_id.as_str()),
+            after,
+            WAITER_SCAN_LIMIT,
+        )
+        .map_err(|_| (500, "job_waiter_index_failed"))?;
+    let mut sources = HashMap::new();
+    if let Some(source) = source {
+        sources.insert(source.job_id.clone(), source);
+    }
+    let mut seen = HashSet::new();
+    let mut waiters = Vec::new();
+    let mut checked = 0;
+    let mut last = None;
+    for relation in &page {
+        // This is a scheduling budget between operations, not transaction
+        // cancellation. Always finish one relation so a slow call can progress.
+        if checked > 0 && started.elapsed() >= WAITER_SCAN_BUDGET {
+            break;
+        }
+        if !sources.contains_key(&relation.source_job_id) {
+            let source = store
+                .get_runtime_job(&relation.source_job_id)
+                .map_err(|_| (500, "job_store_failed"))?
+                .ok_or((409, "job_waiter_source_missing"))?;
+            sources.insert(relation.source_job_id.clone(), source);
+        }
+        let source = sources.get(&relation.source_job_id).expect("source loaded");
+        if source.job_kind != relation.source_job_kind {
+            return Err((409, "job_waiter_binding_mismatch"));
+        }
+        if source.status.is_terminal() {
+            if let Some(waiter) =
+                wake_lifecycle_waiter(&relation.session_id, relation, source, &mut seen, store)?
+            {
+                waiters.push(waiter);
+            }
+        }
+        checked += 1;
+        last = Some(relation.cursor.clone());
+    }
+    let next = if checked < page.len() || page.len() == WAITER_SCAN_LIMIT {
+        last
+    } else {
+        None
+    };
+    Ok((checked, waiters, next))
+}
 fn wake_lifecycle_waiter(
     checkpoint_session_id: &str,
-    wait: &RuntimeAwaitJobCheckpointV1,
+    wait: &RuntimeJobWaiter,
     source: &RuntimeJobRecord,
     seen_lifecycle_jobs: &mut HashSet<String>,
     store: &PostgresRuntimeStore,
@@ -821,9 +817,14 @@ mod tests {
             "idempotencyKey": "agent_run.lifecycle:agent_run_1:digest",
             "sessionId": "session_1",
             "payloadRef": "record:agent_run:agent_run_1",
+            "workspaceId": "workspace_1",
         }))
         .expect("decode exact schedule request");
         assert!(valid_schedule_request(&request));
+
+        request.workspace_id = None;
+        assert!(!valid_schedule_request(&request));
+        request.workspace_id = Some("workspace_1".to_string());
 
         request.session_id = Some("banana".to_string());
         assert!(!valid_schedule_request(&request));

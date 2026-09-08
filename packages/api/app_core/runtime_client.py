@@ -159,6 +159,7 @@ def schedule_agent_run_lifecycle(agent_run) -> str:
         "idempotencyKey": f"agent_run.lifecycle:{agent_run.id}:{authorization.digest}",
         "sessionId": agent_run.session_id,
         "payloadRef": f"record:agent_run:{agent_run.id}",
+        "workspaceId": agent_run.workspace_id,
     }
     payload = schedule_runtime_job(body)
     job = payload.get("job") if isinstance(payload, dict) else None
@@ -192,12 +193,13 @@ def request_agent_run_cancellation(agent_run) -> dict:
     )
     try:
         with urllib.request.urlopen(
-            request, timeout=settings.RUNTIME_START_TIMEOUT_SECONDS
+            request, timeout=settings.RUNTIME_CONTROL_TIMEOUT_SECONDS
         ) as response:
             result = json.loads(response.read())
     except (
         urllib.error.HTTPError,
         urllib.error.URLError,
+        TimeoutError,
         json.JSONDecodeError,
     ) as error:
         if isinstance(error, urllib.error.HTTPError):

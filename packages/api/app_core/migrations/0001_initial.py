@@ -752,4 +752,10 @@ class Migration(migrations.Migration):
             model_name='workspacepluginenablement',
             constraint=models.UniqueConstraint(fields=('workspace', 'pluginName'), name='unique_workspace_plugin_enablement'),
         ),
+        migrations.AddIndex(
+            model_name='agentrun',
+            index=models.Index(fields=['workspace', 'createdAt', 'id'],
+                               condition=models.Q(status='queued', startedAt__isnull=True),
+                               name='agent_run_initial_queue'),
+        ),
     ]

@@ -21,10 +21,301 @@ use postgres::fallible_iterator::FallibleIterator;
 use postgres::{Client, NoTls};
 use std::time::Duration;
 
-use super::{PostgresRuntimeStore, PostgresSessionLog};
+use super::PostgresRuntimeStore;
 use centaeris_runtime_sqlite::SqliteRuntimeStore;
 
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn outbox_protocol(
+    store: &PostgresRuntimeStore,
+    path: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let headers = std::collections::HashMap::from([(
+        "x-internal-token".to_string(),
+        std::env::var("INTERNAL_API_TOKEN").expect("test token"),
+    )]);
+    let (status, response) = crate::job_protocol::handle(
+        "POST",
+        path,
+        &headers,
+        &serde_json::to_vec(&body).unwrap(),
+        store,
+    )
+    .expect("job protocol response");
+    let result: serde_json::Value = serde_json::from_slice(&response).unwrap();
+    assert_eq!(status, 200, "{result}");
+    result
+}
+
+fn terminal_source(store: &PostgresRuntimeStore, id: &str) {
+    let mut source = job(id, id);
+    source.session_id = None;
+    source.status = RuntimeJobStatus::Running;
+    source.lease_owner = Some("worker_source".to_string());
+    source.lease_expires_at_ms = Some(10_000);
+    store
+        .schedule_runtime_job(ScheduleRuntimeJobRequest { job: source })
+        .unwrap();
+    store
+        .complete_runtime_job(CompleteRuntimeJobRequest {
+            job_id: id.to_string(),
+            lease_owner: "worker_source".to_string(),
+            output_refs: vec![],
+            completed_at_ms: 20,
+        })
+        .unwrap();
+}
+
+fn late_waiter(store: &PostgresRuntimeStore, index: usize) -> String {
+    use centaeris_core::runtime::contracts::{
+        RuntimeAgentRunIdentityV1, RuntimeAwaitJobCheckpointV1, RuntimeJobWaitV1,
+    };
+    let agent = format!("agent_run_late_{index:04}");
+    let session = format!("session_late_{index:04}");
+    let turn = format!("turn_late_{index:04}");
+    let id = centaeris_core::session::reliability::agent_run_lifecycle_job_id(&agent).unwrap();
+    let mut lifecycle = job(&id, &id);
+    lifecycle.job_kind = "agent_run.lifecycle".to_string();
+    lifecycle.session_id = Some(session.clone());
+    lifecycle.run_at_ms = 100_000;
+    store
+        .schedule_runtime_job(ScheduleRuntimeJobRequest { job: lifecycle })
+        .unwrap();
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let wait = RuntimeAwaitJobCheckpointV1::new(
+        &RuntimeAgentRunIdentityV1 {
+            agent_run_id: agent,
+            execution_id: format!("execution_{index}"),
+            authorization_digest: digest.clone(),
+        },
+        &turn,
+        vec![RuntimeJobWaitV1 {
+            tool_call_id: format!("call_{index}"),
+            source_tool_name: "read_result".to_string(),
+            tool_definition_digest: digest,
+            job_id: "source:terminal".to_string(),
+            job_kind: "contract.test".to_string(),
+        }],
+    )
+    .unwrap();
+    store
+        .save_checkpoint(CheckpointRecord {
+            checkpoint_id: format!("checkpoint:{index}"),
+            kind: centaeris_core::runtime::contracts::CheckpointKindV1::Wait,
+            session_id: session,
+            turn_id: turn,
+            status: "waiting".to_string(),
+            done_reason: Some("runtime_job".to_string()),
+            updated_at_ms: 50,
+            payload_json: serde_json::to_string(&wait).unwrap(),
+        })
+        .unwrap();
+    id
+}
+
+fn reconcile_waiter_pass(store: &PostgresRuntimeStore) -> serde_json::Value {
+    let mut after = serde_json::Value::Null;
+    let mut checked = 0;
+    let mut pages = 0;
+    let mut page_bytes = 0;
+    let mut waiters = Vec::new();
+    loop {
+        let response = outbox_protocol(
+            store,
+            "/internal/job-outbox/reconcile-waiters",
+            serde_json::json!({"schema":"runtime.job.waiters.reconcile.v1", "after":after}),
+        );
+        let count = response["checked"].as_u64().unwrap();
+        assert!(count <= 256);
+        checked += count;
+        pages += 1;
+        page_bytes += serde_json::to_vec(&response).unwrap().len();
+        waiters.extend(response["waiters"].as_array().unwrap().iter().cloned());
+        let next = response["next"].clone();
+        if next.is_null() {
+            break;
+        }
+        assert_ne!(next, after);
+        assert!(count > 0);
+        after = next;
+    }
+    serde_json::json!({"checked":checked, "waiters":waiters, "pages":pages, "pageBytes":page_bytes})
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_outbox_reconcile_does_not_replay_acknowledged_history() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    terminal_source(&store, "history:acknowledged");
+    store
+        .mark_runtime_job_outbox_published("history:acknowledged", "runtime_job.terminal", 0, 30)
+        .unwrap();
+    terminal_source(&store, "source:unacknowledged");
+    for now in [60_000, 120_000, 3_600_000] {
+        outbox_protocol(
+            &store,
+            "/internal/jobs/reconcile",
+            serde_json::json!({"schema":"runtime.job.reconcile.v1","nowMs":now}),
+        );
+        let pending = store.list_pending_runtime_job_outbox(256).unwrap();
+        assert_eq!(
+            pending.len(),
+            1,
+            "acknowledged history must not become pending again"
+        );
+        assert_eq!(pending[0].job_id, "source:unacknowledged");
+        assert_eq!(pending[0].generation, 0);
+    }
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_outbox_late_waiters_recover_after_ack_and_restart_across_pages() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    terminal_source(&store, "source:terminal");
+    let wake = outbox_protocol(
+        &store,
+        "/internal/job-outbox/wake-waiter",
+        serde_json::json!({"schema":"runtime.job.waiter_wake.v1","jobId":"source:terminal","generation":0}),
+    );
+    assert_eq!(wake["disposition"], "no_waiter");
+    store
+        .mark_runtime_job_outbox_published("source:terminal", "runtime_job.terminal", 0, 30)
+        .unwrap();
+    let ids: Vec<_> = (0..257).map(|i| late_waiter(&store, i)).collect();
+    drop(store);
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let url = url.clone();
+            std::thread::spawn(move || {
+                let reopened = PostgresRuntimeStore::new(&url).unwrap();
+                reconcile_waiter_pass(&reopened)
+            })
+        })
+        .collect();
+    for handle in handles {
+        assert_eq!(handle.join().unwrap()["checked"], 257);
+    }
+    let reopened = PostgresRuntimeStore::new(&url).unwrap();
+    for id in ids {
+        assert_eq!(
+            reopened.get_runtime_job(&id).unwrap().unwrap().run_at_ms,
+            20
+        );
+    }
+    assert!(reopened
+        .list_pending_runtime_job_outbox(256)
+        .unwrap()
+        .is_empty());
+    let mut client = Client::connect(&url, NoTls).unwrap();
+    let count: i64 = client.query_one("SELECT count(*) FROM runtime.runtime_events WHERE event_type='runtime_job_wake_requested'", &[]).unwrap().get(0);
+    assert_eq!(
+        count, 257,
+        "concurrent compensation must not multiply wake facts"
+    );
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_outbox_unacknowledged_delivery_survives_restart_and_duplicate_ack() {
+    use centaeris_core::session::reliability::RuntimeJobOutboxPublishDisposition;
+    let _guard = TEST_LOCK.lock().unwrap();
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    terminal_source(&store, "source:terminal");
+    late_waiter(&store, 0);
+    outbox_protocol(
+        &store,
+        "/internal/job-outbox/wake-waiter",
+        serde_json::json!({"schema":"runtime.job.waiter_wake.v1","jobId":"source:terminal","generation":0}),
+    );
+    drop(store); // Crash between durable wake and delivery acknowledgement.
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    assert_eq!(store.list_pending_runtime_job_outbox(10).unwrap().len(), 1);
+    outbox_protocol(
+        &store,
+        "/internal/job-outbox/wake-waiter",
+        serde_json::json!({"schema":"runtime.job.waiter_wake.v1","jobId":"source:terminal","generation":0}),
+    );
+    assert_eq!(
+        store
+            .mark_runtime_job_outbox_published("source:terminal", "runtime_job.terminal", 1, 40)
+            .unwrap(),
+        RuntimeJobOutboxPublishDisposition::Stale
+    );
+    assert_eq!(store.list_pending_runtime_job_outbox(10).unwrap().len(), 1);
+    assert_eq!(
+        store
+            .mark_runtime_job_outbox_published("source:terminal", "runtime_job.terminal", 0, 40)
+            .unwrap(),
+        RuntimeJobOutboxPublishDisposition::Published
+    );
+    assert_eq!(
+        store
+            .mark_runtime_job_outbox_published("source:terminal", "runtime_job.terminal", 0, 41)
+            .unwrap(),
+        RuntimeJobOutboxPublishDisposition::AlreadyPublished
+    );
+    assert!(store
+        .list_pending_runtime_job_outbox(10)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_outbox_wake_during_active_waiter_survives_yield() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    terminal_source(&store, "source:terminal");
+    let id = late_waiter(&store, 0);
+    store
+        .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
+            now_ms: 100_000,
+            worker_id: "worker_waiter".to_string(),
+            job_id: Some(id.clone()),
+            job_kind: None,
+            session_id: None,
+            limit: 1,
+            lease_ms: 10_000,
+        })
+        .unwrap();
+    outbox_protocol(
+        &store,
+        "/internal/job-outbox/wake-waiter",
+        serde_json::json!({"schema":"runtime.job.waiter_wake.v1","jobId":"source:terminal","generation":0}),
+    );
+    store
+        .mark_runtime_job_outbox_published("source:terminal", "runtime_job.terminal", 0, 100_001)
+        .unwrap();
+    store
+        .yield_runtime_job(YieldRuntimeJobRequest {
+            job_id: id.clone(),
+            lease_owner: "worker_waiter".to_string(),
+            yielded_at_ms: 100_002,
+            run_at_ms: 400_000,
+            transition_reason: "runtime_job_wait".to_string(),
+        })
+        .unwrap();
+    assert_eq!(
+        store.get_runtime_job(&id).unwrap().unwrap().run_at_ms,
+        100_002
+    );
+    assert!(store
+        .list_pending_runtime_job_outbox(10)
+        .unwrap()
+        .is_empty());
+}
 
 fn test_url() -> String {
     assert_eq!(
@@ -65,6 +356,193 @@ fn job(id: &str, key: &str) -> RuntimeJobRecord {
     }
 }
 
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_checkpoint_profile_reconcile_waiters() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    let waiting: usize = std::env::var("CENTAERIS_CHECKPOINT_PROFILE_WAITING")
+        .expect("CENTAERIS_CHECKPOINT_PROFILE_WAITING is required")
+        .parse()
+        .expect("profile waiting count must be an integer");
+    assert!(
+        waiting <= 1024,
+        "profile is intentionally bounded at 1024 waiters"
+    );
+    let terminal = match std::env::var("CENTAERIS_CHECKPOINT_PROFILE_SOURCE")
+        .expect("CENTAERIS_CHECKPOINT_PROFILE_SOURCE is required")
+        .as_str()
+    {
+        "terminal" => true,
+        "nonterminal" => false,
+        value => panic!("unsupported checkpoint profile source: {value}"),
+    };
+    if terminal {
+        terminal_source(&store, "source:terminal");
+    } else {
+        let mut source = job("source:terminal", "source:terminal");
+        source.session_id = None;
+        store
+            .schedule_runtime_job(ScheduleRuntimeJobRequest { job: source })
+            .unwrap();
+    }
+    for index in 0..waiting {
+        late_waiter(&store, index);
+    }
+
+    let mut measurements = Vec::new();
+    let passes = if terminal { 2 } else { 1 };
+    for pass in 1..=passes {
+        let mut audit = Client::connect(&url, NoTls).unwrap();
+        let sessions_before: i64 = audit
+            .query_one(
+                "SELECT sessions FROM pg_stat_database WHERE datname=current_database()",
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        let statements_before = checkpoint_profile_statements(&mut audit);
+        let started = std::time::Instant::now();
+        let response = reconcile_waiter_pass(&store);
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let sessions_after: i64 = audit
+            .query_one(
+                "SELECT sessions FROM pg_stat_database WHERE datname=current_database()",
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        let statements_after = checkpoint_profile_statements(&mut audit);
+        let mut dispositions = std::collections::BTreeMap::<String, usize>::new();
+        if let Some(waiters) = response["waiters"].as_array() {
+            for waiter in waiters {
+                let disposition = waiter["disposition"].as_str().unwrap().to_string();
+                *dispositions.entry(disposition).or_default() += 1;
+            }
+        }
+        let row = audit.query_one(
+            "SELECT \
+             (SELECT count(*) FROM runtime.checkpoints WHERE kind='wait' AND status='waiting' AND done_reason='runtime_job'),\
+             (SELECT count(*) FROM runtime.runtime_job_outbox),\
+             (SELECT count(*) FROM runtime.runtime_events WHERE event_type='runtime_job_wake_requested')",
+            &[],
+        ).unwrap();
+        assert_eq!(response["checked"].as_u64(), Some(waiting as u64));
+        assert_eq!(
+            response["waiters"].as_array().map_or(0, Vec::len),
+            if terminal { waiting } else { 0 }
+        );
+        assert_eq!(
+            row.get::<_, i64>(2),
+            if terminal { waiting as i64 } else { 0 },
+            "a repeated pass must not append duplicate wake events"
+        );
+        measurements.push(serde_json::json!({
+            "pass": pass,
+            "elapsedMs": elapsed_ms,
+            "responseBytes": response["pageBytes"],
+            "pageQueries": response["pages"],
+            "databaseSessionsBefore": sessions_before,
+            "databaseSessionsAfter": sessions_after,
+            "databaseSessions": sessions_after - sessions_before,
+            "pgStatStatementsBefore": checkpoint_profile_statement_snapshot(&statements_before),
+            "pgStatStatementsAfter": checkpoint_profile_statement_snapshot(&statements_after),
+            "pgStatStatements": checkpoint_profile_statement_delta(&statements_before, &statements_after),
+            "checked": response["checked"],
+            "returnedWaiters": response["waiters"].as_array().map_or(0, Vec::len),
+            "dispositions": dispositions,
+            "waitingRows": row.get::<_, i64>(0),
+            "outboxRows": row.get::<_, i64>(1),
+            "wakeEventRows": row.get::<_, i64>(2),
+        }));
+    }
+    println!(
+        "CHECKPOINT_PROFILE_JSON={}",
+        serde_json::json!({
+            "waiting": waiting,
+            "source": if terminal { "terminal" } else { "nonterminal" },
+            "pageSize": 256,
+            "minimumPageQueries": waiting / 256 + 1,
+            "measurementBoundary": "in_process_protocol_call_includes_handler_json_encode_and_test_helper_json_decode_excludes_http_transport",
+            "measurements": measurements,
+        })
+    );
+}
+
+fn checkpoint_profile_statements(
+    client: &mut Client,
+) -> std::collections::BTreeMap<String, (String, i64, i64, f64, i64, i64)> {
+    client
+        .query(
+            "SELECT queryid::text,query,calls::bigint,rows::bigint,total_exec_time,shared_blks_hit,shared_blks_read \
+             FROM pg_stat_statements WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database()) \
+             AND query NOT ILIKE '%pg_stat_statements%' \
+             AND (query ILIKE '%checkpoints%' OR query ILIKE '%runtime_jobs%' OR query ILIKE '%runtime_events%')",
+            &[],
+        )
+        .expect("pg_stat_statements must be installed by the isolated profile harness")
+        .into_iter()
+        .map(|row| {
+            (
+                row.get::<_, String>(0),
+                (
+                    row.get(1),
+                    row.get(2),
+                    row.get(3),
+                    row.get(4),
+                    row.get(5),
+                    row.get(6),
+                ),
+            )
+        })
+        .collect()
+}
+
+fn checkpoint_profile_statement_delta(
+    before: &std::collections::BTreeMap<String, (String, i64, i64, f64, i64, i64)>,
+    after: &std::collections::BTreeMap<String, (String, i64, i64, f64, i64, i64)>,
+) -> Vec<serde_json::Value> {
+    after
+        .iter()
+        .filter_map(|(query_id, (query, calls, rows, total_ms, hits, reads))| {
+            let baseline = before.get(query_id);
+            let calls_delta = calls - baseline.map_or(0, |value| value.1);
+            (calls_delta > 0).then(|| {
+                serde_json::json!({
+                    "queryId": query_id,
+                    "query": query,
+                    "calls": calls_delta,
+                    "rows": rows - baseline.map_or(0, |value| value.2),
+                    "totalExecMs": total_ms - baseline.map_or(0.0, |value| value.3),
+                    "sharedBlocksHit": hits - baseline.map_or(0, |value| value.4),
+                    "sharedBlocksRead": reads - baseline.map_or(0, |value| value.5),
+                })
+            })
+        })
+        .collect()
+}
+
+fn checkpoint_profile_statement_snapshot(
+    snapshot: &std::collections::BTreeMap<String, (String, i64, i64, f64, i64, i64)>,
+) -> Vec<serde_json::Value> {
+    snapshot
+        .iter()
+        .map(|(query_id, (query, calls, rows, total_ms, hits, reads))| {
+            serde_json::json!({
+                "queryId": query_id,
+                "query": query,
+                "calls": calls,
+                "rows": rows,
+                "totalExecMs": total_ms,
+                "sharedBlocksHit": hits,
+                "sharedBlocksRead": reads,
+            })
+        })
+        .collect()
+}
+
 fn session_record(
     agent_run_id: &str,
     session_id: &str,
@@ -89,7 +567,12 @@ fn session_record(
     }
 }
 
-fn shared_runtime_store_contract<S: RuntimeStore + AgentRuntimeSnapshotStorePort>(store: &S) {
+fn shared_runtime_store_contract<
+    S: RuntimeStore + AgentRuntimeSnapshotStorePort + RuntimeStoreTransactionPort,
+>(
+    store: &S,
+) {
+    shared_waiter_index_contract(store);
     store
         .save_checkpoint(CheckpointRecord {
             checkpoint_id: "checkpoint:shared".to_string(),
@@ -120,6 +603,128 @@ fn shared_runtime_store_contract<S: RuntimeStore + AgentRuntimeSnapshotStorePort
             .as_deref(),
         Some("{\"sharedSnapshot\":true}")
     );
+}
+
+fn shared_waiter_index_contract<S: RuntimeStore + RuntimeStoreTransactionPort>(store: &S) {
+    use centaeris_core::runtime::contracts::{
+        CheckpointKindV1, RuntimeAgentRunIdentityV1, RuntimeAwaitJobCheckpointV1, RuntimeJobWaitV1,
+    };
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let wait = RuntimeAwaitJobCheckpointV1::new(
+        &RuntimeAgentRunIdentityV1 {
+            agent_run_id: "agent_waiter_contract".into(),
+            execution_id: "execution_waiter_contract".into(),
+            authorization_digest: digest.clone(),
+        },
+        "turn_waiter_contract",
+        (0..257)
+            .map(|index| RuntimeJobWaitV1 {
+                tool_call_id: format!("call_{index:04}"),
+                source_tool_name: "read_result".into(),
+                tool_definition_digest: digest.clone(),
+                job_id: if index == 256 {
+                    "source:other"
+                } else {
+                    "source:target"
+                }
+                .into(),
+                job_kind: "contract.test".into(),
+            })
+            .collect(),
+    )
+    .unwrap();
+    let checkpoint = CheckpointRecord {
+        checkpoint_id: "checkpoint:waiter_contract".into(),
+        kind: CheckpointKindV1::Wait,
+        session_id: "session_waiter_contract".into(),
+        turn_id: wait.turn_id.clone(),
+        status: "waiting".into(),
+        done_reason: Some("runtime_job".into()),
+        updated_at_ms: 1,
+        payload_json: serde_json::to_string(&wait).unwrap(),
+    };
+    let event = RuntimeEvent {
+        event_id: "event_waiter_contract".into(),
+        session_id: checkpoint.session_id.clone(),
+        task_id: Some(checkpoint.turn_id.clone()),
+        event_type: "runtime_wait_changed.v1".into(),
+        at_ms: 1,
+        visibility: EventVisibility::Internal,
+        payload_json: "{\"status\":\"waiting\"}".into(),
+    };
+    store.append_event(event.clone()).unwrap();
+    let mut conflicting = event.clone();
+    conflicting.payload_json = "{}".into();
+    assert!(store
+        .save_wait_checkpoint(SaveWaitCheckpointRequest {
+            checkpoint: checkpoint.clone(),
+            event: conflicting.clone()
+        })
+        .is_err());
+    assert!(store
+        .load_checkpoint_by_turn(&checkpoint.session_id, &checkpoint.turn_id)
+        .unwrap()
+        .is_none());
+    assert!(store
+        .list_runtime_job_waiters(Some("source:target"), None, 256)
+        .unwrap()
+        .is_empty());
+    for _ in 0..2 {
+        store
+            .save_wait_checkpoint(SaveWaitCheckpointRequest {
+                checkpoint: checkpoint.clone(),
+                event: event.clone(),
+            })
+            .unwrap();
+    }
+    let first = store.list_runtime_job_waiters(None, None, 256).unwrap();
+    assert_eq!(first.len(), 256);
+    let second = store
+        .list_runtime_job_waiters(None, Some(&first.last().unwrap().cursor), 256)
+        .unwrap();
+    assert_eq!(second.len(), 1);
+    assert_eq!(
+        second[0].cursor.checkpoint_id,
+        first[0].cursor.checkpoint_id
+    );
+    assert_eq!(second[0].source_job_id, "source:other");
+    assert_eq!(
+        store
+            .list_runtime_job_waiters(Some("source:other"), None, 256)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(store
+        .list_runtime_job_waiters(Some("source:absent"), None, 256)
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .consume_wait_checkpoint(ConsumeWaitCheckpointRequest {
+            checkpoint: checkpoint.clone(),
+            events: vec![conflicting]
+        })
+        .is_err());
+    assert_eq!(
+        store
+            .list_runtime_job_waiters(Some("source:target"), None, 256)
+            .unwrap()
+            .len(),
+        256
+    );
+    let mut consumed = event;
+    consumed.event_id = "event_waiter_contract_consumed".into();
+    consumed.payload_json = "{\"status\":\"resumed\"}".into();
+    store
+        .consume_wait_checkpoint(ConsumeWaitCheckpointRequest {
+            checkpoint,
+            events: vec![consumed],
+        })
+        .unwrap();
+    assert!(store
+        .list_runtime_job_waiters(None, None, 256)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -239,6 +844,274 @@ fn postgres_runtime_job_wait_is_notified_and_closes_lost_wakeups() {
     sender.join().expect("join irrelevant notifier");
     assert!(!idle.ready);
     assert_eq!(idle.next_run_at_ms, None);
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_runtime_store_clones_reuse_one_short_lived_connection() {
+    let _guard = TEST_LOCK.lock().expect("Postgres test lock");
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new(&url).expect("open Postgres store");
+    let first_backend: i32 = store
+        .with_client(|client| {
+            client
+                .query_one("SELECT pg_backend_pid()", &[])
+                .map(|row| row.get(0))
+                .map_err(|error| error.to_string())
+        })
+        .expect("first pooled operation");
+    let second_backend: i32 = store
+        .clone()
+        .with_client(|client| {
+            client
+                .query_one("SELECT pg_backend_pid()", &[])
+                .map(|row| row.get(0))
+                .map_err(|error| error.to_string())
+        })
+        .expect("second pooled operation through clone");
+    assert_eq!(
+        first_backend, second_backend,
+        "sequential short operations through Store clones must reuse the shared pool"
+    );
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_runtime_store_pool_can_drop_inside_tokio_runtime() {
+    let _guard = TEST_LOCK.lock().expect("Postgres test lock");
+    let url = test_url();
+    reset_store(&url);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build Tokio runtime");
+    let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.block_on(async {
+            let store = PostgresRuntimeStore::new(&url).expect("open pooled Postgres store");
+            store
+                .with_client(|client| {
+                    client
+                        .simple_query("SELECT 1")
+                        .map_err(|error| error.to_string())?;
+                    Ok(())
+                })
+                .expect("populate idle pool");
+            drop(store);
+        });
+    }));
+    assert!(
+        dropped.is_ok(),
+        "pooled clients must be safe to drop inside Tokio"
+    );
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn recovery_orchestration_releases_capacity_before_followup_store_work() {
+    let _guard = TEST_LOCK.lock().expect("Postgres test lock");
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new_with_pool_limits(&url, 1, Duration::from_millis(50))
+        .expect("open capacity-one Postgres store");
+    let mut setup = Client::connect(&url, NoTls).expect("connect recovery setup");
+    setup
+        .batch_execute(
+            "CREATE TABLE runtime.app_core_sessionevent(\
+             sequence integer NOT NULL, session_id varchar(64) NOT NULL, payload jsonb NOT NULL)",
+        )
+        .expect("create recovery event table");
+    let event = session_record(
+        "agent_run_recovery_pool",
+        "session_recovery_pool",
+        1,
+        SessionRecordType::AgentRunStarted,
+        serde_json::json!({"userObjective":"recover"}),
+        1,
+    );
+    let wire = centaeris_core::session::wire_record_value(&event).expect("encode recovery wire");
+    setup
+        .execute(
+            "INSERT INTO runtime.app_core_sessionevent(sequence,session_id,payload) VALUES(1,$1,$2::text::jsonb)",
+            &[&"session_recovery_pool", &wire.to_string()],
+        )
+        .expect("insert recovery event");
+    drop(setup);
+    crate::with_recovery_session_events(&store, "session_recovery_pool", 1, |events| {
+        assert_eq!(events.len(), 1);
+        store.with_client(|client| {
+            client
+                .simple_query("SELECT 1")
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })
+    })
+    .expect("real recovery follow-up gets the released capacity-one lease");
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_runtime_store_pool_checkout_is_bounded() {
+    use std::sync::{Arc, Barrier};
+
+    let _guard = TEST_LOCK.lock().expect("Postgres test lock");
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new_with_pool_limits(&url, 1, Duration::from_millis(50))
+        .expect("open bounded Postgres store");
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let holder_store = store.clone();
+    let holder_entered = entered.clone();
+    let holder_release = release.clone();
+    let holder = std::thread::spawn(move || {
+        holder_store.with_client(|client| {
+            client
+                .simple_query("SELECT 1")
+                .map_err(|error| error.to_string())?;
+            holder_entered.wait();
+            holder_release.wait();
+            Ok(())
+        })
+    });
+    entered.wait();
+    let exhausted = store.with_client(|_| Ok(()));
+    release.wait();
+    holder
+        .join()
+        .expect("join pool holder")
+        .expect("pool holder");
+    assert_eq!(
+        exhausted.unwrap_err(),
+        "Postgres connection pool checkout timed out"
+    );
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_runtime_store_discards_failed_and_panicked_leases_without_replay() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let _guard = TEST_LOCK.lock().expect("Postgres test lock");
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new_with_pool_limits(&url, 1, Duration::from_millis(50))
+        .expect("open bounded Postgres store");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed_calls = calls.clone();
+    assert_eq!(
+        store
+            .with_client(move |client| {
+                observed_calls.fetch_add(1, Ordering::SeqCst);
+                client
+                    .simple_query("SELECT 1")
+                    .map_err(|error| error.to_string())?;
+                Err::<(), _>("operation result is unknown".to_string())
+            })
+            .unwrap_err(),
+        "operation result is unknown"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "failed SQL operation must not be replayed"
+    );
+
+    let panic_store = store.clone();
+    let panicked = std::thread::spawn(move || {
+        let _ = panic_store.with_client::<()>(|_| panic!("test operation panic"));
+    })
+    .join();
+    assert!(panicked.is_err());
+    store
+        .with_client(|client| {
+            client
+                .simple_query("SELECT 1")
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })
+        .expect("panic must release the only connection slot");
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_runtime_store_replaces_closed_idle_connection_before_operation() {
+    let _guard = TEST_LOCK.lock().expect("Postgres test lock");
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new_with_pool_limits(&url, 1, Duration::from_millis(50))
+        .expect("open bounded Postgres store");
+    let first_backend: i32 = store
+        .with_client(|client| {
+            client
+                .query_one("SELECT pg_backend_pid()", &[])
+                .map(|row| row.get(0))
+                .map_err(|error| error.to_string())
+        })
+        .expect("load pooled backend identity");
+    let mut administrator = Client::connect(&url, NoTls).expect("connect test administrator");
+    assert!(administrator
+        .query_one("SELECT pg_terminate_backend($1)", &[&first_backend])
+        .expect("terminate pooled backend")
+        .get::<_, bool>(0));
+    std::thread::sleep(Duration::from_millis(20));
+    let replacement_backend: i32 = store
+        .with_client(|client| {
+            client
+                .query_one("SELECT pg_backend_pid()", &[])
+                .map(|row| row.get(0))
+                .map_err(|error| error.to_string())
+        })
+        .expect("closed idle connection is replaced before operation");
+    assert_ne!(first_backend, replacement_backend);
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_control_and_listener_connections_do_not_consume_the_ordinary_pool() {
+    use std::sync::{Arc, Barrier};
+
+    let _guard = TEST_LOCK.lock().expect("Postgres test lock");
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new_with_pool_limits(&url, 1, Duration::from_millis(50))
+        .expect("open bounded Postgres store");
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let holder_store = store.clone();
+    let holder_entered = entered.clone();
+    let holder_release = release.clone();
+    let holder = std::thread::spawn(move || {
+        holder_store.with_client(|_| {
+            holder_entered.wait();
+            holder_release.wait();
+            Ok(())
+        })
+    });
+    entered.wait();
+    let control = store.with_execution_control_client(|client| {
+        client
+            .simple_query("SELECT 1")
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    });
+    let listener =
+        store.wait_for_runtime_jobs(&["worker.noop".to_string()], Duration::from_millis(10));
+    let listener_is_clean = store.with_listener_client(|client| {
+        client
+            .query_one("SELECT count(*) FROM pg_listening_channels()", &[])
+            .map(|row| row.get::<_, i64>(0) == 0)
+            .map_err(|error| error.to_string())
+    });
+    release.wait();
+    holder
+        .join()
+        .expect("join pool holder")
+        .expect("pool holder");
+    control.expect("control capacity remains available");
+    assert!(!listener.expect("listener capacity remains available").ready);
+    assert!(listener_is_clean.expect("inspect returned listener connection"));
 }
 
 #[test]
@@ -448,7 +1321,33 @@ fn postgres_runtime_store_persists_core_state_and_claims_jobs_once() {
             &[],
         )
         .expect("tables");
-    assert_eq!(tables.len(), 14); // Includes session-scoped observation contents and manifests.
+    let tables = tables
+        .into_iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        tables,
+        [
+            "checkpoints",
+            "dead_letters",
+            "external_context_links",
+            "external_context_objects",
+            "model_observation_contents",
+            "model_observation_manifests",
+            "resource_claims",
+            "runtime_events",
+            "runtime_job_outbox",
+            "runtime_job_waiters",
+            "execution_job_tenants",
+            "runtime_jobs",
+            "runtime_turn_supplement_queues",
+            "schema_migrations",
+            "session_runtime_snapshots",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    );
 }
 
 #[test]
@@ -631,6 +1530,16 @@ fn postgres_turn_supplement_queue_is_lease_fenced_and_cancel_closes_admission() 
 #[ignore = "requires destructive dedicated Postgres test database"]
 fn postgres_session_terminal_append_fences_reclaimed_lease_owner() {
     let _guard = TEST_LOCK.lock().expect("Postgres test lock");
+    for terminal_type in [
+        SessionRecordType::AgentRunCompleted,
+        SessionRecordType::AgentRunFailed,
+        SessionRecordType::AgentRunInterrupted,
+    ] {
+        terminal_append_consumes_waiter_contract(terminal_type);
+    }
+}
+
+fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
     let url = test_url();
     reset_store(&url);
     let mut setup = Client::connect(&url, NoTls).expect("connect test Postgres");
@@ -703,8 +1612,8 @@ fn postgres_session_terminal_append_fences_reclaimed_lease_owner() {
             started_at_ms: now_ms,
         })
         .expect("start old lease");
-    let session_log = PostgresSessionLog::new(
-        url.clone(),
+    let pooled_sessions_before_log = postgres_peer_session_count(&url);
+    let session_log = store.session_log(
         "workspace_fenced_terminal".to_string(),
         session_id.to_string(),
         "fence terminal".to_string(),
@@ -737,6 +1646,11 @@ fn postgres_session_terminal_append_fences_reclaimed_lease_owner() {
             ],
         ))
         .expect("append started records");
+    assert_eq!(
+        postgres_peer_session_count(&url),
+        pooled_sessions_before_log,
+        "SessionLog append must borrow briefly from the Store pool instead of retaining a per-run connection"
+    );
     store
         .reclaim_expired_runtime_job_leases(now_ms + 11)
         .expect("reclaim old lease");
@@ -767,7 +1681,7 @@ fn postgres_session_terminal_append_fences_reclaimed_lease_owner() {
             "messageId": "message:turn_pg_fenced_terminal:assistant",
             "modelMarkdown": "done",
             "artifactRefs": [],
-            "status": "done"
+            "status": if terminal_type == SessionRecordType::AgentRunCompleted { "done" } else { "error" }
         }),
         now_ms + 13,
     );
@@ -777,11 +1691,72 @@ fn postgres_session_terminal_append_fences_reclaimed_lease_owner() {
             agent_run_id,
             session_id,
             4,
-            SessionRecordType::AgentRunCompleted,
-            serde_json::json!({"doneReason": "finalized"}),
+            terminal_type,
+            match terminal_type {
+                SessionRecordType::AgentRunCompleted => {
+                    serde_json::json!({"doneReason": "finalized"})
+                }
+                SessionRecordType::AgentRunFailed => {
+                    serde_json::json!({"reasonType": "runtime_internal_error", "message": "sandbox unavailable"})
+                }
+                SessionRecordType::AgentRunInterrupted => {
+                    serde_json::json!({"reasonType": "cancelled", "message": "cancelled", "retryable": false})
+                }
+                _ => unreachable!(),
+            },
             now_ms + 13,
         ),
     ];
+    use centaeris_core::runtime::contracts::{
+        CheckpointKindV1, RuntimeAgentRunIdentityV1, RuntimeAwaitJobCheckpointV1, RuntimeJobWaitV1,
+    };
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let wait = RuntimeAwaitJobCheckpointV1::new(
+        &RuntimeAgentRunIdentityV1 {
+            agent_run_id: agent_run_id.into(),
+            execution_id: "execution_terminal_wait".into(),
+            authorization_digest: digest.clone(),
+        },
+        "turn_terminal_wait",
+        vec![RuntimeJobWaitV1 {
+            tool_call_id: "call_terminal_wait".into(),
+            source_tool_name: "read_result".into(),
+            tool_definition_digest: digest,
+            job_id: "source:terminal_wait".into(),
+            job_kind: "subagent.run".into(),
+        }],
+    )
+    .unwrap();
+    let checkpoint = CheckpointRecord {
+        checkpoint_id: "checkpoint:terminal_wait".into(),
+        kind: CheckpointKindV1::Wait,
+        session_id: session_id.into(),
+        turn_id: wait.turn_id.clone(),
+        status: "waiting".into(),
+        done_reason: Some("runtime_job".into()),
+        updated_at_ms: now_ms,
+        payload_json: serde_json::to_string(&wait).unwrap(),
+    };
+    store
+        .save_wait_checkpoint(SaveWaitCheckpointRequest {
+            checkpoint: checkpoint.clone(),
+            event: RuntimeEvent {
+                event_id: "terminal_wait:waiting".into(),
+                session_id: session_id.into(),
+                task_id: Some(wait.turn_id.clone()),
+                event_type: "runtime_wait_changed.v1".into(),
+                at_ms: now_ms,
+                visibility: EventVisibility::Internal,
+                payload_json: "{}".into(),
+            },
+        })
+        .unwrap();
+    assert!(
+        store
+            .repair_terminal_runtime_job_waits(session_id, agent_run_id)
+            .is_err(),
+        "a live owner cannot be repaired as terminal"
+    );
     let old_error = runtime
         .block_on(session_log.append_session_records_with_runtime_job_lease(
             agent_run_id,
@@ -794,6 +1769,64 @@ fn postgres_session_terminal_append_fences_reclaimed_lease_owner() {
         ))
         .expect_err("reclaimed owner must not commit terminal records");
     assert_eq!(old_error, RUNTIME_JOB_LEASE_FENCE_REJECTED);
+
+    assert_eq!(
+        store
+            .list_runtime_job_waiters(Some("source:terminal_wait"), None, 10)
+            .unwrap()
+            .len(),
+        1,
+        "a fenced owner must not consume the wait"
+    );
+    // A conflicting consumption event must roll back the terminal append too.
+    let abandoned_id = format!("runtime_wait:{}:abandoned", wait.continuation_id);
+    store
+        .append_event(RuntimeEvent {
+            event_id: abandoned_id.clone(),
+            session_id: session_id.into(),
+            task_id: Some(wait.turn_id.clone()),
+            event_type: "runtime_wait_changed.v1".into(),
+            at_ms: now_ms,
+            visibility: EventVisibility::Internal,
+            payload_json: "{}".into(),
+        })
+        .unwrap();
+    runtime
+        .block_on(session_log.append_session_records_with_runtime_job_lease(
+            agent_run_id,
+            &terminal,
+            &RuntimeJobLeaseFence {
+                job_id: "agent_run.lifecycle:agent_run_fenced_terminal".into(),
+                job_kind: "agent_run.lifecycle".into(),
+                lease_owner: "new_owner".into(),
+            },
+        ))
+        .expect_err("consumption conflict must reject the whole terminal transaction");
+    let mut observer = Client::connect(&url, NoTls).unwrap();
+    assert_eq!(
+        observer
+            .query_one(
+                "SELECT count(*) FROM public.app_core_sessionevent WHERE agent_run_id=$1",
+                &[&agent_run_id]
+            )
+            .unwrap()
+            .get::<_, i64>(0),
+        2
+    );
+    assert_eq!(
+        store
+            .list_runtime_job_waiters(Some("source:terminal_wait"), None, 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    observer
+        .execute(
+            "DELETE FROM runtime.runtime_events WHERE event_id=$1",
+            &[&abandoned_id],
+        )
+        .unwrap();
+    drop(observer);
 
     runtime
         .block_on(session_log.append_session_records_with_runtime_job_lease(
@@ -815,6 +1848,61 @@ fn postgres_session_terminal_append_fences_reclaimed_lease_owner() {
         .expect("count session records")
         .get(0);
     assert_eq!(count, 4);
+    assert!(store
+        .list_runtime_job_waiters(Some("source:terminal_wait"), None, 10)
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .load_checkpoint_by_turn(session_id, &wait.turn_id)
+        .unwrap()
+        .is_none());
+    for _ in 0..2 {
+        store
+            .repair_terminal_runtime_job_waits(session_id, agent_run_id)
+            .unwrap();
+    }
+    let abandoned_id = format!("runtime_wait:{}:abandoned", wait.continuation_id);
+    let rows = audit
+        .query(
+            "SELECT payload_json FROM runtime.runtime_events WHERE event_id=$1",
+            &[&abandoned_id],
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    let abandoned: serde_json::Value =
+        serde_json::from_str(rows[0].get::<_, String>(0).as_str()).unwrap();
+    assert_eq!(abandoned["status"], "abandoned");
+    assert_eq!(abandoned["transitionReason"], "agent_run_terminal");
+    // Reproduce a leftover checkpoint belonging to an already committed terminal.
+    store.save_checkpoint(checkpoint).unwrap();
+    store
+        .repair_terminal_runtime_job_waits(session_id, agent_run_id)
+        .unwrap();
+    assert!(store
+        .list_runtime_job_waiters(Some("source:terminal_wait"), None, 10)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        audit
+            .query_one(
+                "SELECT count(*) FROM runtime.runtime_events WHERE event_id=$1",
+                &[&abandoned_id]
+            )
+            .unwrap()
+            .get::<_, i64>(0),
+        1
+    );
+}
+
+fn postgres_peer_session_count(url: &str) -> i64 {
+    let mut observer = Client::connect(url, NoTls).expect("connect session observer");
+    observer
+        .query_one(
+            "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()",
+            &[],
+        )
+        .expect("count peer Postgres sessions")
+        .get(0)
 }
 
 #[test]
@@ -856,8 +1944,7 @@ fn postgres_model_request_batch_deduplicates_and_hydrates_observations() {
     let store = PostgresRuntimeStore::new(&url).expect("open Postgres store");
     let session_id = "session_model_request";
     let agent_run_id = "agent_run_model_request";
-    let session_log = PostgresSessionLog::new(
-        url.clone(),
+    let session_log = store.session_log(
         "workspace_model_request".to_string(),
         session_id.to_string(),
         "dedup".to_string(),
@@ -1139,6 +2226,25 @@ fn postgres_model_request_batch_deduplicates_and_hydrates_observations() {
 
 #[test]
 #[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_runtime_store_validates_waiter_owner_index_on_reopen() {
+    let _guard = TEST_LOCK.lock().expect("Postgres test lock");
+    let url = test_url();
+    reset_store(&url);
+    drop(PostgresRuntimeStore::new(&url).expect("fresh schema must validate"));
+    drop(PostgresRuntimeStore::new(&url).expect("existing schema must validate"));
+    let mut client = Client::connect(&url, NoTls).expect("connect");
+    client.batch_execute(
+        "DROP INDEX runtime.idx_runtime_job_waiters_owner; CREATE INDEX idx_runtime_job_waiters_owner ON runtime.runtime_job_waiters(session_id,agent_run_id,checkpoint_id)"
+    ).expect("replace with wrong column order");
+    let error = PostgresRuntimeStore::new(&url).expect_err("owner index order drift must fail");
+    assert!(
+        error.contains("index definition mismatch: idx_runtime_job_waiters_owner"),
+        "{error}"
+    );
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
 fn postgres_runtime_store_rejects_schema_drift() {
     let _guard = TEST_LOCK.lock().expect("Postgres test lock");
     let url = test_url();
@@ -1150,4 +2256,115 @@ fn postgres_runtime_store_rejects_schema_drift() {
         .expect("corrupt schema");
     let error = PostgresRuntimeStore::new(&url).expect_err("schema drift must fail");
     assert!(error.contains("table definition mismatch"));
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database and default execution limits"]
+fn hosted_execution_capacity_is_shared_across_replicas_and_released_on_yield() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let limits = crate::execution_capacity::ExecutionCapacity::from_env().unwrap();
+    assert_eq!((limits.global, limits.tenant), (8, 4));
+    let url = test_url();
+    reset_store(&url);
+    let replicas = [
+        PostgresRuntimeStore::new(&url).unwrap(),
+        PostgresRuntimeStore::new(&url).unwrap(),
+    ];
+    for tenant in ["a", "b"] {
+        for index in 0..6 {
+            let id = format!("agent_run.lifecycle:agent_run_{tenant}_{index}");
+            let mut record = job(&id, &id);
+            record.job_kind = "agent_run.lifecycle".to_string();
+            replicas[0]
+                .schedule_worker_job(
+                    ScheduleRuntimeJobRequest {
+                        job: record.clone(),
+                    },
+                    Some(tenant),
+                )
+                .unwrap();
+            assert!(replicas[1]
+                .schedule_worker_job(ScheduleRuntimeJobRequest { job: record }, Some("other"))
+                .is_err());
+        }
+    }
+    fn claim(store: &PostgresRuntimeStore, index: usize) -> Result<Vec<RuntimeJobRecord>, String> {
+        store.claim_worker_jobs(ClaimDueRuntimeJobsRequest {
+            now_ms: 1,
+            worker_id: format!("worker:capacity:{index}"),
+            job_id: None,
+            job_kind: Some("agent_run.lifecycle".to_string()),
+            session_id: None,
+            limit: 1,
+            lease_ms: 60_000,
+        })
+    }
+    let mut claimed = std::thread::scope(|scope| {
+        let handles = (0..16)
+            .map(|index| {
+                let store = replicas[index % 2].clone();
+                scope.spawn(move || claim(&store, index))
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .flat_map(|handle| match handle.join().unwrap() {
+                Ok(jobs) => jobs,
+                Err(error) if error == "execution claim busy" => Vec::new(),
+                Err(error) => panic!("unexpected claim failure: {error}"),
+            })
+            .collect::<Vec<_>>()
+    });
+    loop {
+        let jobs = claim(&replicas[1], 100).unwrap();
+        if jobs.is_empty() {
+            break;
+        }
+        claimed.extend(jobs);
+        assert!(claimed.len() <= 8);
+    }
+    assert_eq!(claimed.len(), 8);
+    assert_eq!(
+        claimed
+            .iter()
+            .filter(|job| job.job_id.contains("_a_"))
+            .count(),
+        4
+    );
+    assert_eq!(
+        claimed
+            .iter()
+            .filter(|job| job.job_id.contains("_b_"))
+            .count(),
+        4
+    );
+    let waiting = replicas[1]
+        .wait_for_runtime_jobs(
+            &["agent_run.lifecycle".to_string()],
+            Duration::from_millis(10),
+        )
+        .unwrap();
+    assert!(!waiting.ready);
+    let released = &claimed[0];
+    let now = released.heartbeat_at_ms.unwrap() + 1;
+    replicas[0]
+        .yield_runtime_job(YieldRuntimeJobRequest {
+            job_id: released.job_id.clone(),
+            lease_owner: released.lease_owner.clone().unwrap(),
+            yielded_at_ms: now,
+            run_at_ms: now + 60_000,
+            transition_reason: "question_wait".to_string(),
+        })
+        .unwrap();
+    assert!(
+        replicas[1]
+            .wait_for_runtime_jobs(
+                &["agent_run.lifecycle".to_string()],
+                Duration::from_millis(10)
+            )
+            .unwrap()
+            .ready
+    );
+    assert_eq!(claim(&replicas[1], 101).unwrap().len(), 1);
+    assert!(claim(&replicas[0], 102).unwrap().is_empty());
 }

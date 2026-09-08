@@ -13,7 +13,7 @@ use centaeris_core::tool::layer::DynamicToolProvider;
 use centaeris_core::tool::limits::ToolContractBudget;
 use centaeris_core::tool::DynamicToolContract;
 use centaeris_mcp::{
-    bounded_stdio_transport, connect_mcp_server_transport, connect_streamable_http_mcp_server,
+    bounded_io_transport, connect_mcp_server_transport, connect_streamable_http_mcp_server,
     lazy_mcp_server_binding, valid_bearer_token, McpConnectError, McpServerConnector,
 };
 use serde::{Deserialize, Serialize};
@@ -224,6 +224,58 @@ impl McpCredentialResolver {
     }
 }
 
+struct DockerMcpTransport {
+    child: crate::docker_engine::ExecChild,
+    transport: centaeris_mcp::BoundedIoTransport<
+        crate::docker_engine::ExecReader,
+        crate::docker_engine::ExecWriter,
+    >,
+    stderr: tokio::task::JoinHandle<()>,
+}
+impl DockerMcpTransport {
+    fn new(mut child: crate::docker_engine::ExecChild) -> Result<Self, String> {
+        let stdout = child.stdout.take().ok_or("MCP stdout missing")?;
+        let stdin = child.stdin.take().ok_or("MCP stdin missing")?;
+        let mut stderr = child.stderr.take().ok_or("MCP stderr missing")?;
+        let stderr = tokio::spawn(async move {
+            // MCP stderr was discarded by the CLI transport. Drain it without
+            // buffering so diagnostic output cannot stall protocol stdout.
+            let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
+        });
+        Ok(Self {
+            child,
+            transport: bounded_io_transport(stdout, stdin),
+            stderr,
+        })
+    }
+}
+impl rmcp::transport::Transport<rmcp::RoleClient> for DockerMcpTransport {
+    type Error = std::io::Error;
+    fn send(
+        &mut self,
+        item: rmcp::service::TxJsonRpcMessage<rmcp::RoleClient>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.transport.send(item)
+    }
+    async fn receive(&mut self) -> Option<rmcp::service::RxJsonRpcMessage<rmcp::RoleClient>> {
+        self.transport.receive().await
+    }
+    async fn close(&mut self) -> Result<(), Self::Error> {
+        let result = self.transport.close().await;
+        // Closing the attach stream is not a remote kill. The execution host
+        // owns sandbox teardown; no MCP command is retried by this adapter.
+        self.child.disconnect();
+        self.stderr.abort();
+        result
+    }
+}
+impl Drop for DockerMcpTransport {
+    fn drop(&mut self) {
+        self.child.disconnect();
+        self.stderr.abort();
+    }
+}
+
 struct WorkspaceMcpConnector {
     plugin_name: String,
     server: McpServerDeclarationV1,
@@ -270,19 +322,20 @@ impl McpServerConnector for WorkspaceMcpConnector {
                     .await?
                 }
                 McpTransportV1::Stdio { program, args } => {
-                    let command = self
+                    let request = self
                         .docker
-                        .mcp_stdio_command(
+                        .mcp_exec_request(
                             self.plugin_name.as_str(),
                             program.as_str(),
                             args.as_slice(),
                         )
                         .map_err(McpConnectError::Unavailable)?;
-                    let transport = bounded_stdio_transport(command).map_err(|error| {
-                        McpConnectError::Unavailable(format!(
-                            "start MCP stdio server failed: {error}"
-                        ))
-                    })?;
+                    let child = request
+                        .spawn_async()
+                        .await
+                        .map_err(McpConnectError::Unavailable)?;
+                    let transport =
+                        DockerMcpTransport::new(child).map_err(McpConnectError::Unavailable)?;
                     connect_mcp_server_transport(
                         self.plugin_name.as_str(),
                         self.server.clone(),

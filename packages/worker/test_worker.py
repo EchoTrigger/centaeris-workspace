@@ -2,10 +2,14 @@ import os
 import http.client
 import io
 import json
+import re
+import subprocess
+import sys
 import threading
 import unittest
 import urllib.error
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 os.environ.update(
@@ -37,6 +41,182 @@ def lifecycle_fixture(agentRunId="agent_run_1"):
 
 
 class WorkerContractTests(unittest.TestCase):
+    def test_terminal_dispatcher_does_not_acknowledge_partial_fanout(self):
+        cursor = {"checkpointId": "checkpoint:dense", "toolCallId": "call:0255"}
+        calls = []
+        pages = iter([
+            {"disposition": "woken", "checked": 256, "waiters": [], "next": cursor},
+            {"disposition": "woken", "checked": 1, "waiters": [], "next": None},
+        ])
+        def runtime(path, body):
+            calls.append((path, body))
+            if path.endswith("/pending"):
+                return {"events": [{"jobId": "job_1", "eventType": "runtime_job.terminal", "publishedAtMs": None, "generation": 0}]}
+            if path.endswith("/wake-waiter"):
+                return next(pages)
+            return {"disposition": "published"}
+        with patch.object(worker, "runtime_request", side_effect=runtime):
+            dispatch = worker.TerminalDispatcher()
+            dispatch()
+            self.assertFalse(any(path.endswith("/published") for path, _ in calls))
+            dispatch()
+        wakes = [body for path, body in calls if path.endswith("/wake-waiter")]
+        self.assertIsNone(wakes[0]["after"])
+        self.assertEqual(wakes[1]["after"], cursor)
+        self.assertEqual(sum(path.endswith("/published") for path, _ in calls), 1)
+        self.assertEqual(dispatch.cursors, {})
+
+    def test_waiter_reconcile_preserves_cursor_across_request_failure(self):
+        cursor = {"checkpointId": "checkpoint:dense", "toolCallId": "call:0255"}
+        replies = iter([
+            {"disposition": "reconciled", "checked": 256, "waiters": [], "next": cursor},
+            RuntimeError("waiter unavailable"),
+            {"disposition": "reconciled", "checked": 1, "waiters": [], "next": None},
+        ])
+        after = []
+        def runtime(path, body):
+            if path.endswith("reconcile-waiters"):
+                after.append(body["after"])
+                reply = next(replies)
+                if isinstance(reply, Exception):
+                    raise reply
+                return reply
+            return {"reclaimed": 0}
+        with patch.object(worker, "runtime_request", side_effect=runtime), patch.object(worker, "api_request", return_value={"activeNext": None, "deadLetterNext": None}):
+            scan = worker.LifecycleReconciler()
+            scan()
+            with self.assertRaisesRegex(RuntimeError, "waiter unavailable"):
+                scan()
+            scan()
+        self.assertEqual(after, [None, cursor, cursor])
+        self.assertIsNone(scan.waiter_after)
+
+    def test_recovery_scan_retries_same_page_when_api_call_fails(self):
+        cursor = {"createdAt": "2026-09-06T00:00:00+00:00", "id": "agent_run_last"}
+        with patch.object(worker, "runtime_request", return_value={"disposition": "reconciled", "checked": 0, "waiters": [], "next": None}), patch.object(
+            worker, "api_request", side_effect=[
+                {"activeNext": cursor, "deadLetterNext": None},
+                worker.DependencyUnavailable("api unavailable"),
+                {"activeNext": None, "deadLetterNext": None},
+                {"activeNext": None, "deadLetterNext": None},
+            ]
+        ) as api:
+            scan = worker.LifecycleReconciler()
+            scan()
+            with self.assertRaises(worker.DependencyUnavailable):
+                scan()
+            scan()
+            scan()
+        bodies = [call.args[1] for call in api.call_args_list]
+        self.assertEqual(bodies[1]["activeAfter"], cursor)
+        self.assertEqual(bodies[2]["activeAfter"], cursor)
+        self.assertIsNone(bodies[3]["activeAfter"])
+
+    def test_recovery_scan_progress_survives_later_waiter_failure_and_resets_on_restart(self):
+        cursor = {"createdAt": "2026-09-06T00:00:00+00:00", "id": "agent_run_last"}
+        responses = [
+            {"activeNext": cursor, "deadLetterNext": None},
+            {"activeNext": None, "deadLetterNext": cursor},
+            {"activeNext": None, "deadLetterNext": None},
+        ]
+        def runtime(path, body):
+            if path.endswith("reconcile-waiters"):
+                raise RuntimeError("waiter temporarily unavailable")
+            return {"reclaimed": 0}
+        with patch.object(worker, "runtime_request", side_effect=runtime), patch.object(
+            worker, "api_request", side_effect=responses
+        ) as api:
+            scan = worker.LifecycleReconciler()
+            for operation in (scan, scan, worker.LifecycleReconciler()):
+                with self.assertRaisesRegex(RuntimeError, "waiter temporarily unavailable"):
+                    operation()
+        bodies = [call.args[1] for call in api.call_args_list]
+        self.assertIsNone(bodies[0]["activeAfter"])
+        self.assertEqual(bodies[1]["activeAfter"], cursor)
+        self.assertIsNone(bodies[2]["activeAfter"])
+        self.assertIsNone(bodies[2]["deadLetterAfter"])
+
+    def test_slot_configuration_at_startup(self):
+        for value, expected in ((None, 8), ("1", 1), ("4", 4), ("16", 16)):
+            with self.subTest(value=value):
+                env = dict(os.environ)
+                env.pop("WORKER_SLOT_COUNT", None)
+                if value is not None:
+                    env["WORKER_SLOT_COUNT"] = value
+                result = subprocess.run(
+                    [sys.executable, "-c", "import worker; print(worker.WORKER_SLOT_COUNT)"],
+                    cwd=os.path.dirname(worker.__file__), env=env,
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), str(expected))
+        for value in ("", "0", "-1", "17", "1.5", "abc"):
+            with self.subTest(value=value):
+                result = subprocess.run(
+                    [sys.executable, "-c", "import worker"],
+                    cwd=os.path.dirname(worker.__file__),
+                    env={**os.environ, "WORKER_SLOT_COUNT": value},
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("WORKER_SLOT_COUNT must be an integer between 1 and 16", result.stderr)
+
+    def test_service_bounds_concurrency_and_reuses_slots_after_success_and_failure(self):
+        for slots in (1, 4, 16):
+            with self.subTest(slots=slots):
+                barrier = threading.Barrier(slots)
+                lock = threading.Lock()
+                calls = {}
+                active = peak = completed = 0
+                stop = None
+
+                def install_handler(_number, handler):
+                    nonlocal stop
+                    if callable(handler):
+                        stop = handler
+
+                def execute(slot):
+                    nonlocal active, peak, completed
+                    with lock:
+                        calls[slot] = calls.get(slot, 0) + 1
+                        attempt = calls[slot]
+                        active += 1
+                        peak = max(peak, active)
+                    try:
+                        barrier.wait(timeout=5)
+                        if attempt == 1:
+                            raise RuntimeError("observed job failure")
+                        return True
+                    finally:
+                        with lock:
+                            active -= 1
+                            completed += 1
+                            if completed == slots * 3:
+                                stop(None, None)
+                        barrier.wait(timeout=5)
+
+                with (
+                    patch.object(worker, "WORKER_SLOT_COUNT", slots),
+                    patch.object(worker, "JOB_WAIT_FAILURE_BACKOFF_SECONDS", 0),
+                    patch.object(worker.signal, "signal", side_effect=install_handler),
+                    patch.object(worker, "run_loop"),
+                    patch.object(worker, "execute_next_job", side_effect=execute),
+                ):
+                    # A timeout also terminates the service if its configured slots cannot progress.
+                    watchdog = threading.Timer(10, lambda: stop(None, None))
+                    watchdog.start()
+                    try:
+                        worker.run_worker_service()
+                    finally:
+                        watchdog.cancel()
+                    for thread in threading.enumerate():
+                        if thread.name.startswith("workspace-job-slot-"):
+                            thread.join(timeout=6)
+                            self.assertFalse(thread.is_alive())
+                self.assertEqual(peak, slots)
+                self.assertEqual(calls, {slot: 3 for slot in range(slots)})
+                self.assertEqual(active, 0)
+
     def test_remote_disconnect_is_dependency_unavailable(self):
         with patch("urllib.request.urlopen", side_effect=http.client.RemoteDisconnected()):
             with self.assertRaisesRegex(
@@ -172,7 +352,7 @@ class WorkerContractTests(unittest.TestCase):
                     ]
                 }
             if path.endswith("/wake-waiter"):
-                return {"disposition": "woken"}
+                return {"disposition": "woken", "checked": 1, "waiters": [], "next": None}
             return {"disposition": "published"}
 
         with patch.object(worker, "runtime_request", side_effect=runtime_request):
@@ -288,8 +468,9 @@ class WorkerContractTests(unittest.TestCase):
         stopped.wait.assert_called_once_with(worker.JOB_WAIT_FAILURE_BACKOFF_SECONDS)
 
     def test_idle_polling_amplification_is_quantified(self):
-        old_scan_cycles = worker.WORKER_SLOT_COUNT * 60
-        new_wait_requests = worker.WORKER_SLOT_COUNT * (60_000 // worker.JOB_WAIT_MS)
+        baseline_slots = 2
+        old_scan_cycles = baseline_slots * 60
+        new_wait_requests = baseline_slots * (60_000 // worker.JOB_WAIT_MS)
         old_claim_http = old_scan_cycles * len(worker.WORKER_JOB_KINDS)
         new_claim_http = new_wait_requests * len(worker.WORKER_JOB_KINDS)
         new_total_http = new_wait_requests + new_claim_http
@@ -354,6 +535,8 @@ class WorkerContractTests(unittest.TestCase):
                     "terminalState": None,
                     "transitionReason": transition_reason,
                 }
+                if transition_reason == "execution_recovery_checkpoint_committed":
+                    waiting["retryAtMs"] = 1_001_200
 
                 def api_request(path, *_args):
                     if path.endswith("/resolve"):
@@ -370,6 +553,13 @@ class WorkerContractTests(unittest.TestCase):
                     patch.object(worker, "yield_job") as yield_job,
                     patch.object(worker, "complete_job") as complete_job,
                 ):
+                    if transition_reason == "execution_recovery_checkpoint_committed":
+                        deadline = waiting.pop("retryAtMs")
+                        with self.assertRaisesRegex(RuntimeError, "agent_run_step_response_invalid"):
+                            worker.execute_agent_run_lifecycle_job(job, "worker:test-owner", lambda: None)
+                        yield_job.assert_not_called()
+                        complete_job.assert_not_called()
+                        waiting["retryAtMs"] = deadline
                     self.assertFalse(
                         worker.execute_agent_run_lifecycle_job(
                             job,
@@ -380,6 +570,67 @@ class WorkerContractTests(unittest.TestCase):
 
                 yield_job.assert_called_once()
                 complete_job.assert_not_called()
+
+    def test_runtime_and_worker_accept_the_same_waiting_reasons(self):
+        runtime_source = (Path(__file__).resolve().parents[1] / "runtime_server/src/main.rs").read_text(encoding="utf-8")
+        declaration = re.search(
+            r"const AGENT_RUN_WAITING_TRANSITION_REASONS: &\[&str\] = &\[(.*?)\];",
+            runtime_source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(declaration, "Runtime waiting reason contract must be discoverable")
+        reasons = re.findall(r'"([a-z_]+)"', declaration.group(1))
+        self.assertTrue(reasons)
+        self.assertEqual(len(reasons), len(set(reasons)))
+        self.assertEqual(set(reasons), worker.AGENT_RUN_WAITING_TRANSITION_REASONS)
+
+    def test_checkpointed_execution_recovery_yields_until_runtime_deadline_under_current_lease(self):
+        job, start = lifecycle_fixture("agent_run_sandbox_recovery")
+        reason = "execution_recovery_checkpoint_committed"
+        for lose_lease in (False, True):
+            with self.subTest(lose_lease_before_yield=lose_lease):
+                calls = []
+                lease_checks = 0
+
+                def require_lease():
+                    nonlocal lease_checks
+                    lease_checks += 1
+                    calls.append("lease")
+                    if lose_lease and lease_checks == 3:
+                        raise RuntimeError("test_lease_lost")
+
+                def transition(_run_id, state, transition_reason):
+                    calls.append((state, transition_reason))
+
+                with (
+                    patch.object(worker, "api_request", return_value={
+                        "schema": "runtime.agent_run_lifecycle.resolved.v1",
+                        "disposition": "ready",
+                        "agentRunStart": start,
+                    }),
+                    patch.object(worker, "agent_run_step_request", return_value={
+                        "schema": "runtime.agent_run.step.result.v1",
+                        "agentRunId": start["agentRunId"],
+                        "disposition": "waiting",
+                        "terminalState": None,
+                        "transitionReason": reason,
+                        "retryAtMs": 1_001_200,
+                    }),
+                    patch.object(worker, "transition_agent_run", side_effect=transition),
+                    patch.object(worker, "yield_job", side_effect=lambda *args: calls.append(("yield", args))) as yielded,
+                    patch.object(worker, "finish_agent_run_lifecycle") as finish,
+                    patch.object(worker, "now_ms", return_value=1_000_000),
+                ):
+                    if lose_lease:
+                        with self.assertRaisesRegex(RuntimeError, "test_lease_lost"):
+                            worker.execute_agent_run_lifecycle_job(job, "worker:test-owner", require_lease)
+                        yielded.assert_not_called()
+                    else:
+                        self.assertFalse(worker.execute_agent_run_lifecycle_job(job, "worker:test-owner", require_lease))
+                        yielded.assert_called_once_with(job["jobId"], "worker:test-owner", 1_001_200, reason)
+                        self.assertEqual(calls[-3:], [("running", reason), "lease", ("yield", yielded.call_args.args)])
+                    finish.assert_not_called()
+                    self.assertEqual(lease_checks, 3)
 
     def test_terminal_projects_and_tears_down_before_completing_job(self):
         job, agentRunStart = lifecycle_fixture("agent_run_terminal")
@@ -498,10 +749,11 @@ class WorkerContractTests(unittest.TestCase):
         complete_job.assert_not_called()
 
     def test_worker_allows_two_sessions_to_run(self):
+        slots = 2
         active = 0
         maxActive = 0
         lock = threading.Lock()
-        barrier = threading.Barrier(worker.WORKER_SLOT_COUNT)
+        barrier = threading.Barrier(slots)
 
         @contextmanager
         def lease_heartbeats(_jobId, _leaseOwner):
@@ -521,7 +773,7 @@ class WorkerContractTests(unittest.TestCase):
                 "jobId": f"worker.noop:{slot}",
                 "jobKind": "worker.noop",
             }
-            for slot in range(worker.WORKER_SLOT_COUNT)
+            for slot in range(slots)
         ]
         with (
             patch.object(worker, "start_job"),
@@ -540,7 +792,6 @@ class WorkerContractTests(unittest.TestCase):
             for thread in threads:
                 thread.join(timeout=3)
 
-        self.assertEqual(worker.WORKER_SLOT_COUNT, 2)
         self.assertEqual(maxActive, 2)
 
 

@@ -27,6 +27,9 @@ unimplemented = "deny"
 [workspace.dependencies]
 axum = { version = "=0.8.9", default-features = false }
 base64 = "=0.22.1"
+bollard = { version = "=0.21.1", default-features = false, features = ["pipe"] }
+bytes = "=1.12.1"
+tar = { version = "=0.4.46", default-features = false }
 chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
 futures = "=0.3.32"
 hmac = "=0.12.1"

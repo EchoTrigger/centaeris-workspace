@@ -42,16 +42,76 @@ reverse proxy. Do not expose internal service tokens or database ports through i
 - `REDIS_BROWSER_MAX_CONNECTIONS` bounds browser streaming connections per API
   process.
 - `API_WORKERS` must remain within the validated range.
+- `RUNTIME_POSTGRES_POOL_SIZE`, `RUNTIME_POSTGRES_CONTROL_POOL_SIZE`, and
+  `RUNTIME_POSTGRES_LISTENER_LIMIT` independently bound ordinary operations,
+  execution-control probes/transitions, and PostgreSQL job listeners in each
+  Runtime process. Store and SessionLog clones share these budgets.
+- `RUNTIME_POSTGRES_CHECKOUT_TIMEOUT_MS` bounds only waiting for a pool slot.
+  `RUNTIME_POSTGRES_CONNECT_TIMEOUT_MS` bounds only establishing a new database
+  connection. Neither value is a statement or end-to-end request deadline.
 - `REDIS_MAXMEMORY` bounds transient live state; Redis eviction does not delete
   PostgreSQL facts.
 
 Invalid or unsafe budgets fail instead of falling back to an unbounded value.
+
+### Execution admission and request capacity
+
+| Variable | Default | Scope |
+| --- | ---: | --- |
+| `EXECUTION_GLOBAL_LIMIT` | 8 | Leased/running hosted AgentRun lifecycle steps across worker and Runtime replicas |
+| `EXECUTION_TENANT_LIMIT` | 4 | The same execution leases within one Workspace |
+| `EXECUTION_GLOBAL_QUEUE_LIMIT` | 128 | Initially queued AgentRuns across API replicas |
+| `EXECUTION_TENANT_QUEUE_LIMIT` | 32 | Initially queued AgentRuns within one Workspace |
+| `EXECUTION_QUEUE_WAIT_SECONDS` | 300 | Maximum age before first execution; expiry requests semantic cancellation |
+| `RUNTIME_HTTP_REQUEST_LIMIT` | 24 | Ordinary handlers per Runtime process, including long executions |
+| `RUNTIME_HTTP_LISTENER_LIMIT` | 8 | Job wait handlers per Runtime process |
+| `RUNTIME_HTTP_CONTROL_LIMIT` | 4 | Cancellation, heartbeat, and job-status handlers per Runtime process |
+| `RUNTIME_HTTP_REQUEST_TIMEOUT_SECONDS` | 30 | Absolute handler response deadline for short ordinary RPCs |
+| `RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS` | 5 | Absolute control handler response deadline; also used by API/worker control clients |
+
+All replicas sharing one database must use the same execution/admission limits.
+The runtime job lease is the execution permit: yield and terminal transitions
+release it; expired leases remain counted until lifecycle reconciliation.
+`WORKER_SLOT_COUNT` remains a local worker-thread limit. The execution limits do
+not count suspended sandbox containers, knowledge-processing jobs, or a parent's
+internal subagents; they are not a total-container or total-process memory budget.
+Parent logical waits release the lifecycle lease, avoiding a parent/child permit
+deadlock. A single-Workspace perf run reaches the tenant limit before the global
+limit; change its isolated environment explicitly when measuring another capacity.
+
+Queue expiry is checked under the same AgentRun row lock as the first running
+transition, and by the bounded lifecycle reconciler. Logical waits and recovery
+backoff are excluded. Expired work cannot start user execution; committing its
+cancelled terminal record still requires a lifecycle step and may occur later.
+An unavailable Runtime leaves expiry pending and blocks that first transition.
+
+Short/control deadlines include request-body reading and waiting for the blocking
+handler after headers are parsed. AgentRun steps and knowledge processing keep
+their lease/cancellation lifetime; job waits retain 20-second waits and a 25-second
+HTTP deadline. Database checkout/connect and statement/lock waits receive the
+remaining request budget. This is not a universal SQL or transaction execution
+deadline: a blocking operation already underway may finish after the HTTP timeout.
+It retains its HTTP permit and connection until it exits; a timeout is not evidence
+of rollback and never authorizes replay of uncertain work.
+
+The current initial database definitions include `execution_job_tenants` and the
+API's `agent_run_initial_queue` partial index. Schema numbers stay at v1; existing
+pre-release databases are not migrated or backfilled automatically. Isolated
+verification must initialize the current schema, not reuse an incompatible one.
 
 ## Execution and processing
 
 `SANDBOX_MEMORY_BYTES`, `SANDBOX_CPU_MILLI`, `SANDBOX_PIDS_LIMIT`, and
 `SANDBOX_DATA_TMPFS_BYTES` define the authorized AgentRun profile.
 `OCI_RUNTIME` selects the configured container runtime.
+
+`RUNTIME_EXECUTION_RECOVERY_MAX_ATTEMPTS` defaults to 5 replacement preparation
+attempts per AgentRun; the initial execution is excluded. Each attempt is recorded
+under the current lifecycle lease before preparing a replacement. A failed
+preparation or process restart does not refund it. Retry delays are 1, 2, 4, 8,
+and 16 seconds with deterministic ±20% jitter; the worker yields until the Runtime's
+`retryAtMs` deadline. Only checkpoint-covered execution can enter this path.
+Unknown tool side effects are not retried.
 
 Compose owns the processor image reference through one YAML anchor shared by
 the build service and Runtime, just as it does for the general execution image.
@@ -68,6 +128,44 @@ processor spec service. Configuration checks alone are not a GPU execution
 certification.
 The Docker release gate compares actual built/runtime image IDs and the image's
 embedded device, so an existing stale image cannot satisfy the check.
+
+## Docker Engine transport
+
+Runtime container management, exec and archives use one shared local Docker Engine client and
+negotiates the API version at initialization. `DOCKER_HOST`, when supplied, must
+name a `unix://` socket or `npipe://` named pipe. Otherwise the platform default
+local endpoint is used. Nonempty `DOCKER_CONTEXT` and remote TCP endpoints fail
+explicitly; there is no CLI fallback. Initialization failure requires
+a Runtime restart after the endpoint is repaired.
+
+Queries have a 5-second deadline; create/start/remove requests have a 30-second
+deadline. At most two create requests are issued concurrently per Runtime
+process, including time spent waiting for that local permit. These are per-call
+limits, not a deadline for the entire preparation sequence or a fleet-wide quota.
+An expired request can still have taken effect in the daemon and is inspected
+before its result is accepted.
+
+Processor batch containers use Engine wait/logs, retaining the existing 64 KiB
+per stdout/stderr channel, specification timeout and processing timeout. Ordinary
+exec drains stdout/stderr independently and retains 8 MiB per channel, with raw
+byte counts and an explicit truncation diagnostic. Hook diagnostics retain their
+64 KiB limit; helpers enforce their existing output limits. MCP keeps the shared
+4 MiB raw-line budget. Snapshot and archive payloads are streamed with bounded
+buffers, not collected into a whole-payload allocation.
+
+Exec create/start have bounded API handshakes. Once attached, command deadlines
+and cancellation remain the host's responsibility; stream closure is not proof
+that the remote process stopped. Synchronous helper reads/writes have a 30-minute
+idle ceiling; MCP does not inherit that ceiling as a session lifetime. Archive
+upload has a 30-second request deadline and download reads a 30-second idle
+deadline. Processor download additionally enforces maxOutputBytes plus the
+existing 64 MiB manifest allowance and bounded tar overhead. Unknown write or
+exec outcomes are not automatically replayed.
+
+The Runtime image no longer contains Docker CLI. Debian production uses the
+mounted local Unix socket and must pass the daemon gate on its deployed Engine
+version. Host-side Compose and diagnostic scripts may still use Docker CLI.
+No precreated pool is enabled.
 
 ## Email
 

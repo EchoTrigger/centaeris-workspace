@@ -16,10 +16,14 @@ function Run([string]$Name, [scriptblock]$Command) {
 Run "Public Core revision" { node --test scripts/core-revision.test.mjs }
 Run "Rust check" { cargo check --workspace --locked }
 Run "Rust tests" { cargo test --workspace --locked }
+Run "Outbox gate isolation and discovery guards" { python scripts/test_runtime_outbox_gate.py }
+Run "Outbox PostgreSQL regressions" { uv run --frozen --package api python scripts/runtime_outbox_gate.py }
 Run "AgentRun authorization parity" { pwsh -NoProfile -File scripts/agent-run-authorization-gate.ps1 }
 Run "Deployment identity contracts" { uv run --frozen --package api python scripts/deployment-contract.test.py }
 Run "Python discovery gate regressions" { python scripts/python_test_gate.py gate }
 Run "Worker tests" { python scripts/python_test_gate.py worker }
+Run "Performance harness isolation" { python -m unittest discover -s perf/tests -v }
+Run "Performance workload metrics" { node --test perf/tests/k6-metrics.test.mjs }
 Run "Document processor tests" { uv run --frozen --package centaeris-document-processor python scripts/python_test_gate.py document_processor }
 Run "Django fresh migration" { uv run --frozen --package api python packages/api/manage.py migrate --noinput --settings=api.migration_test_settings }
 Run "Django migration drift" { uv run --frozen --package api python packages/api/manage.py makemigrations --check --dry-run --settings=api.migration_test_settings --skip-checks }

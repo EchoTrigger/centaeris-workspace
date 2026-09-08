@@ -20,7 +20,7 @@ See [Workspace architecture](../../docs/architecture/Architecture.md),
 - Every AgentRun receives one temporary container with explicit mounts, work
   directory, UID/GID, network, CPU, memory, PID, and temporary-space limits.
 - `read`, `bash`, `edit`, and `write` use that same container. Fixed helpers run
-  through `docker exec` and expose no network listener.
+  through attached Docker Engine exec streams and expose no network listener.
 - Runtime owns the container lifecycle and Docker socket. AgentRun containers
   receive neither the socket nor control-plane credentials.
 - Plugin Skills, CLI programs, MCP servers, and Hooks use the frozen AgentRun

@@ -1,4 +1,4 @@
-use postgres::{Client, GenericClient, Row, Transaction};
+use postgres::{GenericClient, Row, Transaction};
 use sha2::{Digest, Sha256};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -19,7 +19,10 @@ use centaeris_core::session::{
     SessionProjection, SessionRecordType, RUNTIME_JOB_LEASE_FENCE_REJECTED,
 };
 
-use super::{run_postgres_blocking, AgentRunExecutionControlState, PostgresRuntimeStore};
+use super::{
+    run_postgres_blocking, AgentRunExecutionControlState, PostgresConnectionPool,
+    PostgresRuntimeStore,
+};
 
 const AGENT_RUN_CANCEL_REQUESTED_EVENT_SCHEMA: &str = "runtime.agent_run.cancel_requested.v1";
 const MODEL_OBSERVATION_CONTENT_DIGEST_DOMAIN: &[u8] = b"centaeris.model_observation_content.v1\0";
@@ -27,6 +30,38 @@ const MODEL_OBSERVATION_MANIFEST_DIGEST_DOMAIN: &[u8] =
     b"centaeris.model_observation_manifest.v1\0";
 
 impl PostgresRuntimeStore {
+    /// Idempotent repair for terminal reads/cancellation, including failures
+    /// committed before terminal waiter consumption was wired in.
+    pub fn repair_terminal_runtime_job_waits(
+        &self,
+        session_id: &str,
+        agent_run_id: &str,
+    ) -> Result<(), String> {
+        self.with_client(|client| {
+            let mut tx = client.transaction().map_err(|e| e.to_string())?;
+            tx.query_opt("SELECT id FROM app_core_session WHERE id=$1 FOR UPDATE", &[&session_id])
+                .map_err(|e| e.to_string())?.ok_or("terminal wait session missing")?;
+            let terminal = tx.query_opt(
+                "SELECT \"createdAtMs\" FROM app_core_sessionevent WHERE session_id=$1 AND agent_run_id=$2 AND payload->>'type' IN ('agent_run_completed','agent_run_failed','agent_run_interrupted') ORDER BY sequence DESC LIMIT 1",
+                &[&session_id, &agent_run_id]).map_err(|e| e.to_string())?.ok_or("terminal wait cleanup requires durable terminal")?;
+            consume_terminal_runtime_job_waits(&mut tx, session_id, agent_run_id, terminal.get(0))?;
+            tx.commit().map_err(|e| e.to_string())
+        })
+    }
+    pub fn load_recovery_checkpoint_by_id(
+        &self,
+        checkpoint_id: &str,
+    ) -> Result<Option<CheckpointRecord>, String> {
+        self.with_client(|client| optional_row(
+            client.query_opt(
+                "SELECT checkpoint_id,kind,session_id,turn_id,status,done_reason,updated_at_ms,payload_json FROM checkpoints WHERE checkpoint_id=$1",
+                &[&checkpoint_id],
+            ),
+            row_to_checkpoint,
+            "load referenced recovery checkpoint",
+        ))
+    }
+
     pub fn request_agent_run_cancellation(
         &self,
         agent_run_id: &str,
@@ -36,7 +71,7 @@ impl PostgresRuntimeStore {
     ) -> Result<bool, String> {
         let job_id =
             centaeris_core::session::reliability::agent_run_lifecycle_job_id(agent_run_id)?;
-        self.with_client(|client| {
+        self.with_execution_control_client(|client| {
             let mut tx = client
                 .transaction()
                 .map_err(|error| format!("begin AgentRun cancellation request failed: {error}"))?;
@@ -130,9 +165,39 @@ impl PostgresRuntimeStore {
 }
 
 impl RuntimeStore for PostgresRuntimeStore {
+    fn list_runtime_job_waiters(
+        &self,
+        source_job_id: Option<&str>,
+        after: Option<&centaeris_core::session::store::RuntimeJobWaiterCursor>,
+        limit: usize,
+    ) -> Result<Vec<centaeris_core::session::store::RuntimeJobWaiter>, RuntimeStoreError> {
+        use centaeris_core::session::store::{RuntimeJobWaiter, RuntimeJobWaiterCursor};
+        self.with_client(|client| {
+            let checkpoint = after.map_or("", |cursor| cursor.checkpoint_id.as_str());
+            let call = after.map_or("", |cursor| cursor.tool_call_id.as_str());
+            let limit = to_i64(limit)?;
+            let base = "SELECT checkpoint_id,tool_call_id,source_job_id,source_job_kind,session_id,agent_run_id FROM runtime_job_waiters WHERE (checkpoint_id,tool_call_id)>($1,$2)";
+            let rows = match source_job_id {
+                Some(source) => client.query(&format!("{base} AND source_job_id=$4 ORDER BY checkpoint_id,tool_call_id LIMIT $3"), &[&checkpoint, &call, &limit, &source]),
+                None => client.query(&format!("{base} ORDER BY checkpoint_id,tool_call_id LIMIT $3"), &[&checkpoint, &call, &limit]),
+            }.map_err(|error| format!("list runtime job waiters failed: {error}"))?;
+            Ok(rows.iter().map(|row| RuntimeJobWaiter {
+                cursor: RuntimeJobWaiterCursor { checkpoint_id: row.get(0), tool_call_id: row.get(1) },
+                source_job_id: row.get(2), source_job_kind: row.get(3), session_id: row.get(4), agent_run_id: row.get(5),
+            }).collect())
+        }).map_err(RuntimeStoreError::backend)
+    }
+
     fn save_checkpoint(&self, checkpoint: CheckpointRecord) -> Result<(), RuntimeStoreError> {
-        self.with_client(|client| save_checkpoint(client, &checkpoint))
-            .map_err(RuntimeStoreError::backend)
+        self.with_client(|client| {
+            let mut tx = client
+                .transaction()
+                .map_err(|error| format!("begin checkpoint save failed: {error}"))?;
+            save_checkpoint(&mut tx, &checkpoint)?;
+            tx.commit()
+                .map_err(|error| format!("commit checkpoint save failed: {error}"))
+        })
+        .map_err(RuntimeStoreError::backend)
     }
 
     fn load_latest_checkpoint(
@@ -283,6 +348,7 @@ pub(super) fn save_checkpoint<C: postgres::GenericClient>(
     client: &mut C,
     item: &CheckpointRecord,
 ) -> Result<(), String> {
+    let waiters = centaeris_core::session::store::runtime_job_waiters(item)?;
     if item.kind == CheckpointKindV1::Recovery {
         let inserted = client.execute(
             "INSERT INTO runtime.checkpoints(checkpoint_id,kind,session_id,turn_id,status,done_reason,updated_at_ms,payload_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(checkpoint_id) DO NOTHING",
@@ -304,7 +370,19 @@ pub(super) fn save_checkpoint<C: postgres::GenericClient>(
         }
         return Ok(());
     }
-    client.execute("INSERT INTO checkpoints(checkpoint_id,kind,session_id,turn_id,status,done_reason,updated_at_ms,payload_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(checkpoint_id) DO UPDATE SET kind=excluded.kind,session_id=excluded.session_id,turn_id=excluded.turn_id,status=excluded.status,done_reason=excluded.done_reason,updated_at_ms=excluded.updated_at_ms,payload_json=excluded.payload_json", &[&item.checkpoint_id,&item.kind.as_str(),&item.session_id,&item.turn_id,&item.status,&item.done_reason,&item.updated_at_ms,&item.payload_json]).map(|_| ()).map_err(|error| format!("save Postgres checkpoint failed: {error}"))
+    client.execute("INSERT INTO checkpoints(checkpoint_id,kind,session_id,turn_id,status,done_reason,updated_at_ms,payload_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(checkpoint_id) DO UPDATE SET kind=excluded.kind,session_id=excluded.session_id,turn_id=excluded.turn_id,status=excluded.status,done_reason=excluded.done_reason,updated_at_ms=excluded.updated_at_ms,payload_json=excluded.payload_json", &[&item.checkpoint_id,&item.kind.as_str(),&item.session_id,&item.turn_id,&item.status,&item.done_reason,&item.updated_at_ms,&item.payload_json]).map_err(|error| format!("save Postgres checkpoint failed: {error}"))?;
+    client
+        .execute(
+            "DELETE FROM runtime_job_waiters WHERE checkpoint_id=$1",
+            &[&item.checkpoint_id],
+        )
+        .map_err(|error| format!("replace checkpoint waiters failed: {error}"))?;
+    for waiter in waiters {
+        client.execute("INSERT INTO runtime_job_waiters(checkpoint_id,tool_call_id,source_job_id,source_job_kind,session_id,agent_run_id) VALUES($1,$2,$3,$4,$5,$6)",
+            &[&waiter.cursor.checkpoint_id, &waiter.cursor.tool_call_id, &waiter.source_job_id, &waiter.source_job_kind, &waiter.session_id, &waiter.agent_run_id])
+            .map_err(|error| format!("save checkpoint waiter failed: {error}"))?;
+    }
+    Ok(())
 }
 
 pub(super) fn append_runtime_event<C: postgres::GenericClient>(
@@ -425,22 +503,21 @@ fn visibility_from_db(value: &str) -> Result<EventVisibility, String> {
 
 #[derive(Clone)]
 pub struct PostgresSessionLog {
-    database_url: String,
+    connections: Arc<PostgresConnectionPool>,
     workspace_id: String,
     session_id: String,
     prompt: String,
     agent_run_state: Arc<Mutex<HashMap<String, AgentRunAppendState>>>,
-    /// 惰性复用的连接：PostgresSessionLog 是 AgentRun 级实例（每个 AgentRun 一个），
-    /// 同一实例的 append 天然串行，跨 AgentRun 是不同实例，连接互不阻塞。
-    /// 连接在查询失败时被丢弃，下次调用重新建立。
-    connection: Arc<Mutex<Option<Client>>>,
+    /// Clones share incremental state and serialize append validation for this
+    /// AgentRun, while each transaction holds a pooled connection only until commit.
+    append_lock: Arc<Mutex<()>>,
 }
 
 impl std::fmt::Debug for PostgresSessionLog {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("PostgresSessionLog")
-            .field("database_url", &self.database_url)
+            .field("database_url", &"[REDACTED]")
             .field("workspace_id", &self.workspace_id)
             .field("session_id", &self.session_id)
             .finish()
@@ -1085,19 +1162,19 @@ fn hydrate_model_request_wire(
 }
 
 impl PostgresSessionLog {
-    pub fn new(
-        database_url: String,
+    pub(crate) fn new(
+        connections: Arc<PostgresConnectionPool>,
         workspace_id: String,
         session_id: String,
         prompt: String,
     ) -> Self {
         Self {
-            database_url,
+            connections,
             workspace_id,
             session_id,
             prompt,
             agent_run_state: Arc::new(Mutex::new(HashMap::new())),
-            connection: Arc::new(Mutex::new(None)),
+            append_lock: Arc::new(Mutex::new(())),
         }
     }
 }
@@ -1161,7 +1238,8 @@ impl PostgresSessionLog {
         events: &[SequencedSessionRecord],
         fence: &RuntimeJobLeaseFence,
     ) -> Result<SessionCommitReceipt, String> {
-        // ponytail: one isolated thread per safe point; add a DB writer only if measured throughput requires it.
+        // The blocking boundary permits sync Postgres inside Tokio without
+        // creating another thread for a multi-thread Runtime blocking caller.
         run_postgres_blocking(|| {
             self.append_transaction(agent_run_id, events, Some(fence), None, None)
         })
@@ -1200,21 +1278,11 @@ impl PostgresSessionLog {
         checkpoint: Option<&CheckpointRecord>,
     ) -> Result<SessionCommitReceipt, String> {
         validate_sequenced_session_records(events)?;
-        let mut connection_guard = self
-            .connection
+        let _append_guard = self
+            .append_lock
             .lock()
-            .map_err(|_| "session record connection lock poisoned".to_string())?;
-        let has_client = connection_guard.is_some();
-        let result = (|| {
-            let client = match connection_guard.as_mut() {
-                Some(client) => client,
-                None => {
-                    let client = Client::connect(self.database_url.as_str(), postgres::NoTls)
-                        .map_err(|error| format!("connect session record store failed: {error}"))?;
-                    let _ = connection_guard.insert(client);
-                    connection_guard.as_mut().expect("inserted client")
-                }
-            };
+            .map_err(|_| "session record append lock poisoned".to_string())?;
+        let result = self.connections.with_client(|client| {
             let mut tx = client
                 .transaction()
                 .map_err(|error| format!("begin session log append failed: {error}"))?;
@@ -1251,6 +1319,7 @@ impl PostgresSessionLog {
                 save_checkpoint(&mut tx, checkpoint)?;
             }
             if let Some(receipt) = self.load_idempotent_batch(&mut tx, agent_run_id, events)? {
+                consume_waits_for_terminal_batch(&mut tx, &self.session_id, agent_run_id, events)?;
                 tx.commit()
                     .map_err(|error| format!("commit idempotent session append failed: {error}"))?;
                 return Ok(receipt);
@@ -1329,6 +1398,7 @@ impl PostgresSessionLog {
                 },
             )?;
             self.insert_session_append(&mut tx, agent_run_id, &prepared)?;
+            consume_waits_for_terminal_batch(&mut tx, &self.session_id, agent_run_id, events)?;
             let records = prepared.rows.into_iter().map(|row| row.record).collect();
             if !tombstoned_event_ids.is_empty() {
                 tx.execute(
@@ -1340,17 +1410,12 @@ impl PostgresSessionLog {
             tx.commit()
                 .map_err(|error| format!("commit session log append failed: {error}"))?;
             Ok(SessionCommitReceipt { records })
-        })();
-        // 查询失败（连接损坏/被服务端关闭）时丢弃连接，下次调用重新建立；
-        // 本次失败不影响 AgentRun 状态缓存语义（失败路径已按需移除缓存项）。
+        });
         if result.is_err() {
             self.agent_run_state
                 .lock()
                 .map_err(|_| "session record AgentRun state lock poisoned".to_string())?
                 .remove(agent_run_id);
-            if has_client {
-                *connection_guard = None;
-            }
         }
         result
     }
@@ -1826,6 +1891,58 @@ impl PostgresSessionLog {
         }
         Ok(())
     }
+}
+
+fn consume_waits_for_terminal_batch(
+    tx: &mut Transaction<'_>,
+    session_id: &str,
+    run_id: &str,
+    events: &[SequencedSessionRecord],
+) -> Result<(), String> {
+    if let Some(terminal) = events.iter().find(|item| {
+        matches!(
+            item.event.event_type,
+            SessionRecordType::AgentRunCompleted
+                | SessionRecordType::AgentRunFailed
+                | SessionRecordType::AgentRunInterrupted
+        )
+    }) {
+        consume_terminal_runtime_job_waits(tx, session_id, run_id, terminal.event.created_at_ms)?;
+    }
+    Ok(())
+}
+
+fn consume_terminal_runtime_job_waits(
+    tx: &mut Transaction<'_>,
+    session_id: &str,
+    run_id: &str,
+    at_ms: i64,
+) -> Result<(), String> {
+    // Index by owner, deduplicate checkpoint IDs before reading their payloads.
+    // No session-history scan and no dependency on the source job's outcome.
+    let rows = tx.query(
+        "SELECT c.checkpoint_id,c.kind,c.session_id,c.turn_id,c.status,c.done_reason,c.updated_at_ms,c.payload_json FROM runtime.checkpoints c WHERE c.checkpoint_id IN (SELECT w.checkpoint_id FROM runtime.runtime_job_waiters w WHERE w.agent_run_id=$1 AND w.session_id=$2) ORDER BY c.checkpoint_id FOR UPDATE OF c",
+        &[&run_id, &session_id]).map_err(|e| format!("load terminal wait checkpoints failed: {e}"))?;
+    for row in rows {
+        let checkpoint = row_to_checkpoint(&row)?;
+        let request = centaeris_core::runtime::terminal_wait::abandon_terminal_runtime_job_wait(
+            checkpoint, session_id, run_id, at_ms,
+        )?;
+        for event in &request.events {
+            append_runtime_event_idempotent(tx, event)?;
+        }
+        let deleted = tx
+            .execute(
+                "DELETE FROM runtime.checkpoints WHERE checkpoint_id=$1 AND kind='wait'",
+                &[&request.checkpoint.checkpoint_id],
+            )
+            .map_err(|e| format!("consume terminal wait failed: {e}"))?;
+        if deleted != 1 {
+            return Err("terminal wait checkpoint delete mismatch".into());
+        }
+        // Source relationships are removed by the checkpoint foreign key.
+    }
+    Ok(())
 }
 
 fn apply_batch_to_state<'a>(

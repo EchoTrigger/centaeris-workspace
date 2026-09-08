@@ -1681,7 +1681,7 @@ fn read_artifact(relative_path: &str, max_bytes: u64) -> Result<(Vec<u8>, String
     if before.size() > max_bytes {
         return Err("artifact is too large".to_string());
     }
-    // ponytail: bounded in memory at 64 MiB; stream only if the publication ceiling grows.
+    // Publication content is buffered in memory with a 64 MiB ceiling.
     let mut bytes = Vec::with_capacity(before.size() as usize);
     Read::take(&mut file, max_bytes + 1)
         .read_to_end(&mut bytes)

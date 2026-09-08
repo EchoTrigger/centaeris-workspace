@@ -4,6 +4,7 @@ import logging
 from typing import Literal
 
 from django.db import transaction
+from django.http import JsonResponse
 from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -12,6 +13,7 @@ from ninja.responses import codes_4xx
 from pydantic import Field, ValidationError, field_validator
 
 from app_core.assets import MAX_DIRECT_INPUT_BYTES, captured_input_fields
+from app_core.execution_admission import queued_admission_error
 from app_core.agent_identity import validate_agent_id
 from app_core.models import (
     Agent,
@@ -1008,6 +1010,9 @@ def create_session_message(
             if membership is None:
                 raise AgentSessionCreationError(404, "session_not_found")
             workspace = membership.workspace
+            admission_error = queued_admission_error(workspace.id)
+            if admission_error is not None:
+                raise AgentSessionCreationError(*admission_error)
             if session_id == "new":
                 agent = Agent.objects.select_for_update().filter(
                     id=payload.agent_id,
@@ -1104,6 +1109,10 @@ def create_session_message(
             _delete_stored_upload_batch(stored)
         except RuntimeError as cleanup_error:
             raise cleanup_error from database_error
+        if database_error.status in {429, 503}:
+            response = JsonResponse({"error": database_error.code}, status=database_error.status)
+            response["Retry-After"] = "5"
+            return response
         return Status(database_error.status, {"error": database_error.code})
     except Exception as database_error:
         try:
@@ -1236,6 +1245,7 @@ def supplement_agent_run(
     response={
         200: AgentRunCancellationResponse,
         202: AgentRunCancellationResponse,
+        503: ErrorResponse,
         codes_4xx: ErrorResponse,
     },
 )
@@ -1252,12 +1262,7 @@ def cancel_agent_run(request, session_id: str, agent_run_id: str):
         return Status(404, {"error": "agent_run_not_found"})
     if not agent_run_membership_is_current(agent_run):
         return Status(404, {"error": "agent_run_not_found"})
-    if agent_run.status in {"completed", "failed", "cancelled"}:
-        return {
-            "agentRunId": agent_run.id,
-            "status": agent_run.status,
-            "disposition": "terminal",
-        }
+    # Runtime also consumes any remaining continuation for a terminal owner.
     try:
         cancellation = request_agent_run_cancellation(agent_run)
     except RuntimeError:

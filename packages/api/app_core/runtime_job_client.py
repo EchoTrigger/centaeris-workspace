@@ -12,14 +12,14 @@ def get_runtime_job(job_id: str) -> dict | None:
         method="GET",
     )
     try:
-        with urllib.request.urlopen(request, timeout=settings.RUNTIME_START_TIMEOUT_SECONDS) as response:
+        with urllib.request.urlopen(request, timeout=settings.RUNTIME_CONTROL_TIMEOUT_SECONDS) as response:
             body = json.loads(response.read())
     except urllib.error.HTTPError as error:
         error.close()
         if error.code == 404:
             return None
         raise RuntimeError("runtime_job_query_failed") from error
-    except (urllib.error.URLError, json.JSONDecodeError) as error:
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
         raise RuntimeError("runtime_job_query_failed") from error
     if set(body) != {"job"} or not isinstance(body["job"], dict):
         raise RuntimeError("runtime_job_response_invalid")
