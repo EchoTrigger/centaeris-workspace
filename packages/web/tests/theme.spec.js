@@ -46,6 +46,7 @@ test("reasoning uses 14px headings and 13px details with one process gray in bot
   await page.evaluate(() => window.reasoningFixture.committedHistory());
   const toggle = page.locator(".workspaceReasoning button");
   await toggle.click();
+  await page.mouse.move(0, 0);
   const content = page.locator(".workspaceReasoningBody p");
   await expect(toggle).toHaveCSS("font-size", "14px");
   await expect(content).toHaveCSS("font-size", "13px");
@@ -55,6 +56,11 @@ test("reasoning uses 14px headings and 13px details with one process gray in bot
     await expect(page.locator("html")).toHaveAttribute("data-theme", scheme);
     const gray = await toggle.evaluate(n => getComputedStyle(n).color);
     await expect(content).toHaveCSS("color", gray);
+    await toggle.hover();
+    await expect(toggle).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+    await expect(toggle).toHaveCSS("color", scheme === "dark" ? "rgb(237, 237, 237)" : "rgb(32, 36, 40)");
+    await expect(content).toHaveCSS("color", gray);
+    await page.mouse.move(0, 0);
   }
 });
 

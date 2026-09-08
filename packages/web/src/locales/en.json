@@ -762,5 +762,7 @@
   "theme.dark": "Dark theme",
   "theme.light": "Light theme",
   "virtualAgentRunList.conversationMessages": "Conversation messages",
-  "appRoute.citationRefreshFailed": "Could not refresh citations. Reopen the conversation to retry."
+  "appRoute.citationRefreshFailed": "Could not refresh citations. Reopen the conversation to retry.",
+  "theme.switchLight": "Switch to light theme",
+  "theme.switchDark": "Switch to dark theme"
 }

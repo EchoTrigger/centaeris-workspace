@@ -762,5 +762,7 @@
   "theme.dark": "暗色主题",
   "theme.light": "浅色主题",
   "virtualAgentRunList.conversationMessages": "会话消息",
-  "appRoute.citationRefreshFailed": "无法刷新引用，请重新打开会话重试"
+  "appRoute.citationRefreshFailed": "无法刷新引用，请重新打开会话重试",
+  "theme.switchLight": "切换为浅色主题",
+  "theme.switchDark": "切换为暗色主题"
 }
