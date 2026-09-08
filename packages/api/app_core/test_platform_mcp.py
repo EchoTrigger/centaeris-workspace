@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import httpx
 from django.core import signing
-from django.test import SimpleTestCase, TransactionTestCase
+from django.test import SimpleTestCase, TransactionTestCase, override_settings
 
 from . import platform_mcp_auth as auth
 from .material_access import MaterialAccessContext
@@ -127,6 +127,20 @@ class PlatformMcpTransportTests(SimpleTestCase):
                     self.assertEqual(response.status_code, 401)
                 verify.assert_not_called()
         self.assertIsNone(server.request_call_id.get())
+
+    @override_settings(PLATFORM_MCP_ALLOWED_HOSTS=["localhost", "127.0.0.1", "api"])
+    async def test_compose_host_initializes_but_unknown_host_is_rejected(self):
+        from . import platform_mcp as server
+        app = server.create_mcp_app()
+        with patch.object(server, "verify_credential", return_value=MaterialAccessContext("run", "digest", {}, "spec")):
+            async with app.router.lifespan_context(app):
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://api:8000", headers={"Authorization": "Bearer scoped", "Accept": "application/json, text/event-stream"}) as client:
+                    request = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "docker-regression", "version": "1"}}}
+                    response = await client.post("/internal/mcp", json=request)
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.json()["result"]["serverInfo"]["name"], "centaeris-workspace")
+                    response = await client.post("/internal/mcp", headers={"Host": "attacker.example:8000"}, json=request)
+                    self.assertEqual(response.status_code, 421)
 
     async def test_host_and_body_limits_precede_tool_execution(self):
         from . import platform_mcp as server
