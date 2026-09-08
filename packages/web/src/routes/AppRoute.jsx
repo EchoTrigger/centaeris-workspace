@@ -3,6 +3,7 @@ import { useTranslation } from "../i18n";
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, matchPath, useNavigate, useRouteLoaderData } from "react-router";
 import { apiResponse } from "../api";
+import { createCitationRefresher } from "../chat/citationSnapshot";
 import { WorkspaceContextPanel } from "../components/WorkspaceContextPanel";
 import { ContextUsagePicker } from "../components/ContextUsagePicker";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -277,6 +278,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     streamAbortRef.current?.abort();
     chatControllerRef.current?.dispose();
   }, []);
+  const reportLoadError = useEffectEvent((key) => setError(t(key)));
   const markSelectedSessionRead = useEffectEvent(markSessionRead);
   const connectLoadedAgentRun = useEffectEvent(connectAgentRun);
   const handleLoadedAgentRunStreamFailure = useEffectEvent(handleAgentRunStreamFailure);
@@ -290,12 +292,12 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         const data = await response.json();
         if (!controller.signal.aborted) acceptModels(data.models);
       } catch {
-        if (!controller.signal.aborted) setError(t("appRoute.unableToRefreshModelsPleaseTryAgain"));
+        if (!controller.signal.aborted) reportLoadError("appRoute.unableToRefreshModelsPleaseTryAgain");
       }
     }
     load();
     return () => controller.abort();
-  }, [modelsVersion, acceptModels, t]);
+  }, [modelsVersion, acceptModels]);
 
   useEffect(() => {
     if (contextPanel.mode !== "filePreview" || !contextPanel.objectUrl) return undefined;
@@ -360,11 +362,11 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       })
       .catch(() => {
         if (!active || requestScopeRef.current.key !== navigationScopeKey) return;
-        setError(t("appRoute.unableToLoadConversationsRefreshThePageAndTry"));
+        reportLoadError("appRoute.unableToLoadConversationsRefreshThePageAndTry");
         setLoadingHistory(false);
       });
     return () => { active = false; };
-  }, [workspace.id, workspaceDraft, requestedSessionId, requestScopeKey, startFresh, activeAgent.id, clearConversationProjection, clearContextPanel, t]);
+  }, [workspace.id, workspaceDraft, requestedSessionId, requestScopeKey, startFresh, activeAgent.id, clearConversationProjection, clearContextPanel]);
 
   useEffect(() => {
     if (requestedPrompt) setDraft(requestedPrompt);
@@ -395,7 +397,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
           if (activeSessionIdRef.current === sessionId) setAssets(data.assets);
         })
         .catch(() => {
-          if (activeSessionIdRef.current === sessionId) setError(t("appRoute.unableToRefreshConversationMaterials"));
+          if (activeSessionIdRef.current === sessionId) reportLoadError("appRoute.unableToRefreshConversationMaterials");
         });
       connectLoadedAgentRun(acceptedSession.agentRunId, workspace.id, sessionId, controller).catch((streamError) => {
         handleLoadedAgentRunStreamFailure(streamError, acceptedSession.agentRunId);
@@ -431,14 +433,14 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
           });
         }
       })
-      .catch(() => active && setError(t("appRoute.unableToLoadConversationHistoryRefreshThePageAnd")))
+      .catch(() => active && reportLoadError("appRoute.unableToLoadConversationHistoryRefreshThePageAnd"))
       .finally(() => active && setLoadingHistory(false));
     return () => {
       active = false;
       controller.abort();
       chatControllerRef.current?.dispose();
     };
-  }, [sessionId, workspace?.id, clearConversationProjection, stopActiveStream, chatStore.replaceAll, t]);
+  }, [sessionId, workspace?.id, clearConversationProjection, stopActiveStream, chatStore.replaceAll]);
 
   function showStreamError(errorValue) {
     if (errorValue?.name === "AbortError") return;
@@ -510,12 +512,24 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
 
   async function connectAgentRun(agentRunId, targetWorkspaceId, targetSessionId, abortController, resume = {}) {
     chatControllerRef.current?.dispose();
+    const citations = createCitationRefresher({ sessionId: targetSessionId, agentRunId,
+      load: async (signal) => (await apiResponse(`/api/sessions/${targetSessionId}/agent-runs/${agentRunId}/citations`, { signal })).json(),
+      apply: (snapshot) => {
+        if (!abortController.signal.aborted && activeSessionIdRef.current === targetSessionId) chatStore.applyCitationSnapshot(snapshot);
+      },
+    });
+    const disposeCitations = () => citations.dispose();
+    abortController.signal.addEventListener("abort", disposeCitations, { once: true });
+    const refreshCitations = () => citations.request().catch((error) => {
+      if (error?.name !== "AbortError" && !abortController.signal.aborted) setError(t("appRoute.citationRefreshFailed"));
+    });
     const controller = new WorkspaceChatController({
       store: chatStore,
       workspaceId: targetWorkspaceId,
       sessionId: targetSessionId,
       agentRunId,
       initialCursor: resume.cursor || "0-0",
+      onCitationsChanged: () => { void refreshCitations(); },
     });
     chatControllerRef.current = controller;
     let streamCompleted = false;
@@ -530,6 +544,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     } finally {
       try {
         await controller.whenIdle();
+        if (!abortController.signal.aborted) await refreshCitations();
         const agentRun = chatStore.getAgentRunSnapshot(agentRunId);
         if (streamCompleted && agentRun && !isAgentRunActive(agentRun)) {
           try {
@@ -545,6 +560,8 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       } finally {
         if (chatControllerRef.current === controller) chatControllerRef.current = null;
         controller.dispose();
+        citations.dispose();
+        abortController.signal.removeEventListener("abort", disposeCitations);
       }
     }
   }
@@ -755,6 +772,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       activities: [],
       reasoningBlocks: [],
       citations: [],
+      citationSequence: 0,
       startedAtMs: Date.now(),
       finishedAtMs: null,
     };
@@ -822,6 +840,8 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         eventIds: [],
         live: null,
         streamCursor: "0-0",
+        citations: [],
+        citationSequence: 0,
         messages: pendingAgentRun.messages.map((message) => ({
           ...message,
           messageId: `message:${messageData.turnId}:user`,

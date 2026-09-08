@@ -14,6 +14,14 @@ services:
   worker:
     image: centaeris-perf-worker:local
 
+  material-worker:
+    image: centaeris-perf-api:local
+    environment:
+      MATERIAL_PROCESSOR_IMAGE: centaeris-perf-processor:local
+
+  document-processor:
+    image: centaeris-perf-processor:local
+
   api-init:
     image: centaeris-perf-api:local
 

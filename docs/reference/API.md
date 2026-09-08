@@ -7,11 +7,100 @@ Browser REST and SSE routes are rooted at `/api`. Postgres is truth; Redis holds
 bounded transient live projection. Unknown fields and schemas fail. Public
 Runtime event and tool semantics belong only to the exact public Cargo revision.
 
-Internal calls require `X-Internal-Token`; there is no anonymous fallback.
+## Model input images
+
+Internal model requests consume Core's `prepared_prompt.v1`.
+The authenticated `/internal/model-runs` JSON body is limited to
+128 MiB (134,217,728 bytes), including base64 and history text; oversized bodies
+return HTTP 413 with `model_run_request_too_large` before JSON parsing or provider
+execution. This does not change Django's limits for other API endpoints.
+
+The prompt supports optional `inputImages`. Each image has exactly
+`messageId`, `contentType`, `placeholder`,
+and `dataBase64`. Images bind to a unique placeholder in a user message. The API
+validates canonical base64, PNG/JPEG/WebP headers, declared media type, positive
+dimensions, at most 100,000,000 pixels, and at most 10 MiB (10,485,760 decoded
+bytes) per image before provider execution. Header inspection is not full pixel
+decoding. Unknown fields remain errors.
+
+Provider adapters replace placeholders in text order with Chat Completions
+`image_url`, Responses `input_image`, or Anthropic base64 `image` content blocks.
+Core-generated image fixtures protect cross-language contracts and limit parity.
+
+## Trash pagination
+
+`GET /api/workspaces/{workspaceId}/trash` orders entries by deletion time
+descending, then kind and ID ascending. ID ordering and cursor comparisons use
+PostgreSQL `C` collation, matching the Python merge independently of the database
+default locale. IDs are tie-breakers, not timestamps. Each kind contributes at
+most 51 candidates and the response contains at most 50 entries. Permissions,
+filters, and cursor fields are unchanged by the choice of database locale.
+
+## Workspace citation presentation
+
+Each history AgentRun requires `citations` and `citationSequence`, including an
+empty array and zero for an empty run. Citation summaries have exactly
+`citationId`, `inputRef`, `displayName`, `sourceToolCallId`, and `sourceUrl`.
+Source URLs are first-party `/api/citations/{citationId}` detail routes, not
+arbitrary model-supplied links. Preview authorization is checked on every access.
+
+`GET /api/sessions/{sessionId}/agent-runs/{agentRunId}/citations` returns a no-store
+snapshot with exactly `schema: "workspace.citations.v1"`, `sessionId`, `agentRunId`,
+`throughSequence`, and `citations`. It requires the run owner and current workspace
+membership; unknown query parameters fail. The snapshot rebuilds verified
+projections from committed events through a captured sequence, under the run
+projection lock, so it works before terminal lifecycle reconciliation.
+
+History and live refresh use the same snapshot service. The web view replaces
+its citation collection after tool-result batches and termination, coalesces
+in-flight refreshes, bounds each request to ten seconds, ignores obsolete or
+cross-session responses, and preserves existing citations on refresh failure.
+Snapshots do not advance the Session stream cursor. Historical Core citation
+events remain validated but no longer independently populate browser citations.
+API and web strict schemas must be released together; no old-field aliases exist.
+
+Internal REST calls require `X-Internal-Token`; there is no anonymous fallback.
+The first-party MCP transport `/internal/mcp` is an exception: it accepts only a
+short-lived scoped Bearer credential, not the global internal token. The host
+issues one through `POST /internal/mcp/credential` with exact fields
+`schema: "workspace.mcp.credential.issue.v1"`, `agentRunId`,
+`authorizationDigest`, `processingSpecification`, and `specDigest`.
+The no-store response has `schema: "workspace.mcp.credential.result.v1"`,
+`accessToken`, and `expiresAt` (Unix seconds, five-minute lifetime).
+Both entries reject browser Origin headers. See
+[Platform materials and MCP](../architecture/PlatformMaterials.md#mcp-connection-and-authorization)
+for transport constraints and the platform processing lifecycle.
+
+The authenticated host may send `X-Workspace-Tool-Call-Id` (one nonempty ASCII
+value, at most 160 bytes), never a model argument. The server verifies the
+authorized run's committed tool call, exact arguments and reserved
+`workspace.materials` provider. Eligible ready results then include `receiptId`
+and `citationIds` backed by immutable server receipts. These IDs are provisional:
+only an exact matching durable successful MCP result can publish citation rows.
+Missing headers allow diagnostic material access but create no receipt. The
+Runtime registers the five first-party material tools for runs with declared
+material inputs. There is no opt-in legacy reader or plugin activation. Runtime freezes the discovered catalog and verifies it before each
+call, obtains a new short-lived credential per invocation, and isolates call
+headers on separate connections. Configure API allowed hostnames for the private
+connection explicitly; this checkpoint does not change deployed environments.
+
+MCP read/search can now return durable `operations` with exact fields
+`operationId`, `inputRef`, `status`, and nullable `errorCode`. Status is one of
+`pending`, `running`, `completed`, `failed`, `cancelled`.
+`get_operation(operation_id)` and `cancel_operation(operation_id)` are scoped to
+the authenticated run. Cancellation withdraws that operation only, not shared
+background processing. Completed operations require a new read/search call.
+The dedicated platform material Worker claims these tasks directly under database
+leases; Runtime has no material scheduling or processing endpoint.
+`POST /internal/materials/processor` accepts exact
+`{schema:"workspace.material.processor.v1"}` under `X-Internal-Token` and returns
+`{schema:"workspace.material.processor.result.v1",processingSpecification,specDigest}`.
+This identifies the processor registered by the platform Worker.
+Retired Knowledge read/search/commit and material reconciliation routes return 404.
 `GET /internal/model-catalog` returns exact
 `{schema:"workspace.model_catalog.result.v1",catalog}` from the public Rust model
 catalog crate. Django does not parse or duplicate catalog files. Other internal
-AgentRun, workspace file, knowledge, Skill, MCP, and Hook transports use the
+AgentRun, workspace file, Skill, MCP, and Hook transports use the
 exact v1 schemas in code.
 
 Nonzero Session stream cursors use the exact `v1.<base64url>` wire prefix with
@@ -20,7 +109,9 @@ AgentRun authorization uses schema `workspace.agent_run_authorization.v1` and
 signature domain `workspace:agent-run-authorization:v1`. Knowledge processing
 specifications use the immutable Centaeris processor version `1.0.0`.
 
-Secrets never belong in responses, logs, documentation, or checked-in examples.
+Secrets never belong in ordinary responses, logs, documentation, or checked-in
+examples. Explicit credential-delivery endpoints are restricted to their
+authenticated caller and return no-store responses.
 
 Hosted message submission atomically enforces the Workspace initial-queue budget
 and the global initial-queue budget. A full Workspace returns HTTP 429 with

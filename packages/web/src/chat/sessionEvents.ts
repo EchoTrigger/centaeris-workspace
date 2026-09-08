@@ -1,3 +1,4 @@
+import { validateCitationSnapshot } from "./citationSnapshot.ts";
 import type {
   SessionStreamEvent,
   StreamEntry,
@@ -88,6 +89,8 @@ type RawAgentRun = UnknownRecord & {
   events: StoredSessionEvent[];
   live: LiveAssistant | null;
   streamCursor: string;
+  citations: Citation[];
+  citationSequence: number;
   sessionId?: string;
   workspaceId?: string;
 };
@@ -421,10 +424,8 @@ function applySessionEvent(
     requireString(payload.citationId, "citation citationId");
     return {
       ...view,
-      citations: upsertBy(view.citations, "citationId", {
-        ...payload,
-        sourceUrl: `/api/citations/${payload.citationId}`,
-      } as Citation),
+      // Historical facts are validated; Workspace owns presentation snapshots.
+      citations: view.citations,
     };
   }
   if (event.type === "artifact_published") {
@@ -525,7 +526,7 @@ function projectAgentRun(agentRun: RawAgentRun): ProjectedAgentRun {
     reasoningBlocks: [],
     messages: [],
     activities: [],
-    citations: [],
+    citations: agentRun.citations,
     artifacts: [],
     agentWaits: {},
     overlayBarrierByTurnId: {},
@@ -576,10 +577,12 @@ export function hydrateAgentRun(
   identity: AgentRunIdentity = {},
 ): ProjectedAgentRun {
   requireObject(agentRun, "agent run history");
-  const fields = ["completedAt", "createdAt", "events", "id", "live", "model", "startedAt", "status", "streamCursor"];
+  const fields = ["completedAt", "createdAt", "events", "id", "live", "model", "startedAt", "status", "streamCursor", "citations", "citationSequence"];
   if (!hasExactFields(agentRun, fields) || typeof agentRun.status !== "string" || !AGENT_RUN_STATUSES.has(agentRun.status) || !Array.isArray(agentRun.events)) throw new Error("agent run history fields are invalid");
   requireString(agentRun.id, "agent run id");
   requireString(agentRun.streamCursor, "agent run streamCursor");
+  validateCitationSnapshot({ schema: "workspace.citations.v1", sessionId: identity.sessionId || "",
+    agentRunId: agentRun.id, throughSequence: agentRun.citationSequence, citations: agentRun.citations }, identity.sessionId || "", agentRun.id);
   const boundAgentRun = {
     ...agentRun,
     ...(identity.sessionId ? { sessionId: identity.sessionId } : {}),

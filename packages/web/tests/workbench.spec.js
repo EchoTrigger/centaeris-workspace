@@ -49,6 +49,11 @@ function historyPage(session, agentRuns, { nextCursor = null, hasMore = false } 
         events,
         live: agentRun.live ? { messageId: agentRun.live.messageId, turnId: agentRun.live.turnId || agentRun.turnId, afterSequence: sequence, revision: agentRun.live.revision || 1, text: agentRun.live.text } : null,
         streamCursor: agentRun.streamCursor || "0-0",
+        citations: agentRun.citations || (agentRun.records || []).filter((record) => record.type === "citation_recorded").map(({ payload }) => ({
+          citationId: payload.citationId, inputRef: payload.inputRef, displayName: payload.displayName,
+          sourceToolCallId: payload.sourceToolCallId || "fixture-call", sourceUrl: `/api/citations/${payload.citationId}`,
+        })),
+        citationSequence: sequence,
       };
     }),
     nextCursor,
@@ -223,6 +228,8 @@ async function installChatFixture(page, {
   await page.route("http://localhost:8000/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    const citationMatch = path.match(/^\/api\/sessions\/([^/]+)\/agent-runs\/([^/]+)\/citations$/);
+    if (citationMatch) return route.fulfill({ json: { schema: "workspace.citations.v1", sessionId: citationMatch[1], agentRunId: citationMatch[2], throughSequence: 0, citations: [] } });
     if (path === "/api/csrf") return route.fulfill({ json: { csrfToken: "test-token" } });
     if (path === "/api/me") return route.fulfill({ json: { user: { id: "user_1", email: "member@example.com", isStaff: false } } });
     if (path === "/api/workspaces") return route.fulfill({ json: { workspaces: [workspace] } });
@@ -335,6 +342,49 @@ async function installChatFixture(page, {
   });
   return fixture;
 }
+
+test("shows a platform citation after committed tool success before the run terminates", async ({ page }) => {
+  const fixture = await installChatFixture(page);
+  fixture.setAgentRuns("sess_1", [{ id: "agent_run_live", turnId: "turn_1", status: "running",
+    model: { id: "model_1", displayName: "Clinical" }, createdAt: "2026-08-31T00:00:00Z",
+    startedAt: "2026-08-31T00:00:00Z", completedAt: null,
+    messages: [{ messageId: "user_1", role: "user", text: "read material" }],
+    records: [{ type: "tool_call", payload: { callId: "material_1", toolName: "read_material",
+      toolContractDigest: `sha256:${"a".repeat(64)}`, providerId: "workspace.materials",
+      normalizedInput: { input_ref: "input_1" }, displayTarget: "Material" } }],
+  }]);
+  await page.route("http://localhost:8000/api/sessions/sess_1/agent-runs/agent_run_live/citations", (route) => route.fulfill({ json: {
+    schema: "workspace.citations.v1", sessionId: "sess_1", agentRunId: "agent_run_live", throughSequence: 4,
+    citations: [{ citationId: "citation:live", inputRef: "input_1", displayName: "live-material.txt",
+      sourceToolCallId: "material_1", sourceUrl: "/api/citations/citation:live" }],
+  } }));
+  await page.addInitScript(() => {
+    const originalFetch = window.fetch;
+    window.fetch = (input, init) => {
+      if (!String(input).endsWith("/agent-runs/agent_run_live/events")) return originalFetch(input, init);
+      return Promise.resolve(new Response(new ReadableStream({ start(controller) {
+        window.__pushMaterialResult = (text) => controller.enqueue(new TextEncoder().encode(text));
+      } }), { headers: { "Content-Type": "text/event-stream" } }));
+    };
+  });
+  await page.goto("/w/ws_1/agents/centaeris?sessionId=sess_1");
+  await expect(page.locator('[data-agent-run-id="agent_run_live"]')).toBeVisible();
+  await expect(page.getByRole("button", { name: "live-material.txt References", exact: true })).toHaveCount(0);
+  await page.evaluate((text) => window.__pushMaterialResult(text), sse([
+    committedStreamItem("sess_1", "agent_run_live", 4, "tool_result", { callId: "material_1",
+      toolName: "read_material", resultState: "successWithOutput", modelContent: "trusted material",
+      outputComplete: true, summary: "read", latencyMs: 1, operations: [] }, "turn_1"),
+  ]));
+  await expect(page.getByRole("button", { name: "live-material.txt References", exact: true })).toBeVisible();
+  await expect(page.locator(".workspaceLiveStatus")).toBeVisible();
+  await expect(page.getByRole("region", { name: "Conversation messages", exact: true })).toBeVisible();
+  await page.getByRole("textbox", { name: "Message", exact: true }).fill("Keep this draft");
+  await page.evaluate(async () => { const { changeLanguage } = await import("/src/i18n.ts"); await changeLanguage("zh-CN"); });
+  await expect(page.getByRole("textbox", { name: "输入消息", exact: true })).toHaveValue("Keep this draft");
+  await expect(page.getByRole("region", { name: "会话消息", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "live-material.txt 引用", exact: true })).toBeVisible();
+  await expect(page.locator(".workspaceLiveStatus")).toBeVisible();
+});
 
 test("keeps live status at the latest progress and tool disclosures stable across stream updates", async ({ page }) => {
   const fixture = await installChatFixture(page);
@@ -827,7 +877,8 @@ test("unlocks drafting after 202 and renders sealed Markdown while streaming", a
   await expect(page.getByRole("button", { name: "Input", exact: true })).toBeEnabled();
 });
 
-test("renders coalesced live Markdown without remounting or losing the end anchor", async ({ page }) => {
+for (const readingMode of ["following", "keyboard", "touch"]) {
+test(`renders coalesced live Markdown without remounting or losing the end anchor (${readingMode})`, async ({ page }) => {
   const session = { id: "sess_1", workspaceId: "ws_1", agentId: "centaeris", projectId: null, title: "稳定视觉", origin: "user", status: "active", isPinned: false, isUnread: false, hasActiveAgentRun: false, updatedAt: "2026-08-30T00:00:00Z" };
   const model = { id: "model_1", displayName: "Clinical", provider: "fake", modelName: "fake-model" };
   const userText = "检查本地稳定视觉";
@@ -975,12 +1026,9 @@ test("renders coalesced live Markdown without remounting or losing the end ancho
       window.__latestScrollBehaviors.push(options.behavior);
       scrollTo(options);
     };
-    element.scrollTop = Math.min(
-      120,
-      Math.max(1, element.scrollHeight - element.clientHeight - 10),
-    );
-    element.dispatchEvent(new Event("scroll", { bubbles: true }));
   });
+  await messageList.hover();
+  await page.mouse.wheel(0, -500);
   await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toBeVisible();
   const detachedScrollTop = await messageList.evaluate((element) => element.scrollTop);
   expect(detachedScrollTop).toBeGreaterThan(0);
@@ -998,16 +1046,19 @@ test("renders coalesced live Markdown without remounting or losing the end ancho
   });
   expect(Math.abs(await messageList.evaluate((element) => element.scrollTop) - detachedScrollTop)).toBeLessThanOrEqual(1);
   await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toBeVisible();
+  await page.evaluate(() => { window.__latestScrollBehaviors = []; });
   await page.getByRole("button", { name: "Jump to latest", exact: true }).click();
   await expect.poll(() => messageList.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(2);
   expect(await page.evaluate(() => window.__latestScrollBehaviors[0])).toBe("auto");
 
   await messageList.evaluate((element) => {
     window.__latestScrollBehaviors = [];
-    element.scrollTop = element.scrollHeight - element.clientHeight - 100;
-    element.dispatchEvent(new Event("scroll", { bubbles: true }));
   });
+  await messageList.hover();
+  await page.mouse.wheel(0, -100);
   await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toBeVisible();
+  await expect.poll(() => messageList.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeGreaterThan(50);
+  await page.evaluate(() => { window.__latestScrollBehaviors = []; });
   await page.getByRole("button", { name: "Jump to latest", exact: true }).click();
   expect(await page.evaluate(() => window.__latestScrollBehaviors[0])).toBe("smooth");
   await expect.poll(() => messageList.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(2);
@@ -1017,17 +1068,120 @@ test("renders coalesced live Markdown without remounting or losing the end ancho
   await expect(streamingText).toHaveText(replacementRenderedText, { timeout: 300 });
   await expect.poll(() => messageList.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(2);
 
+  // Browser clamping on a taller viewport is layout movement, not a request
+  // to stop following. Restore the viewport to expose a lost end anchor.
+  const viewport = page.viewportSize();
+  await page.setViewportSize({ ...viewport, height: viewport.height + 120 });
+  await expect.poll(() => messageList.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(2);
+  await page.setViewportSize(viewport);
+  await expect.poll(() => messageList.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(2);
+  await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toBeHidden();
+
+  if (readingMode === "keyboard") {
+    await messageList.focus();
+    await page.keyboard.press("PageUp");
+  } else if (readingMode === "touch") {
+    const bounds = await messageList.boundingBox();
+    const client = await page.context().newCDPSession(page);
+    const point = { x: bounds.x + bounds.width / 2, y: bounds.y + 100 };
+    await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+    for (let step = 1; step <= 6; step += 1) {
+      await client.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ ...point, y: point.y + step * 30 }] });
+      await page.evaluate(() => new Promise(requestAnimationFrame));
+    }
+    await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await client.detach();
+  }
+  if (readingMode !== "following") {
+    await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toBeVisible();
+    await expect.poll(() => messageList.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeGreaterThan(50);
+    // Wait for native keyboard animation / touch momentum, not for app output.
+    await messageList.evaluate((element) => new Promise((resolve) => {
+      let previous = element.scrollTop;
+      let stableFrames = 0;
+      const check = () => {
+        stableFrames = element.scrollTop === previous ? stableFrames + 1 : 0;
+        previous = element.scrollTop;
+        if (stableFrames >= 5) resolve();
+        else requestAnimationFrame(check);
+      };
+      requestAnimationFrame(check);
+    }));
+  }
+  const beforeTerminalScrollTop = await messageList.evaluate((element) => element.scrollTop);
   await terminalRequested;
   releaseTerminal();
   const terminalText = currentRun.locator(".workspaceTerminalAnswer .streamingMarkdownContent");
   await expect(terminalText).toHaveText(finalRenderedText, { timeout: 300 });
   expect(await terminalText.evaluate((element) => element === window.__streamingMarkdownRoot)).toBe(true);
-  await expect.poll(() => messageList.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(2);
+  if (readingMode === "following") {
+    await expect.poll(() => messageList.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(2);
+  } else {
+    await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toBeVisible();
+    await expect.poll(() => messageList.evaluate((element) => element.scrollTop)).toBeCloseTo(beforeTerminalScrollTop, 0);
+    await messageList.focus();
+    await page.keyboard.press("End");
+    await expect.poll(() => messageList.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(2);
+    await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toBeHidden();
+  }
 
   await page.reload();
   const restoredRun = page.locator('[data-agent-run-id="agent_run_paced"]');
   await expect(restoredRun.locator(".workspaceTerminalAnswer .markdownContent")).toHaveText(finalRenderedText);
   await expect(restoredRun.locator(".streamingMarkdownContent")).toHaveCount(0);
+});
+}
+
+test("latest jump respects reduced motion and yields to keyboard input mid-animation", async ({ page }) => {
+  const fixture = await installChatFixture(page);
+  fixture.setAgentRuns("sess_1", [{
+    id: "agent_run_scroll", turnId: "turn_scroll", status: "completed",
+    createdAt: "2026-08-30T00:00:00Z", startedAt: "2026-08-30T00:00:00Z", completedAt: "2026-08-30T00:00:01Z",
+    model: { id: "model_1", displayName: "Clinical" },
+    messages: [
+      { messageId: "user_scroll", role: "user", text: "Long answer" },
+      { messageId: "assistant_scroll", role: "assistant", text: Array.from({ length: 80 }, (_, i) => `Paragraph ${i}`).join("\n\n") },
+    ],
+  }]);
+  await page.goto("/w/ws_1/agents/centaeris?sessionId=sess_1");
+  const list = page.getByTestId("virtual-agent-run-list");
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await expect(page.getByText("Paragraph 79", { exact: true })).toBeVisible();
+  await expect.poll(() => list.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThanOrEqual(2);
+  await list.hover();
+  await page.mouse.wheel(0, -300);
+  await expect(jump).toBeVisible();
+  await expect.poll(() => list.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeGreaterThan(250);
+  // Observe the native animation in flight, then interrupt with a real key.
+  await list.evaluate((el) => {
+    const start = el.scrollTop;
+    window.__jumpInFlight = new Promise((resolve) => {
+      const check = () => {
+        if (el.scrollTop > start && el.scrollHeight - el.clientHeight - el.scrollTop > 2) resolve();
+        else requestAnimationFrame(check);
+      };
+      requestAnimationFrame(check);
+    });
+  });
+  await jump.click();
+  await page.evaluate(() => window.__jumpInFlight);
+  await list.focus();
+  await page.keyboard.press("PageUp");
+  await expect(jump).toBeVisible();
+  await expect.poll(() => list.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeGreaterThan(250);
+  await page.waitForTimeout(500);
+  await expect(jump).toBeVisible();
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await list.evaluate((el) => {
+    const scrollTo = el.scrollTo.bind(el);
+    window.__reducedMotionBehaviors = [];
+    el.scrollTo = (options) => { window.__reducedMotionBehaviors.push(options.behavior); scrollTo(options); };
+  });
+  await jump.click();
+  await expect.poll(() => list.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThanOrEqual(2);
+  expect(await page.evaluate(() => window.__reducedMotionBehaviors)).not.toContain("smooth");
+  await expect(jump).toBeHidden();
 });
 
 test("keeps an accepted AgentRun owned by durable truth after a renderer reducer failure", async ({ page }) => {
@@ -1218,6 +1372,8 @@ test("keeps paged history DOM bounded while loading older AgentRuns", async ({ p
     };
   };
   let historyRequests = 0;
+  let releaseOlderHistory;
+  const olderHistoryGate = new Promise((resolve) => { releaseOlderHistory = resolve; });
   await page.route("http://localhost:8000/api/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
@@ -1231,6 +1387,7 @@ test("keeps paged history DOM bounded while loading older AgentRuns", async ({ p
     if (path === "/api/sessions/sess_1/history") {
       historyRequests += 1;
       const before = url.searchParams.get("before");
+      if (before !== null) await olderHistoryGate;
       return route.fulfill({
         json: before === null
           ? historyPage(session, Array.from({ length: 40 }, (_, offset) => agentRun(offset + 41)), { nextCursor: "cursor-40", hasMore: true })
@@ -1249,15 +1406,17 @@ test("keeps paged history DOM bounded while loading older AgentRuns", async ({ p
   await latestRun.getByRole("button", { name: "history.txt", exact: true }).click();
   await expect(latestRun.getByText("Preserved evidence", { exact: true })).toBeVisible();
 
-  await list.evaluate((element) => {
-    element.scrollTop = 0;
-    element.dispatchEvent(new Event("scroll", { bubbles: true }));
-  });
+  await list.focus();
+  await page.keyboard.press("Home");
   await expect.poll(() => historyRequests).toBe(2);
-  await list.evaluate((element) => {
-    element.scrollTop = 0;
-    element.dispatchEvent(new Event("scroll", { bubbles: true }));
-  });
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(0);
+  const readingAnchor = page.getByText("user-041", { exact: true });
+  await expect(readingAnchor).toBeVisible();
+  const anchorTop = await readingAnchor.evaluate((element) => element.getBoundingClientRect().top);
+  releaseOlderHistory();
+  await expect(page.getByText("正在读取更早内容…", { exact: true })).toBeHidden();
+  await expect.poll(() => readingAnchor.evaluate((element) => element.getBoundingClientRect().top)).toBeCloseTo(anchorTop, 0);
+  await page.keyboard.press("Home");
   await expect(page.getByText("user-001", { exact: true })).toBeVisible();
   expect(await list.getByRole("article").count()).toBeLessThan(24);
   await expect(latestRun).toHaveCount(0);
@@ -1624,10 +1783,8 @@ test("clears a deleted transcript before the next session history resolves", asy
   await expect(page.getByText("旧回答段落 80", { exact: true })).toBeVisible();
   const list = page.getByTestId("virtual-agent-run-list");
   await expect.poll(() => list.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(2);
-  await list.evaluate((element) => {
-    element.scrollTop = 0;
-    element.dispatchEvent(new Event("scroll", { bubbles: true }));
-  });
+  await list.focus();
+  await page.keyboard.press("Home");
   await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Conversation actions for 旧会话", exact: true }).click();
   await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
@@ -1718,6 +1875,7 @@ test("keeps reconnecting until durable terminal history arrives", async ({ page 
   await page.route("http://localhost:8000/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path === "/api/sessions/sess_1/agent-runs/agent_run_1/citations") return route.fulfill({ json: { schema: "workspace.citations.v1", sessionId: "sess_1", agentRunId: "agent_run_1", throughSequence: 4, citations: [] } });
     if (path === "/api/csrf") return route.fulfill({ json: { csrfToken: "test-token" } });
     if (path === "/api/me") return route.fulfill({ json: { user: { id: "1", email: "member@example.com", isStaff: false } } });
     if (path === "/api/workspaces") return route.fulfill({ json: { workspaces: [{ id: "ws_1", name: "默认工作区", status: "active", role: "owner" }] } });
@@ -2111,7 +2269,8 @@ test("uses the Centaeris information architecture", async ({ page }) => {
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
 });
 
-test("opens a human-readable citation without exposing locator JSON", async ({ page }) => {
+for (const citationMode of ["legacy", "platform"]) {
+test(`opens a human-readable ${citationMode} citation without exposing locator JSON`, async ({ page }) => {
   let previewFailure = false;
   let previewPdf = false;
   await page.route("http://localhost:8000/api/**", async (route) => {
@@ -2143,15 +2302,10 @@ test("opens a human-readable citation without exposing locator JSON", async ({ p
             { messageId: "user_1", role: "user", status: "done", text: "术前提醒" },
             { messageId: "assistant_1", role: "assistant", status: "done", text: "请核对患者病史。" },
           ],
-          records: [{
-            type: "citation_recorded",
-            payload: {
-              citationId: "citation_1",
-              inputRef: "input_1",
-              displayName: "术前须知.md",
-              evidenceKind: "workspaceSource",
-            },
-          }],
+          citations: citationMode === "platform" ? [{ citationId: "citation_1", inputRef: "input_1", displayName: "术前须知.md", sourceToolCallId: "call_material", sourceUrl: "/api/citations/citation_1" }] : undefined,
+          records: citationMode === "platform" ? [] : [{ type: "citation_recorded", payload: {
+            citationId: "citation_1", inputRef: "input_1", displayName: "术前须知.md", evidenceKind: "workspaceSource",
+          } }],
         }],
       ),
       "/api/citations/citation_1": {
@@ -2200,6 +2354,7 @@ test("opens a human-readable citation without exposing locator JSON", async ({ p
   await expect(preview.getByRole("navigation", { name: "File preview path" })).toContainText("单个任务时效性.xlsx");
   await expect(preview.locator("iframe")).toHaveAttribute("src", /#page=1$/);
 });
+}
 
 
 

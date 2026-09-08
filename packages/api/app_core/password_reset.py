@@ -178,10 +178,11 @@ def process_next_password_reset_mail() -> bool:
         return True
 
 
+@transaction.atomic
 def reset_password(uid: str, token: str, new_password: str) -> str | None:
     try:
         user_id = force_str(urlsafe_base64_decode(uid))
-        user = get_user_model().objects.get(pk=user_id, is_active=True)
+        user = get_user_model().objects.select_for_update().get(pk=user_id, is_active=True)
     except (TypeError, ValueError, OverflowError, get_user_model().DoesNotExist):
         return "account_password_reset_invalid"
     if not default_token_generator.check_token(user, token):

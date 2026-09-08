@@ -41,6 +41,7 @@ def lifecycle_fixture(agentRunId="agent_run_1"):
 
 
 class WorkerContractTests(unittest.TestCase):
+
     def test_terminal_dispatcher_does_not_acknowledge_partial_fanout(self):
         cursor = {"checkpointId": "checkpoint:dense", "toolCallId": "call:0255"}
         calls = []
@@ -298,42 +299,7 @@ class WorkerContractTests(unittest.TestCase):
 
         self.assertIsNone(request.call_args.kwargs["timeout"])
 
-    def test_knowledge_processing_has_no_worker_socket_deadline(self):
-        with patch.object(worker, "json_request", return_value={}) as request:
-            worker.runtime_knowledge_process_request(
-                {"schema": "knowledge.process.request.v1"}
-            )
 
-        self.assertIsNone(request.call_args.kwargs["timeout"])
-
-    def test_knowledge_process_job_uses_the_existing_runtime_job_worker(self):
-        jobId = f"knowledge.process:{'a' * 64}"
-        job = {
-            "jobId": jobId,
-            "jobKind": "knowledge.process",
-            "sessionId": "sess_1",
-            "payloadRef": "knowledge.process.v1:{}",
-            "idempotencyKey": jobId,
-        }
-        with patch.object(
-            worker,
-            "runtime_knowledge_process_request",
-            return_value={
-                "schema": "knowledge.process.result.v1",
-                "jobId": jobId,
-                "representationId": f"representation:sha256:{'a' * 64}",
-            },
-        ) as request:
-            worker.execute_knowledge_process_job(job, "worker:test-owner")
-
-        self.assertEqual(
-            request.call_args.args[0],
-            {
-                "schema": "knowledge.process.request.v1",
-                "jobId": jobId,
-                "leaseOwner": "worker:test-owner",
-            },
-        )
 
     def test_terminal_dispatcher_wakes_waiter_and_publishes_generation(self):
         calls = []
@@ -476,7 +442,8 @@ class WorkerContractTests(unittest.TestCase):
         new_total_http = new_wait_requests + new_claim_http
 
         self.assertEqual((old_scan_cycles, new_wait_requests), (120, 6))
-        self.assertEqual((old_claim_http, new_claim_http, new_total_http), (360, 18, 24))
+        self.assertEqual(worker.WORKER_JOB_KINDS, ("agent_run.lifecycle", "worker.noop"))
+        self.assertEqual((old_claim_http, new_claim_http, new_total_http), (240, 12, 18))
         print(
             "worker_idle_per_min "
             f"scan_cycles={old_scan_cycles}->{new_wait_requests} "

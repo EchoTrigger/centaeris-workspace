@@ -28,6 +28,7 @@ Run "Document processor tests" { uv run --frozen --package centaeris-document-pr
 Run "Django fresh migration" { uv run --frozen --package api python packages/api/manage.py migrate --noinput --settings=api.migration_test_settings }
 Run "Django migration drift" { uv run --frozen --package api python packages/api/manage.py makemigrations --check --dry-run --settings=api.migration_test_settings --skip-checks }
 Run "Full Django PostgreSQL suite" { uv run --frozen --package api python scripts/python_test_gate.py api }
+Run "First-party MCP Rust/Python client" { uv run --frozen --package api python scripts/platform-mcp-client-gate.py }
 Run "Node install" { npm ci }
 if ($InstallPlaywright) {
     if ($IsLinux) {
@@ -50,8 +51,9 @@ Run "Compose structure" {
         if ($config.services.$service.profiles) {
             throw "Required Runtime image service cannot be profile-gated: $service"
         }
-        if (-not $config.services.runtime.depends_on.$service) {
-            throw "Runtime must depend on required image service: $service"
+        $consumer = if ($service -eq "document-processor") { "material-worker" } else { "runtime" }
+        if (-not $config.services.$consumer.depends_on.$service) {
+            throw "$consumer must depend on required image service: $service"
         }
     }
 }

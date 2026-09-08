@@ -68,10 +68,10 @@ config = json.load(sys.stdin)
 assert config["name"] == "centaeris-workspace"
 required_builds = {"api", "document-processor", "runtime", "web", "worker", "workspace-general"}
 assert required_builds <= {name for name, service in config["services"].items() if "build" in service}
-for service_name in ("document-processor", "workspace-general"):
+for service_name, consumer in (("document-processor", "material-worker"), ("workspace-general", "runtime")):
     service = config["services"][service_name]
     assert not service.get("profiles")
-    assert service_name in config["services"]["runtime"]["depends_on"]
+    assert service_name in config["services"][consumer]["depends_on"]
 workspace = pathlib.Path(os.environ["WORKSPACE_ROOT"]).resolve()
 core = pathlib.Path(os.environ["CORE_ROOT"]).resolve()
 for name in required_builds:
@@ -87,9 +87,9 @@ for key, value in config["volumes"].items():
 
 "${compose[@]}" build --pull document-processor workspace-general runtime api worker web
 "${compose[@]}" config --format json | python3 scripts/verify-deployment-images.py
-"${compose[@]}" up -d --wait --wait-timeout 420 postgres redis api runtime worker web
+"${compose[@]}" up -d --wait --wait-timeout 420 postgres redis api runtime worker material-worker web
 
-for service in postgres redis api runtime worker web; do
+for service in postgres redis api runtime worker material-worker web; do
   "${compose[@]}" ps --status running --services | grep -Fx "$service" >/dev/null
 done
 

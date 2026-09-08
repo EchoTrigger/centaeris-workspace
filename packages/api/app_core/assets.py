@@ -124,7 +124,7 @@ def store_upload(upload, area: str) -> dict:
     except Exception:
         try:
             delete_stored_object_for_gc(requested_storage_key)
-        except Exception as cleanupError:
+        except Exception as cleanup_error:
             raise RuntimeError("upload_storage_cleanup_failed") from cleanup_error
         raise
     return {

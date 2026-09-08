@@ -12,6 +12,7 @@ from app_core.model_adapter import (
     validate_prepared_prompt,
 )
 from app_core.models import ModelConfig, AgentRunAuthorization
+from app_core.model_adapter.common import PREPARED_PROMPT_FIELDS
 from app_core.runtime_contract import (
     MODEL_RUN_SCHEMA,
     authorization_digest,
@@ -24,6 +25,7 @@ from .stream_response import OwnedAsyncStreamingHttpResponse
 
 
 router = Router(tags=["internal"], by_alias=True)
+MODEL_RUN_MAX_BODY_BYTES = 128 * 1024 * 1024
 
 
 @router.post(
@@ -33,8 +35,13 @@ router = Router(tags=["internal"], by_alias=True)
     include_in_schema=False,
 )
 async def model_runs(request):
+    # This authenticated transport carries inline base64 images. Bound its stream
+    # locally instead of relaxing Django's body limit for every public endpoint.
+    raw_body = request.read(MODEL_RUN_MAX_BODY_BYTES + 1)
+    if len(raw_body) > MODEL_RUN_MAX_BODY_BYTES:
+        return JsonResponse({"error": "model_run_request_too_large"}, status=413)
     try:
-        body = json.loads(request.body.decode("utf-8")) if request.body else {}
+        body = json.loads(raw_body.decode("utf-8")) if raw_body else {}
     except (UnicodeDecodeError, json.JSONDecodeError):
         return JsonResponse({"error": "invalid_json"}, status=400)
     prepared = await _validate_model_run(body)
@@ -157,16 +164,8 @@ def _validate_model_run(body):
             {"error": "prepared_prompt_schema_invalid"},
             status=400,
         )
-    allowed_prepared_prompt_fields = {
-        "schema",
-        "systemPrompt",
-        "messages",
-        "toolDefinitions",
-        "toolChoice",
-        "maxOutputTokens",
-    }
     unexpected_prepared_prompt_fields = sorted(
-        set(prepared_prompt) - allowed_prepared_prompt_fields
+        set(prepared_prompt) - PREPARED_PROMPT_FIELDS
     )
     if unexpected_prepared_prompt_fields:
         return JsonResponse(

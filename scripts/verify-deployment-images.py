@@ -14,15 +14,16 @@ def inspect_image(reference):
 def verify_images(config, inspect=inspect_image):
     services = config["services"]
     runtime = services["runtime"]["environment"]
-    for service, variable in (("document-processor", "KNOWLEDGE_PROCESSOR_IMAGE"),
-                              ("workspace-general", "WORKSPACE_GENERAL_IMAGE")):
+    for service, host, variable in (("document-processor", "material-worker", "MATERIAL_PROCESSOR_IMAGE"),
+                                    ("workspace-general", "runtime", "WORKSPACE_GENERAL_IMAGE")):
+        runtime = services[host]["environment"]
         built = inspect(services[service]["image"])
         referenced = inspect(runtime[variable])
         if built["Id"] != referenced["Id"]:
             raise ValueError(f"{service}: Runtime references a different image than the Compose build")
         if service == "document-processor":
             environment = dict(item.split("=", 1) for item in built["Config"]["Env"])
-            if environment.get("CENTAERIS_PROCESSOR_DEVICE") != runtime["KNOWLEDGE_PROCESSOR_DEVICE"]:
+            if environment.get("CENTAERIS_PROCESSOR_DEVICE") != runtime["MATERIAL_PROCESSOR_DEVICE"]:
                 raise ValueError("document-processor: built device differs from Runtime device")
 
 

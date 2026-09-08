@@ -26,12 +26,7 @@ from app_core.deferred_input import (
     resolved_input_storage,
 )
 from app_core.models import Session, AgentRun
-from app_core.knowledge import (
-    KnowledgeError,
-    commit_knowledge as commit_knowledge_operation,
-    read_knowledge as read_knowledge_operation,
-    search_knowledge as search_knowledge_operation,
-)
+from app_core.material_contract import KnowledgeError
 from app_core.runtime_contract import (
     authorization_digest,
     require_opaque_ref,
@@ -808,37 +803,47 @@ def artifact_status(request):
     return JsonResponse(publication_response(publication, artifact))
 
 
-@_internal_post("/knowledge/read")
-def read_knowledge(request):
+
+
+@_internal_post("/mcp/credential")
+def issue_platform_mcp_credential(request):
+    from app_core.material_access import MaterialAccessContext
+    from app_core.platform_mcp_auth import CredentialRejected, issue_credential
+
+    response_headers = {"Cache-Control": "no-store"}
+    if "HTTP_ORIGIN" in request.META:
+        return JsonResponse({"error": "unauthorized"}, status=401, headers=response_headers)
     try:
-        return JsonResponse(read_knowledge_operation(decode_json_object(request)))
-    except KnowledgeError as error:
-        return JsonResponse({"error": error.code}, status=error.status)
-    except Exception:
-        logger.exception("Knowledge read failed")
-        return JsonResponse({"error": "knowledge_read_failed"}, status=500)
+        raw = request.read(16 * 1024 + 1)
+        if len(raw) > 16 * 1024:
+            raise ValueError
+        body = json.loads(raw)
+        if not isinstance(body, dict) or set(body) != {"schema", "agentRunId", "authorizationDigest", "processingSpecification", "specDigest"} or body["schema"] != "workspace.mcp.credential.issue.v1":
+            raise ValueError
+        result = issue_credential(MaterialAccessContext(body["agentRunId"], body["authorizationDigest"], body["processingSpecification"], body["specDigest"]))
+        return JsonResponse(result, headers=response_headers)
+    except CredentialRejected:
+        return JsonResponse({"error": "unauthorized"}, status=401, headers=response_headers)
+    except (ValueError, TypeError, UnicodeDecodeError):
+        return JsonResponse({"error": "platform_mcp_credential_request_invalid"}, status=400, headers=response_headers)
 
 
-@_internal_post("/knowledge/search")
-def search_knowledge(request):
+@_internal_post("/materials/processor")
+def material_processor_specification(request):
+    from app_core.models import MaterialProcessor
     try:
-        return JsonResponse(search_knowledge_operation(decode_json_object(request)))
-    except KnowledgeError as error:
-        return JsonResponse({"error": error.code}, status=error.status)
-    except Exception:
-        logger.exception("Knowledge search failed")
-        return JsonResponse({"error": "knowledge_search_failed"}, status=500)
+        if decode_json_object(request) != {"schema": "workspace.material.processor.v1"}:
+            raise ValueError
+        processor = MaterialProcessor.objects.select_related("specification").get(name="document")
+        return JsonResponse({"schema": "workspace.material.processor.result.v1",
+            "processingSpecification": processor.specification.payload, "specDigest": processor.specification_id},
+            headers={"Cache-Control": "no-store"})
+    except ValueError:
+        return JsonResponse({"error": "material_processor_request_invalid"}, status=400)
+    except MaterialProcessor.DoesNotExist:
+        return JsonResponse({"error": "material_processor_unavailable"}, status=503)
 
 
-@_internal_post("/knowledge/commit")
-def commit_knowledge(request):
-    try:
-        return JsonResponse(commit_knowledge_operation(request), status=201)
-    except KnowledgeError as error:
-        return JsonResponse({"error": error.code}, status=error.status)
-    except Exception:
-        logger.exception("Knowledge commit failed")
-        return JsonResponse({"error": "knowledge_commit_failed"}, status=500)
 
 
 @_internal_post("/agent-runs/resolve-input")

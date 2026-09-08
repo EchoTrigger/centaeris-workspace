@@ -5,6 +5,7 @@ import {
   type ProjectedAgentRun,
 } from "./sessionEvents.ts";
 import type { StreamEntry, UnknownRecord } from "./streamTypes.ts";
+import type { CitationSnapshot } from "./citationSnapshot.ts";
 
 type Listener = () => void;
 type ChangeListener = (agentRunId: string) => void;
@@ -72,6 +73,7 @@ export type ChatViewStore = {
   prependAgentRuns(agentRuns: readonly ProjectedAgentRun[]): void;
   appendAgentRun(agentRun: ProjectedAgentRun): void;
   replaceAgentRun(agentRun: ProjectedAgentRun): void;
+  applyCitationSnapshot(snapshot: CitationSnapshot): void;
   replaceAgentRunId(previousAgentRunId: string, agentRun: ProjectedAgentRun): void;
   updateConnection(agentRunId: string, connection: string): void;
   rejectPendingAgentRun(agentRunId: string): void;
@@ -294,8 +296,17 @@ export function createChatViewStore({
     replaceAgentRun(agentRun) {
       const previous = agentRunsById.get(agentRun.id);
       if (!previous) throw new Error(`unknown agentRunId: ${agentRun.id}`);
+      if (previous.sessionId === agentRun.sessionId && previous.citationSequence > agentRun.citationSequence) {
+        agentRun = { ...agentRun, citations: previous.citations, citationSequence: previous.citationSequence };
+      }
       putAgentRun(agentRun);
       emitAgentRun(agentRun.id, isAgentRunActive(previous) !== isAgentRunActive(agentRun));
+    },
+    applyCitationSnapshot(snapshot) {
+      const previous = agentRunsById.get(snapshot.agentRunId);
+      if (!previous || previous.sessionId !== snapshot.sessionId || snapshot.throughSequence < previous.citationSequence) return;
+      putAgentRun({ ...previous, citations: snapshot.citations, citationSequence: snapshot.throughSequence });
+      emitAgentRun(previous.id);
     },
     replaceAgentRunId(previousAgentRunId, agentRun) {
       const index = orderedAgentRunIds.indexOf(previousAgentRunId);

@@ -29,6 +29,7 @@ type WorkspaceChatControllerOptions = {
   cancelFrame?: (frameId: number) => void;
   now?: () => number;
   onAgentRunError?: (payload: unknown) => void;
+  onCitationsChanged?: () => void;
 };
 
 function canCoalesce(left: StreamEntry | undefined, right: StreamEntry) {
@@ -62,6 +63,7 @@ export class WorkspaceChatController {
   readonly cancelFrame: (frameId: number) => void;
   readonly now: () => number;
   readonly onAgentRunError: (payload: unknown) => void;
+  readonly onCitationsChanged: () => void;
   private queue: StreamEntry[];
   private queueOffset: number;
   private frameId: number | null;
@@ -85,6 +87,7 @@ export class WorkspaceChatController {
     cancelFrame = (frameId) => cancelAnimationFrame(frameId),
     now = () => performance.now(),
     onAgentRunError = () => {},
+    onCitationsChanged = () => {},
   }: WorkspaceChatControllerOptions) {
     if (!store || !workspaceId || !sessionId || !agentRunId) throw new Error("chat controller identity is required");
     if (typeof initialCursor !== "string" || !initialCursor) throw new Error("initial stream cursor is invalid");
@@ -103,6 +106,7 @@ export class WorkspaceChatController {
     this.cancelFrame = cancelFrame;
     this.now = now;
     this.onAgentRunError = onAgentRunError;
+    this.onCitationsChanged = onCitationsChanged;
     this.queue = [];
     this.queueOffset = 0;
     this.frameId = null;
@@ -170,6 +174,10 @@ export class WorkspaceChatController {
       try {
         const telemetry = batch.map((entry) => this.acceptedTelemetry.get(entry));
         this.store.applyStreamEntries(batch, telemetry);
+        if (batch.some(({ item }) => item.kind === "committed"
+          && (item.event.type === "tool_result" || item.event.type === "citation_recorded" || TERMINALS.has(item.event.type)))) {
+          this.onCitationsChanged();
+        }
         batch.forEach((entry) => this.acceptedTelemetry.delete(entry));
         const failed = [...batch].reverse().find((entry) => entry.item.kind === "committed" && entry.item.event.type === "agent_run_failed");
         if (failed?.item.kind === "committed") {

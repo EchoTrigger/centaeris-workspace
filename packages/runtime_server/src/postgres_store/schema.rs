@@ -376,7 +376,7 @@ BEGIN
             PERFORM pg_notify('runtime_job_ready_v1', '');
         END IF;
     END IF;
-    IF NEW.status = 'queued' AND NEW.job_kind IN ('agent_run.lifecycle','knowledge.process','worker.noop') THEN
+    IF NEW.status = 'queued' AND NEW.job_kind IN ('agent_run.lifecycle','worker.noop') THEN
         IF TG_OP = 'INSERT' THEN
             PERFORM pg_notify('runtime_job_ready_v1', '');
         ELSIF OLD.status IS DISTINCT FROM 'queued' OR OLD.run_at_ms IS DISTINCT FROM NEW.run_at_ms OR OLD.job_kind IS DISTINCT FROM NEW.job_kind THEN

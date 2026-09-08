@@ -22,8 +22,7 @@ use serde_json::{json, Value};
 
 const TERMINAL_EVENT_TYPE: &str = "runtime_job.terminal";
 const SESSION_ID_PREFIX: &str = "session_";
-const PYTHON_WORKER_JOB_KINDS: [&str; 3] =
-    ["agent_run.lifecycle", "knowledge.process", "worker.noop"];
+const PYTHON_WORKER_JOB_KINDS: [&str; 2] = ["agent_run.lifecycle", "worker.noop"];
 
 fn python_worker_job_kind(value: &str) -> bool {
     PYTHON_WORKER_JOB_KINDS.contains(&value)
@@ -359,10 +358,8 @@ fn complete(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
         .map_err(|_| (500, "job_store_failed"))?
         .ok_or((404, "job_not_found"))?;
     if job.job_kind == "provider.poll"
-        || (matches!(
-            job.job_kind.as_str(),
-            "agent_run.lifecycle" | "worker.noop" | "knowledge.process"
-        ) && !request.output_refs.is_empty())
+        || (matches!(job.job_kind.as_str(), "agent_run.lifecycle" | "worker.noop")
+            && !request.output_refs.is_empty())
     {
         return Err((409, "job_complete_output_contract_mismatch"));
     }
@@ -927,7 +924,12 @@ mod tests {
             .expect("decode exact worker claim");
             assert!(python_worker_job_kind(request.job_kind.as_str()));
         }
-        for job_kind in ["provider.poll", "subagent.run", "banana"] {
+        for job_kind in [
+            "provider.poll",
+            "subagent.run",
+            "knowledge.process",
+            "banana",
+        ] {
             assert!(!python_worker_job_kind(job_kind));
         }
         assert!(serde_json::from_value::<ClaimRequest>(json!({

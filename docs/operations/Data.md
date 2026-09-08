@@ -20,6 +20,13 @@ backup therefore includes PostgreSQL and every persistent file volume. Backing
 up only one side can leave valid metadata without bytes or unowned bytes without
 metadata.
 
+Library and session file uploads reuse the earliest ready library object with
+the same SHA-256 for the same user, regardless of filename or folder. Reuse
+preserves its name and location and cleans up the newly uploaded storage copy.
+Other users and deleted objects are excluded. Different content with a conflicting
+name in the target folder receives `(1)`, `(2)`, etc. before the extension.
+This does not merge historical duplicates or change manual note/artifact workflows.
+
 ## Trash and deletion
 
 Supported product objects use a 30-day trash lifecycle where defined by their

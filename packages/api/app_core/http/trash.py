@@ -4,6 +4,7 @@ import json
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.db.models import Q
+from django.db.models.functions import Collate
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from ninja import Router, Status
@@ -80,6 +81,11 @@ def _filter_hash(filters: dict) -> str:
 
 
 def _after_cursor(queryset, kind: str, cursor: dict | None):
+    # Match Python's ID order in both selection and cursor comparison, regardless
+    # of the database default locale. ID is only a tie-breaker after deletion time.
+    queryset = queryset.alias(trash_sort_id=Collate("id", "C")).order_by(
+        "-deletedAt", "trash_sort_id"
+    )
     if cursor is None:
         return queryset
     deleted_at = parse_datetime(cursor["deletedAt"])
@@ -87,7 +93,7 @@ def _after_cursor(queryset, kind: str, cursor: dict | None):
     if kind > cursor["itemKind"]:
         after |= Q(deletedAt=deleted_at)
     elif kind == cursor["itemKind"]:
-        after |= Q(deletedAt=deleted_at, id__gt=cursor["id"])
+        after |= Q(deletedAt=deleted_at, trash_sort_id__gt=cursor["id"])
     return queryset.filter(after)
 
 
@@ -255,7 +261,7 @@ def list_trash(request, workspace_id: str):
     items = [
         *(
             _item("agent", item, item.name, "workspace", workspace_location)
-            for item in agents.order_by("-deletedAt", "id")[: TRASH_PAGE_SIZE + 1]
+            for item in agents[: TRASH_PAGE_SIZE + 1]
         ),
         *(
             _item(
@@ -265,11 +271,11 @@ def list_trash(request, workspace_id: str):
                 "workspace",
                 _location("agent", item.agent_id, item.agent.name, "workspace"),
             )
-            for item in sessions.order_by("-deletedAt", "id")[: TRASH_PAGE_SIZE + 1]
+            for item in sessions[: TRASH_PAGE_SIZE + 1]
         ),
         *(
             _item("source", item, item.name, "workspace", workspace_location)
-            for item in sources.order_by("-deletedAt", "id")[: TRASH_PAGE_SIZE + 1]
+            for item in sources[: TRASH_PAGE_SIZE + 1]
         ),
         *(
             _item(
@@ -284,9 +290,10 @@ def list_trash(request, workspace_id: str):
                     "privateLibrary",
                 ),
             )
-            for item in library.order_by("-deletedAt", "id")[: TRASH_PAGE_SIZE + 1]
+            for item in library[: TRASH_PAGE_SIZE + 1]
         ),
     ]
+    # Stable sorts implement deletedAt DESC, kind ASC, ID ASC (matching SQL C).
     items.sort(key=lambda item: (item["kind"], item["id"]))
     items.sort(key=lambda item: item["_deletedAt"], reverse=True)
     page, next_cursor, has_more = trash_page(

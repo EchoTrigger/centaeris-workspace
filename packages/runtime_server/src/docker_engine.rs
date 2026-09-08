@@ -1,14 +1,11 @@
 //! Local Docker transport. Runtime semantics stay in the execution host.
-mod archive;
 mod exec;
-pub(crate) use archive::{download_processor_outputs, upload_file};
 pub(crate) use exec::{ExecChild, ExecReader, ExecRequest, ExecStatus, ExecWriter};
 use std::future::Future;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use bollard::{errors::Error, models::ContainerCreateBody, query_parameters::*, Docker};
-use futures::TryStreamExt;
 use serde_json::Value;
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -348,68 +345,6 @@ pub(crate) fn remove(id: &str, volumes: bool) -> Result<(), String> {
             .err()
             .unwrap_or_else(|| "Docker removal was not confirmed".to_string()))
     }
-}
-
-pub(crate) struct ProcessOutput {
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
-    pub exit_code: i64,
-}
-
-/// Batch-container logs; exec, MCP and archive transports migrate separately.
-pub(crate) fn wait_output(id: &str, timeout: Duration) -> Result<ProcessOutput, String> {
-    let engine = shared()?;
-    engine.run(timeout, async {
-        let docker = engine.docker.clone().with_timeout(timeout);
-        let result = docker
-            .wait_container(
-                id,
-                Some(WaitContainerOptions {
-                    condition: "not-running".to_string(),
-                }),
-            )
-            .try_next()
-            .await;
-        let exit_code = match result {
-            Ok(Some(result)) => result.status_code,
-            Err(Error::DockerContainerWaitError { code, .. }) => code,
-            Ok(None) => return Err("Docker wait ended without exit status".to_string()),
-            Err(error) => return Err(error.to_string()),
-        };
-        let mut logs = docker.logs(
-            id,
-            Some(LogsOptions {
-                stdout: true,
-                stderr: true,
-                ..Default::default()
-            }),
-        );
-        let mut output = ProcessOutput {
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-            exit_code,
-        };
-        while let Some(frame) = logs.try_next().await.map_err(|e| e.to_string())? {
-            use bollard::container::LogOutput;
-            let (stderr, bytes) = match frame {
-                LogOutput::StdErr { message } => (true, message),
-                LogOutput::StdOut { message } => (false, message),
-                _ => return Err("unexpected Docker batch log stream".to_string()),
-            };
-            // Preserve the processor's existing 64 KiB per-channel diagnostic
-            // truncation while draining the stream. Ordinary exec is unchanged.
-            let target = if stderr {
-                &mut output.stderr
-            } else {
-                &mut output.stdout
-            };
-            let retained = bytes
-                .len()
-                .min((64 * 1024usize).saturating_sub(target.len()));
-            target.extend_from_slice(&bytes[..retained]);
-        }
-        Ok(output)
-    })
 }
 
 #[cfg(test)]

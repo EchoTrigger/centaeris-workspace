@@ -114,12 +114,13 @@ and 16 seconds with deterministic ±20% jitter; the worker yields until the Runt
 Unknown tool side effects are not retried.
 
 Compose owns the processor image reference through one YAML anchor shared by
-the build service and Runtime, just as it does for the general execution image.
+the build service and material Worker. The general execution image is shared
+between its build service and Runtime.
 `KNOWLEDGE_PROCESSOR_IMAGE` is not a Compose `.env` input. Both images are required
-services and must be built before Runtime starts.
+services; build them before starting their respective execution services.
 
 `KNOWLEDGE_PROCESSOR_DEVICE` is exactly `cpu` or `gpu:0`. One value configures
-both the build and Runtime. The Dockerfile derives the installation extra from
+both the build and material Worker (as MATERIAL_PROCESSOR_DEVICE). The Dockerfile derives the installation extra from
 that device (`cpu` or `gpu`); do not supply a separate `PROCESSOR_EXTRA`.
 The shared `local` image tag deliberately does not encode `gpu:0`. Rebuild after
 a device change. GPU deployment additionally requires compatible host hardware

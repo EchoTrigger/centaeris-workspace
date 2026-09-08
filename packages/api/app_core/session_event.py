@@ -63,11 +63,17 @@ def project_committed_agent_run(
         return locked_agent_run
 
 
+@transaction.atomic
 def rebuild_agent_run_citation_projection(
     agent_run: AgentRun,
+    through_sequence: int | None = None,
 ) -> list[SessionCitationProjection]:
+    from .material_receipts import citation_projections
+    agent_run = AgentRun.objects.select_for_update().select_related("workspace", "session").get(pk=agent_run.pk)
     citations = {}
     for stored_event in _committed_events(agent_run):
+        if through_sequence is not None and stored_event.sequence > through_sequence:
+            continue
         event = stored_event.payload
         if event["type"] != "citation_recorded":
             continue
@@ -92,8 +98,25 @@ def rebuild_agent_run_citation_projection(
             sourceToolCallId=payload["sourceToolCallId"],
             locator=payload["locator"],
         )
+    for citation in citation_projections(agent_run, through_sequence):
+        if citation.citationId in citations:
+            raise ValueError("material citation identity conflict")
+        citations[citation.citationId] = citation
     SessionCitationProjection.objects.filter(agent_run=agent_run).delete()
     return SessionCitationProjection.objects.bulk_create(citations.values())
+
+
+@transaction.atomic
+def citation_snapshot(agent_run: AgentRun) -> dict:
+    """Platform presentation snapshot; never creates Core Session events."""
+    agent_run = AgentRun.objects.select_for_update().get(pk=agent_run.pk)
+    through = SessionEvent.objects.filter(agent_run=agent_run).order_by("-sequence").values_list("sequence", flat=True).first() or 0
+    citations = rebuild_agent_run_citation_projection(agent_run, through)
+    return {"schema": "workspace.citations.v1", "agentRunId": agent_run.id,
+        "sessionId": agent_run.session_id, "throughSequence": through,
+        "citations": [{"citationId": c.citationId, "inputRef": c.inputRef, "displayName": c.displayName,
+            "sourceToolCallId": c.sourceToolCallId, "sourceUrl": f"/api/citations/{c.citationId}"}
+            for c in sorted(citations, key=lambda c: (c.sequence, c.citationId))]}
 
 
 def _published_artifact_for_event(agent_run: AgentRun, payload: dict):

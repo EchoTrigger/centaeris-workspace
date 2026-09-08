@@ -42,6 +42,23 @@ test("reasoning separates tool groups in sequence order with stable identities",
 const sessionId = "session_1";
 const agentRunId = "agent_run_1";
 
+test("platform snapshots hydrate without legacy events and stale or foreign responses cannot replace them", () => {
+  const citation = { citationId: "citation:1", inputRef: "input", displayName: "Material", sourceToolCallId: "call", sourceUrl: "/api/citations/citation:1" };
+  const run = validateHistoryPage(page(historyAgentRun([], { citations: [citation], citationSequence: 4 }))).agentRuns[0];
+  assert.deepEqual(run.citations, [citation]);
+  const store = createChatViewStore();
+  store.replaceAll([run]);
+  const snapshot = { schema: "workspace.citations.v1", agentRunId, sessionId, throughSequence: 3, citations: [] };
+  store.applyCitationSnapshot(snapshot);
+  store.applyCitationSnapshot({ ...snapshot, sessionId: "foreign", throughSequence: 5 });
+  assert.deepEqual(store.getAgentRunSnapshot(agentRunId).citations, [citation]);
+  store.replaceAgentRun({ ...run, citations: [], citationSequence: 2 });
+  assert.deepEqual(store.getAgentRunSnapshot(agentRunId).citations, [citation]);
+  store.applyCitationSnapshot({ ...snapshot, throughSequence: 5 });
+  assert.deepEqual(store.getAgentRunSnapshot(agentRunId).citations, []);
+  assert.equal(store.getAgentRunSnapshot(agentRunId).streamCursor, run.streamCursor);
+});
+
 test("live snapshots recover from history, ignore stale revisions and transition to one sealed block", () => {
   const reasoning = JSON.parse(readFileSync(new URL("../../../../../centaeris/packages/core/tests/fixtures/live_reasoning.json", import.meta.url), "utf8"));
   assert.equal(reasoningPreview(reasoning.text), "核对 input 保留 code 与 来源");
@@ -108,6 +125,8 @@ function historyAgentRun(events, overrides = {}) {
     events,
     live: null,
     streamCursor: "1-0",
+    citations: [],
+    citationSequence: 0,
     ...overrides,
   };
 }
@@ -386,6 +405,7 @@ test("live text is a replace-only overlay and disappears at terminal commit", ()
 });
 
 test("controller batches entries and rejects post-terminal data", async () => {
+  let citationRefreshes = 0;
   const store = createChatViewStore();
   store.replaceAll([validateHistoryPage(page(historyAgentRun([]))).agentRuns[0]]);
   const frames = [];
@@ -397,6 +417,7 @@ test("controller batches entries and rejects post-terminal data", async () => {
     scheduleFrame: (callback) => (frames.push(callback), frames.length),
     cancelFrame: () => {},
     now: () => 0,
+    onCitationsChanged: () => { citationRefreshes += 1; },
   });
   controller.accept(liveEntry(1, "正文"));
   const terminal = {
@@ -414,6 +435,7 @@ test("controller batches entries and rejects post-terminal data", async () => {
   frames.shift()();
   await controller.whenIdle();
   assert.equal(store.getAgentRunSnapshot(agentRunId).status, "failed");
+  assert.equal(citationRefreshes, 1);
 });
 
 test("committed phase atomically supersedes its older live overlay", () => {

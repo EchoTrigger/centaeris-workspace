@@ -813,15 +813,15 @@ fn postgres_runtime_job_wait_is_notified_and_closes_lost_wakeups() {
         )
         .expect("query future-job clock")
         .get::<_, i64>(0);
-    let mut future = job("knowledge.process:wait", "knowledge.process:wait");
-    future.job_kind = "knowledge.process".to_string();
+    let mut future = job("worker.noop:future", "worker.noop:future");
+    future.job_kind = "worker.noop".to_string();
     future.run_at_ms = future_now_ms + 100;
     future.created_at_ms = future_now_ms;
     future.updated_at_ms = future_now_ms;
     store
         .schedule_runtime_job(ScheduleRuntimeJobRequest { job: future })
         .expect("schedule future worker job");
-    let future_kinds = vec!["knowledge.process".to_string()];
+    let future_kinds = vec!["worker.noop".to_string()];
     assert!(
         store
             .wait_for_runtime_jobs(future_kinds.as_slice(), Duration::from_secs(1))

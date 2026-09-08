@@ -760,5 +760,7 @@
   "theme.label": "主题",
   "theme.system": "跟随系统（默认）",
   "theme.dark": "暗色主题",
-  "theme.light": "浅色主题"
+  "theme.light": "浅色主题",
+  "virtualAgentRunList.conversationMessages": "会话消息",
+  "appRoute.citationRefreshFailed": "无法刷新引用，请重新打开会话重试"
 }

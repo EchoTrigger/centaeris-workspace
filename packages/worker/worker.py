@@ -1,4 +1,5 @@
 import json
+import re
 import os
 import http.client
 import signal
@@ -22,7 +23,7 @@ JOB_WAIT_HTTP_TIMEOUT_SECONDS = 25
 JOB_WAIT_FAILURE_BACKOFF_SECONDS = 1
 OUTBOX_POLL_INTERVAL_SECONDS = 1
 RECONCILE_INTERVAL_SECONDS = 5
-WORKER_JOB_KINDS = ("agent_run.lifecycle", "knowledge.process", "worker.noop")
+WORKER_JOB_KINDS = ("agent_run.lifecycle", "worker.noop")
 CONTROL_HTTP_TIMEOUT_SECONDS = int(os.environ.get("RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS", "5"))
 if not 1 <= CONTROL_HTTP_TIMEOUT_SECONDS <= 1_000_000:
     raise ValueError("RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS must be between 1 and 1000000")
@@ -95,24 +96,16 @@ def runtime_teardown_request(body):
     )
 
 
-def runtime_knowledge_process_request(body):
-    return json_request(
-        f"{RUNTIME_INTERNAL_URL}/internal/knowledge/process",
-        body,
-        "X-Internal-Token",
-        INTERNAL_API_TOKEN,
-        "knowledge_processing_unavailable",
-        timeout=None,
-    )
 
 
-def api_request(path, body, default_reason):
+def api_request(path, body, default_reason, *, timeout=10):
     return json_request(
         f"{API_INTERNAL_URL}{path}",
         body,
         "X-Internal-Token",
         INTERNAL_API_TOKEN,
         default_reason,
+        timeout=timeout,
     )
 
 
@@ -511,33 +504,6 @@ def valid_runtime_job_id(value):
     )
 
 
-def execute_knowledge_process_job(job, lease_owner):
-    job_id = job.get("jobId")
-    if (
-        not isinstance(job_id, str)
-        or not job_id.startswith("knowledge.process:")
-        or not isinstance(job.get("payloadRef"), str)
-        or not job["payloadRef"].startswith("knowledge.process.v1:")
-        or not isinstance(job.get("sessionId"), str)
-        or not job["sessionId"]
-        or job.get("idempotencyKey") != job_id
-    ):
-        raise RuntimeError("knowledge_process_binding_invalid")
-    result = runtime_knowledge_process_request(
-        {
-            "schema": "knowledge.process.request.v1",
-            "jobId": job_id,
-            "leaseOwner": lease_owner,
-        }
-    )
-    if (
-        not isinstance(result, dict)
-        or set(result) != {"schema", "jobId", "representationId"}
-        or result.get("schema") != "knowledge.process.result.v1"
-        or result.get("jobId") != job_id
-        or not isinstance(result.get("representationId"), str)
-    ):
-        raise RuntimeError("knowledge_process_response_invalid")
 
 
 def claim_job(job_kind, lease_owner):
@@ -617,10 +583,6 @@ def execute_claimed_job(job, lease_owner):
             if job["jobKind"] == "worker.noop":
                 output_refs = []
                 completed = True
-            elif job["jobKind"] == "knowledge.process":
-                execute_knowledge_process_job(job, lease_owner)
-                output_refs = []
-                completed = True
             else:
                 output_refs = []
                 completed = execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease)
@@ -651,9 +613,6 @@ def execute_claimed_job(job, lease_owner):
                 flush=True,
             )
             fail_claimed_job(job, lease_owner, "agent_run_lifecycle_failed", False)
-            return
-        if job["jobKind"] == "knowledge.process":
-            fail_claimed_job(job, lease_owner, "knowledge_processing_failed", False)
             return
         raise
 
@@ -757,6 +716,8 @@ def dispatch_terminal_once(cursors=None):
         if key not in visible:
             del cursors[key]
     return len(events)
+
+
 
 
 class LifecycleReconciler:
