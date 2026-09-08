@@ -3,7 +3,7 @@ import { useTranslation } from "../i18n";
 import { useEffect, useState } from "react";
 import { Link, useLoaderData, useLocation, useNavigate } from "react-router";
 import { Building2 } from "lucide-react";
-import { LanguageSelector } from "../components/LanguageSelector";
+import { OnboardingUtilities } from "../components/OnboardingUtilities";
 
 const WORKSPACE_ROLE_LABELS = () => ({ owner: t("workspaceChooserRoute.owner"), admin: t("invitationActivationRoute.administrator"), member: t("invitationActivationRoute.member") });
 
@@ -25,7 +25,6 @@ export default function WorkspaceChooserRoute() {
 
   return (
     <main className="shWorkspaceChooser">
-      <LanguageSelector />
       {notice ? <div className="shWorkspaceToast" role="status">{notice}</div> : null}
       <section>
         <h1>{t("workspaceChooserRoute.chooseWorkspace")}</h1>
@@ -40,6 +39,7 @@ export default function WorkspaceChooserRoute() {
           ))}
         </nav>
       </section>
+      <OnboardingUtilities />
     </main>
   );
 }

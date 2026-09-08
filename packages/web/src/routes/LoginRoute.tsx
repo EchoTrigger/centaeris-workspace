@@ -2,6 +2,7 @@
 import { useTranslation } from "../i18n";
 import { useNavigate, useSearchParams } from "react-router";
 import { LoginForm } from "../components/LoginForm";
+import { OnboardingUtilities } from "../components/OnboardingUtilities";
 
 function safeReturnTo(value: string | null) {
   if (!value) return "/";
@@ -25,6 +26,7 @@ export default function LoginPage() {
         notice={searchParams.get("reset") === "1" ? t("loginRoute.yourPasswordHasBeenUpdatedSignInWithYour") : ""}
         onAuthenticated={() => navigate(safeReturnTo(searchParams.get("next")), { replace: true })}
       />
+      <OnboardingUtilities />
     </main>
   );
 }

@@ -1,5 +1,25 @@
 const { test, expect } = require("@playwright/test");
 
+test('onboarding language sits outside the form at bottom right and stays usable on mobile',async({page})=>{
+ await page.goto('/login');
+ const language=page.getByRole('combobox',{name:'语言',exact:true});
+ await expect(language).toBeVisible();
+ expect(await language.evaluate(node=>Boolean(node.closest('form')))).toBe(false);
+ let box=await language.boundingBox();
+ expect(box.x).toBeGreaterThan(page.viewportSize().width/2);
+ expect(box.y).toBeGreaterThan(page.viewportSize().height-100);
+ await page.locator('input[type=email]').fill('demo@example.com');
+ await language.selectOption('en');
+ await expect(page.locator('input[type=email]')).toHaveValue('demo@example.com');
+ await page.setViewportSize({width:375,height:667});
+ await page.getByRole('combobox',{name:'Language',exact:true}).scrollIntoViewIfNeeded();
+ const input=await page.locator('input[type=password]').boundingBox();
+ box=await page.getByRole('combobox',{name:'Language',exact:true}).boundingBox();
+ expect(box.x+box.width).toBeLessThanOrEqual(375);
+ expect(box.y).toBeGreaterThanOrEqual(input.y+input.height);
+ await expect(page.getByRole('button',{name:'Sign in',exact:true})).toBeVisible();
+});
+
 test("language changes preserve reasoning content and disclosure state", async ({ page }) => {
   await page.goto("/tests/fixtures/reasoning.html");
   await page.evaluate(() => window.reasoningFixture.liveSnapshot(1, "保留模型的思考内容"));

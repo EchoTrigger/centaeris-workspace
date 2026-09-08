@@ -5,6 +5,7 @@ import { type FormEvent, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router";
 import { ApiError, apiJson, jsonOptions } from "../api";
 import { LoginBrand } from "../components/LoginForm";
+import { OnboardingUtilities } from "../components/OnboardingUtilities";
 
 
 function resetError(error: unknown) {
@@ -43,7 +44,7 @@ export function ForgotPasswordRoute() {
     <LoginBrand heading={t("passwordResetRoute.checkYourEmail")} description={t("passwordResetRoute.passwordReset")} />
     <p className="loginMessage" role="status">{t("passwordResetRoute.ifThisEmailBelongsToAnAvailableAccountA")}</p>
     <Link className="secondary" to="/login">{t("passwordResetRoute.backToSignIn")}</Link>
-  </section></main>;
+  </section><OnboardingUtilities /></main>;
 
   return <main className="login"><form className="loginForm" onSubmit={submit}>
     <LoginBrand heading={t("passwordResetRoute.resetPassword")} description={t("passwordResetRoute.getAOneTimeLinkByEmail")} />
@@ -51,7 +52,7 @@ export function ForgotPasswordRoute() {
     {error ? <div className="error" role="alert">{error}</div> : null}
     <button className="primary" type="submit" disabled={busy}>{busy ? t("passwordResetRoute.sending") : t("passwordResetRoute.sendResetLink")}</button>
     <div className="loginAuxiliary"><Link to="/login">{t("passwordResetRoute.backToSignIn")}</Link></div>
-  </form></main>;
+  </form><OnboardingUtilities /></main>;
 }
 
 export function ResetPasswordRoute() {
@@ -97,7 +98,7 @@ export function ResetPasswordRoute() {
     <LoginBrand heading={t("passwordResetRoute.linkUnavailable")} description={t("passwordResetRoute.passwordReset")} />
     <p className="loginMessage" role="alert">{t("passwordResetRoute.theLinkIsIncompleteOrHasBeenRemovedFrom")}</p>
     <Link className="primary loginCenteredAction" to="/forgot-password">{t("passwordResetRoute.requestANewLink")}</Link>
-  </section></main>;
+  </section><OnboardingUtilities /></main>;
 
   return <main className="login"><form className="loginForm" onSubmit={submit}>
     <LoginBrand heading={t("passwordResetRoute.setANewPassword")} description={t("passwordResetRoute.allPreviousSignInSessionsWillExpireWhenYou")} />
@@ -105,5 +106,5 @@ export function ResetPasswordRoute() {
     <label className="field"><span>{t("passwordResetRoute.enterNewPasswordAgain")}</span><input type="password" autoComplete="new-password" minLength={15} required value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>
     {error ? <div className="error" role="alert">{error}</div> : null}
     <button className="primary" type="submit" disabled={busy}>{busy ? t("passwordResetRoute.updating") : t("passwordResetRoute.updatePassword")}</button>
-  </form></main>;
+  </form><OnboardingUtilities /></main>;
 }

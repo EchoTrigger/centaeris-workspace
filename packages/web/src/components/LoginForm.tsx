@@ -3,7 +3,6 @@ import { t } from "../i18n";
 import { useTranslation } from "../i18n";
 import { type FormEvent, useState } from "react";
 import { Link } from "react-router";
-import { LanguageSelector } from "./LanguageSelector";
 import { ApiError, apiJson, apiResponse, clearCsrfToken, jsonOptions } from "../api";
 
 type LoginIdentity = { id: string; email: string };
@@ -21,11 +20,10 @@ type LoginFormProps = {
 };
 
 export function LoginBrand({ heading, description }: { heading: string; description: string }) {
-  useTranslation();
-  return <><LanguageSelector /><div className="loginBrand">
+  return <div className="loginBrand">
     <img src="/centaeris-mark.png" alt="" />
     <div><h1>{heading}</h1><p>{description}</p></div>
-  </div></>;
+  </div>;
 }
 
 function loginError(error: unknown, reauthenticating: boolean) {

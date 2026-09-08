@@ -1019,4 +1019,11 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 .languageSelector select:hover { background: var(--surface-variant); border-color: var(--border-strong); }
 .languageSelector select:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
 .languageSelectorControl svg { position: absolute; right: 10px; top: 50%; width: 14px; height: 14px; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
-.loginForm > .languageSelector { align-self: stretch; padding-inline: 0; }
+.onboardingUtilities { position:fixed; right:max(24px, env(safe-area-inset-right)); bottom:max(20px, env(safe-area-inset-bottom)); display:flex; align-items:center; gap:16px; max-width:calc(100% - 40px); }
+.onboardingUtilities .languageSelector { min-height:36px; gap:10px; color:var(--muted); font-size:13px; }
+.onboardingUtilities .languageSelector select { width:128px; min-height:36px; background:transparent; border-color:transparent; }
+.onboardingUtilities .languageSelector select:hover { background:var(--surface-variant); }
+@media (max-width:640px), (max-height:560px) {
+  .login, .shWorkspaceChooser { grid-template-rows:1fr auto; gap:24px; min-height:100svh; padding-bottom:max(16px, env(safe-area-inset-bottom)); }
+  .onboardingUtilities { position:static; justify-self:end; max-width:100%; }
+}
