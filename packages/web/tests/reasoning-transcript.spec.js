@@ -144,3 +144,36 @@ test("reasoning and tools keep their order and independent disclosures across up
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("centaeris:language:v1", "en"));
 });
+test("live reasoning follows latest, detaches on scrolling, and resumes at bottom or reopening", async ({ page }) => {
+  await page.goto("/tests/fixtures/reasoning.html");
+  const content = (count) => Array.from({ length: count }, (_, i) => `Paragraph ${i + 1}: inspect inputs and constraints.`).join("\n\n");
+  await page.evaluate((text) => window.reasoningFixture.liveSnapshot(1, text), content(40));
+  const toggle = page.locator(".workspaceReasoning button").first();
+  await toggle.click();
+  const body = page.locator(".workspaceReasoningBody");
+  const gap = () => body.evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop);
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  await page.evaluate((text) => window.reasoningFixture.liveSnapshot(2, text), content(50));
+  await expect(body).toContainText("Paragraph 50:");
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  await body.hover();
+  await page.mouse.wheel(0, -250);
+  await expect.poll(gap).toBeGreaterThan(100);
+  // Wait for the wheel gesture to settle before checking that new text preserves position.
+  await page.waitForTimeout(200);
+  const detachedTop = await body.evaluate((node) => node.scrollTop);
+  await page.evaluate((text) => window.reasoningFixture.liveSnapshot(3, text), content(60));
+  await expect(body).toContainText("Paragraph 60:");
+  await expect.poll(() => body.evaluate((node) => node.scrollTop)).toBe(detachedTop);
+  await body.focus();
+  await page.keyboard.press("Control+End");
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  await page.evaluate((text) => window.reasoningFixture.liveSnapshot(4, text), content(70));
+  await expect(body).toContainText("Paragraph 70:");
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  await page.keyboard.press("Control+Home");
+  await expect.poll(gap).toBeGreaterThan(100);
+  await toggle.click();
+  await toggle.click();
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+});
