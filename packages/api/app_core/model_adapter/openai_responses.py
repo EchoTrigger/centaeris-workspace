@@ -44,7 +44,7 @@ async def async_open_ai_responses_client(model: ModelConfig) -> AsyncOpenAI:
 
 def build_open_ai_responses_request(model: ModelConfig, request_body: dict) -> dict:
     prepared_prompt = validate_prepared_prompt(model, request_body)
-    messages = build_messages(prepared_prompt)
+    messages = build_messages(prepared_prompt, "openai_responses")
     instructions = "\n\n".join(
         message["content"] for message in messages if message["role"] == "system"
     )

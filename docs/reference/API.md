@@ -7,6 +7,35 @@ Browser REST and SSE routes are rooted at `/api`. Postgres is truth; Redis holds
 bounded transient live projection. Unknown fields and schemas fail. Public
 Runtime event and tool semantics belong only to the exact public Cargo revision.
 
+## Model input images
+
+Internal model requests consume Core's `prepared_prompt.v1`.
+The authenticated `/internal/model-runs` JSON body is limited to
+128 MiB (134,217,728 bytes), including base64 and history text; oversized bodies
+return HTTP 413 with `model_run_request_too_large` before JSON parsing or provider
+execution. This does not change Django's limits for other API endpoints.
+
+The prompt supports optional `inputImages`. Each image has exactly
+`messageId`, `contentType`, `placeholder`,
+and `dataBase64`. Images bind to a unique placeholder in a user message. The API
+validates canonical base64, PNG/JPEG/WebP headers, declared media type, positive
+dimensions, at most 100,000,000 pixels, and at most 10 MiB (10,485,760 decoded
+bytes) per image before provider execution. Header inspection is not full pixel
+decoding. Unknown fields remain errors.
+
+Provider adapters replace placeholders in text order with Chat Completions
+`image_url`, Responses `input_image`, or Anthropic base64 `image` content blocks.
+Core-generated image fixtures protect cross-language contracts and limit parity.
+
+## Trash pagination
+
+`GET /api/workspaces/{workspaceId}/trash` orders entries by deletion time
+descending, then kind and ID ascending. ID ordering and cursor comparisons use
+PostgreSQL `C` collation, matching the Python merge independently of the database
+default locale. IDs are tie-breakers, not timestamps. Each kind contributes at
+most 51 candidates and the response contains at most 50 entries. Permissions,
+filters, and cursor fields are unchanged by the choice of database locale.
+
 ## Workspace citation presentation
 
 Each history AgentRun requires `citations` and `citationSequence`, including an

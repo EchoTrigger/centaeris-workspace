@@ -1,8 +1,9 @@
 from django.conf import settings
-from django.contrib.auth import authenticate, login, logout, update_session_auth_hash
+from django.contrib.auth import authenticate, get_user_model, login, logout, update_session_auth_hash
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Q
+from django.db import transaction
 from django.middleware.csrf import get_token
 from ninja import Router, Status
 
@@ -70,8 +71,12 @@ def log_out(request):
         409: ErrorResponse,
     },
 )
+@transaction.atomic
 def change_password(request, payload: PasswordChangeRequest):
-    user = request.user
+    try:
+        user = get_user_model().objects.select_for_update().get(pk=request.user.pk, is_active=True)
+    except get_user_model().DoesNotExist:
+        return Status(403, {"error": "account_current_password_invalid"})
     if not user.check_password(payload.current_password):
         return Status(403, {"error": "account_current_password_invalid"})
     if user.check_password(payload.new_password):

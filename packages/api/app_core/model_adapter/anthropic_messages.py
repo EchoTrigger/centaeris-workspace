@@ -44,7 +44,7 @@ async def async_anthropic_messages_client(model: ModelConfig) -> AsyncAnthropic:
 
 def build_anthropic_messages_request(model: ModelConfig, request_body: dict) -> dict:
     prepared_prompt = validate_prepared_prompt(model, request_body)
-    messages = build_messages(prepared_prompt)
+    messages = build_messages(prepared_prompt, "anthropic_messages")
     system = "\n\n".join(
         message["content"] for message in messages if message["role"] == "system"
     )

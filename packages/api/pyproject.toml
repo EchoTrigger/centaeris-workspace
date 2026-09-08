@@ -15,6 +15,7 @@ dependencies = [
   "jsonschema==4.26.0",
   "mcp==2.2.0",
   "openai==2.45.0",
+  "pillow==12.3.0",
   "pydantic==2.13.4",
   "psycopg[binary]==3.3.4",
   "redis==5.3.1",

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+from .images import project_images
 
 from asgiref.sync import sync_to_async
 from openai import (
@@ -26,6 +27,7 @@ from ..models import (
 
 
 MODEL_STREAM_SCHEMA = "api.model.stream.v1"
+PREPARED_PROMPT_FIELDS = {"schema", "systemPrompt", "messages", "toolDefinitions", "toolChoice", "maxOutputTokens", "inputImages"}
 logger = logging.getLogger(__name__)
 
 
@@ -157,15 +159,7 @@ def validate_prepared_prompt(model: ModelConfig, request_body: dict) -> dict:
     prepared_prompt = request_body.get("preparedPrompt")
     if not isinstance(prepared_prompt, dict) or prepared_prompt.get("schema") != "prepared_prompt.v1":
         raise ModelProviderError("prepared_prompt_invalid")
-    allowed_fields = {
-        "schema",
-        "systemPrompt",
-        "messages",
-        "toolDefinitions",
-        "toolChoice",
-        "maxOutputTokens",
-    }
-    if set(prepared_prompt) - allowed_fields:
+    if set(prepared_prompt) - PREPARED_PROMPT_FIELDS:
         raise ModelProviderError("prepared_prompt_fields_invalid")
     max_output_tokens = prepared_prompt.get("maxOutputTokens")
     if (
@@ -202,7 +196,7 @@ def request_thinking_mode(model: ModelConfig, request_body: dict) -> str | None:
     return value
 
 
-def build_messages(prepared_prompt: dict) -> list[dict]:
+def build_messages(prepared_prompt: dict, image_api: str = "openai_completions") -> list[dict]:
     messages = []
     system_prompt = prepared_prompt.get("systemPrompt")
     if system_prompt is not None and (
@@ -217,7 +211,9 @@ def build_messages(prepared_prompt: dict) -> list[dict]:
     pending_tool_call_ids = []
     seen_message_ids = set()
     seen_tool_call_ids = set()
+    message_indexes = {}
     for message in raw_messages:
+        projected_index = len(messages)
         if not isinstance(message, dict):
             raise ModelProviderError("prepared_prompt_message_invalid")
         message_id = message.get("messageId")
@@ -267,11 +263,16 @@ def build_messages(prepared_prompt: dict) -> list[dict]:
             messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": content})
         elif role in {"system", "user"} and content.strip():
             messages.append({"role": role, "content": content})
+        if len(messages) > projected_index:
+            message_indexes[message_id] = projected_index
     if pending_tool_call_ids:
         raise ModelProviderError("prepared_prompt_tool_pairing_invalid")
     if not messages:
         raise ModelProviderError("prepared_prompt_messages_required")
-    return messages
+    try:
+        return project_images(prepared_prompt, messages, message_indexes, image_api)
+    except ValueError as error:
+        raise ModelProviderError(str(error)) from error
 
 
 def assistant_tool_calls(message: dict) -> list[dict]:
