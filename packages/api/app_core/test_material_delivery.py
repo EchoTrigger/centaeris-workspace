@@ -42,6 +42,14 @@ class MaterialDeliveryTests(SimpleTestCase):
         self.assertEqual(list(collected), ['0', '1', '2'])
         self.assertEqual(list(collected.values()), ['x' * 90000] * 3)
 
+    def test_small_search_hits_share_one_page(self):
+        hits = [{"content": "small result", "segmentId": str(n), "citationAllowed": False,
+                 "locator": {"kind": "textSpan", "startByte": 0, "endByte": 12,
+                             "startLine": 1, "endLine": 1}} for n in range(10)]
+        page = delivery.render_page({"disposition": "ready", "hits": hits}, "result_4", "0:0")
+        self.assertEqual([item["segmentId"] for item in page["hits"]], [str(n) for n in range(10)])
+        self.assertIsNone(page["continuation"])
+
     def test_empty_result_has_no_nonadvancing_continuation(self):
         page = delivery.render_page({'disposition': 'ready', 'hits': []}, 'result_3', '0:0')
         self.assertEqual(page['hits'], [])

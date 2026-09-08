@@ -9,7 +9,7 @@ from .material_contract import KnowledgeError, sha256_bytes
 PAGE_BUDGET = 48 * 1024
 
 
-def render_page(snapshot, result_ref, cursor):
+def _single_page(snapshot, result_ref, cursor):
     if not isinstance(cursor, str) or not re.fullmatch(r"[0-9]{1,10}:[0-9]{1,12}", cursor):
         raise KnowledgeError("material_result_cursor_invalid", 400)
     index, offset = map(int, cursor.split(":"))
@@ -92,6 +92,33 @@ def render_page(snapshot, result_ref, cursor):
     if len(json.dumps(result, ensure_ascii=False).encode()) > PAGE_BUDGET:
         raise KnowledgeError("material_result_metadata_exceeds_budget")
     return result
+
+
+def render_page(snapshot, result_ref, cursor):
+    page = _single_page(snapshot, result_ref, cursor)
+    if "hits" not in page:
+        return page
+    start_index = int(cursor.split(":")[0])
+    while page["continuation"]:
+        continuation = page["continuation"]
+        if continuation["tool"] != "read_material_result":
+            break
+        next_cursor = continuation["arguments"]["cursor"]
+        index, offset = map(int, next_cursor.split(":"))
+        if offset:
+            break
+        following = _single_page(snapshot, result_ref, next_cursor)
+        candidate = {**page, "hits": page["hits"] + following["hits"],
+                     "continuation": following["continuation"]}
+        candidate["message"] = (
+            f"Showing results {start_index + 1}–{index + 1} of {len(snapshot['hits'])}. "
+            "Each hit includes the exact returned line and byte range. The complete result is preserved. "
+            + ("More content is available. Continue with " + json.dumps(candidate["continuation"], ensure_ascii=False)
+               if candidate["continuation"] else "This result has been fully returned."))
+        if len(json.dumps(candidate, ensure_ascii=False).encode()) > PAGE_BUDGET:
+            break
+        page = candidate
+    return page
 
 
 def save_result(access, call, result):
