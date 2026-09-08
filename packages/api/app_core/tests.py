@@ -7587,7 +7587,7 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         from .material_operations import operation_result
         self.assertEqual(operation_result(operation_access, pending_operation["operationId"])["status"], "completed")
 
-        ready = read_materials(operation_access, [inputBinding], offset=0, limit=20)
+        ready = read_materials(operation_access, [inputBinding], offset=0, limit=20, full_window=True)
         self.assertEqual(ready["disposition"], "ready")
         self.assertIn(pageText, ready["items"][0]["content"])
         locator = ready["items"][0]["locator"]
@@ -7663,7 +7663,7 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         receipt_output = bound_result["structuredContent"]
         self.assertEqual(MaterialEvidenceReceipt.objects.count(), 1)
         self.assertEqual(list(rebuild_agent_run_citation_projection(agent_run)), [])
-        model_content = json.dumps({"text": [item["text"] for item in bound_result["content"]], "structuredContent": receipt_output})
+        model_content = json.dumps(receipt_output)
         append_session_records(agent_run, [session_record(agent_run, 2, "tool_result", {
             "callId": "material-call", "toolName": "search_materials", "resultState": "successWithOutput",
             "modelContent": model_content, "outputComplete": True,

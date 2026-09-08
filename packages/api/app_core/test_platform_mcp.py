@@ -180,7 +180,7 @@ class PlatformMcpTransportTests(SimpleTestCase):
                     self.assertEqual(response.json()["result"]["protocolVersion"], "2025-11-25")
                     response = await client.post("/internal/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
                     listed = response.json()["result"]["tools"]
-                    self.assertEqual({tool["name"] for tool in listed}, {"list_materials", "read_material", "search_materials", "get_operation", "cancel_operation"})
+                    self.assertEqual({tool["name"] for tool in listed}, {"list_materials", "read_material", "search_materials", "read_material_result", "get_operation", "cancel_operation"})
                     for tool in listed:
                         self.assertFalse(tool["inputSchema"]["additionalProperties"])
                         self.assertNotIn("agent_run_id", tool["inputSchema"]["properties"])

@@ -28,7 +28,7 @@ class MaterialQueryContractTests(SimpleTestCase):
             "representations": patch.object(material_reads, "_representations", return_value=([object()], [])),
             "read": patch.object(material_reads, "_read_representation", return_value={"content": "evidence"}),
             "segments": patch.object(material_reads.KnowledgeSegment.objects, "filter"),
-            "hit": patch.object(material_reads.material_evidence, "search_evidence", side_effect=lambda segment, _item, score: {"segmentId": segment.segmentId, "score": score}),
+            "hit": patch.object(material_reads.material_evidence, "search_evidence", side_effect=lambda segment, _item, score, full_window=False: {"segmentId": segment.segmentId, "score": score}),
         }
         for name, patcher in patches.items():
             setattr(self, name, patcher.start())
@@ -61,7 +61,7 @@ class MaterialQueryContractTests(SimpleTestCase):
         self.read.assert_not_called()
 
     def test_ready_read_keeps_response_envelope_and_default_pagination(self):
-        self.read.side_effect = lambda _item, _representation, offset, limit: {
+        self.read.side_effect = lambda _item, _representation, offset, limit, full_window=False: {
             "content": "evidence", "startLine": offset + 1, "maxLines": limit,
         }
         self.assertEqual(self.read_request(), {
