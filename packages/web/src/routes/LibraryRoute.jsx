@@ -1,3 +1,6 @@
+import { i18n } from "../i18n";
+import { t } from "../i18n";
+import { useTranslation } from "../i18n";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useRouteLoaderData, useSearchParams } from "react-router";
 import {
@@ -30,30 +33,32 @@ function formatBytes(bytes) {
 function formatDate(value) {
   const date = new Date(value);
   if (Number.isNaN(date.valueOf())) return "—";
-  return new Intl.DateTimeFormat("zh-CN", { month: "short", day: "numeric" }).format(date);
+  return new Intl.DateTimeFormat(i18n.resolvedLanguage, { month: "short", day: "numeric" }).format(date);
 }
 
 function statusLabel(item) {
   if (item.status === "ready") return "";
-  if (item.status === "processing") return "处理中";
-  if (item.status === "failed") return "处理失败";
+  if (item.status === "processing") return t("libraryRoute.processing");
+  if (item.status === "failed") return t("libraryRoute.processingFailed");
   throw new Error(`unsupported library status: ${item.status}`);
 }
 
 const LIBRARY_VIEWS = new Set(["materials", "knowledge", "agents", "skills"]);
-const LIBRARY_TABS = [
-  ["materials", "资料", Folder],
-  ["knowledge", "知识库", BookOpen],
-  ["agents", "代理", Bot],
+const LIBRARY_TABS = () => ([
+  ["materials", t("libraryRoute.materials"), Folder],
+  ["knowledge", t("libraryRoute.knowledgeBases"), BookOpen],
+  ["agents", t("agentRunRow.agent"), Bot],
   ["skills", "Skills", Layers],
-];
+]);
 
 function SkillMarkdown({ content }) {
+  useTranslation();
   const source = content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
   return <MarkdownContent text={source} />;
 }
 
 function LibraryPageContent() {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const { workspace, agents } = useRouteLoaderData("workspace");
   const base = `/w/${encodeURIComponent(workspace.id)}`;
@@ -125,7 +130,7 @@ function LibraryPageContent() {
         navigate(`${base}/library`, { replace: true });
         return;
       }
-      setError(`无法读取资料库：${requestError.message}`);
+      setError(t("libraryRoute.unableToLoadLibraryValue", { value1: requestError.message }));
     } finally {
       setLoading(false);
     }
@@ -155,10 +160,10 @@ function LibraryPageContent() {
         if (active) setSkills(result.skills);
       })
       .catch((requestError) => {
-        if (active) setCatalogError(`无法读取 Skills：${requestError.message}`);
+        if (active) setCatalogError(t("libraryRoute.unableToLoadSkillsValue", { value1: requestError.message }));
       });
     return () => { active = false; };
-  }, [libraryView, workspace.id]);
+  }, [libraryView, workspace.id, t]);
 
   useEffect(() => {
     if (!selectedSkillId) return undefined;
@@ -178,7 +183,7 @@ function LibraryPageContent() {
       const result = await api(`/api/workspaces/${workspace.id}/skills/${encodeURIComponent(skillId)}`);
       setSkillDetail(result);
     } catch (requestError) {
-      setSkillDetailError(`无法打开 Skill：${requestError.message}`);
+      setSkillDetailError(t("libraryRoute.unableToOpenSkillValue", { value1: requestError.message }));
     } finally {
       setSkillDetailLoading(false);
     }
@@ -200,11 +205,11 @@ function LibraryPageContent() {
       return false;
     });
     if (duplicate) {
-      setUploadDialogError(`${duplicate.name} 已在上传队列中`);
+      setUploadDialogError(t("libraryRoute.valueIsAlreadyInTheUploadQueue", { value1: duplicate.name }));
       return;
     }
     if (uploadQueue.length + files.length > MAX_UPLOAD_BATCH_FILES) {
-      setUploadDialogError(`一次最多上传 ${MAX_UPLOAD_BATCH_FILES} 个文件`);
+      setUploadDialogError(t("libraryRoute.uploadUpToValueFilesAtATime", { value1: MAX_UPLOAD_BATCH_FILES }));
       return;
     }
     setUploadDialogError("");
@@ -266,7 +271,7 @@ function LibraryPageContent() {
       setDialog("");
       await loadLibrary();
     } catch (requestError) {
-      setUploadDialogError(`上传失败：${requestError.message}`);
+      setUploadDialogError(t("libraryRoute.uploadFailedValue", { value1: requestError.message }));
     } finally {
       setUploading(false);
     }
@@ -280,7 +285,7 @@ function LibraryPageContent() {
       setDialog("");
       await loadLibrary();
     } catch (requestError) {
-      setError(`新建文件夹失败：${requestError.message}`);
+      setError(t("libraryRoute.unableToCreateFolderValue", { value1: requestError.message }));
     } finally {
       setWorking(false);
     }
@@ -301,7 +306,7 @@ function LibraryPageContent() {
       setMoveFolderId(nextFolderId);
       setMoveObjects(result.objects);
     } catch (requestError) {
-      setError(`无法读取目标目录：${requestError.message}`);
+      setError(t("libraryRoute.unableToLoadDestinationFolderValue", { value1: requestError.message }));
     } finally {
       setMoveLoading(false);
     }
@@ -324,7 +329,7 @@ function LibraryPageContent() {
       setDialog("");
       await loadLibrary();
     } catch (requestError) {
-      setError(`移动失败：${requestError.message}`);
+      setError(t("libraryRoute.unableToMoveValue", { value1: requestError.message }));
     } finally {
       setWorking(false);
     }
@@ -339,7 +344,7 @@ function LibraryPageContent() {
       setCreatingMoveFolder(false);
       await loadMoveDirectory(moveFolderId);
     } catch (requestError) {
-      setError(`新建文件夹失败：${requestError.message}`);
+      setError(t("libraryRoute.unableToCreateFolderValue", { value1: requestError.message }));
     } finally {
       setWorking(false);
     }
@@ -355,8 +360,8 @@ function LibraryPageContent() {
       if (failures.length) {
         const nonEmpty = failures.some((result) => result.reason?.message === "library_folder_not_empty");
         setError(nonEmpty
-          ? `${results.length - failures.length} 项已移到垃圾桶；${failures.length} 个非空文件夹未处理。`
-          : `${results.length - failures.length} 项已移到垃圾桶；${failures.length} 项失败，请重试。`);
+          ? t("libraryRoute.valueItemsMovedToTrashValueNonEmptyFolders", { value1: results.length - failures.length, value2: failures.length })
+          : t("libraryRoute.valueItemsMovedToTrashValueFailedPleaseTry", { value1: results.length - failures.length, value2: failures.length }));
       }
     } finally {
       setWorking(false);
@@ -376,7 +381,7 @@ function LibraryPageContent() {
       }))));
       navigate(`${base}/agents/${encodeURIComponent(created.session.agentId)}?sessionId=${encodeURIComponent(created.session.id)}`);
     } catch (requestError) {
-      setError(`无法开始聊天：${requestError.message}`);
+      setError(t("libraryRoute.unableToStartChatValue", { value1: requestError.message }));
     } finally {
       setWorking(false);
     }
@@ -429,22 +434,22 @@ function LibraryPageContent() {
       <div className={`libraryWorkspace ${selectedSkillId ? "hasSkillPeek" : ""}`}>
         <section className="libraryMain shEmbeddedLibrary" aria-labelledby="library-title">
         <header className="libraryHeader">
-          <h1 id="library-title">库</h1>
+          <h1 id="library-title">{t("workspaceContextPanel.library")}</h1>
           {libraryView === "materials" ? <div className="libraryHeaderActions">
             <div className="libraryNewMenu">
-              <button className="libraryNewButton" type="button" aria-expanded={newMenuOpen} aria-haspopup="menu" onClick={() => setNewMenuOpen((open) => !open)}>新建<ChevronDown aria-hidden="true" /></button>
+              <button className="libraryNewButton" type="button" aria-expanded={newMenuOpen} aria-haspopup="menu" onClick={() => setNewMenuOpen((open) => !open)}>{t("libraryRoute.new")}<ChevronDown aria-hidden="true" /></button>
               {newMenuOpen && <div className="libraryNewMenuPanel" role="menu">
-                <button type="button" role="menuitem" disabled={uploading} onClick={openUploadDialog}><Upload aria-hidden="true" />上传文件</button>
-                <button type="button" role="menuitem" onClick={() => { setNewMenuOpen(false); setDialogTitle(""); setDialog("folder"); }}><Folder aria-hidden="true" />文件夹</button>
-                <button type="button" role="menuitem" onClick={createNote}><FileText aria-hidden="true" />笔记</button>
+                <button type="button" role="menuitem" disabled={uploading} onClick={openUploadDialog}><Upload aria-hidden="true" />{t("libraryRoute.uploadFiles")}</button>
+                <button type="button" role="menuitem" onClick={() => { setNewMenuOpen(false); setDialogTitle(""); setDialog("folder"); }}><Folder aria-hidden="true" />{t("libraryRoute.folder")}</button>
+                <button type="button" role="menuitem" onClick={createNote}><FileText aria-hidden="true" />{t("libraryRoute.note")}</button>
               </div>}
             </div>
           </div> : null}
         </header>
 
         <div className="libraryContent">
-          <nav className="libraryCatalogTabs" role="tablist" aria-label="库类型">
-            {LIBRARY_TABS.map(([value, label, Icon]) => <Link
+          <nav className="libraryCatalogTabs" role="tablist" aria-label={t("libraryRoute.libraryType")}>
+            {LIBRARY_TABS().map(([value, label, Icon]) => <Link
               className={libraryView === value ? "isActive" : ""}
               role="tab"
               aria-selected={libraryView === value}
@@ -454,31 +459,31 @@ function LibraryPageContent() {
           </nav>
 
           <div className="libraryCatalogTools">
-            {libraryView === "materials" && selectedItems.length ? <div className="librarySelectionBar" aria-label="已选文件操作">
-              <span>已选 {selectedItems.length} 个</span>
-              <button className="primary" type="button" disabled={selectionContainsFolder || working} onClick={startChat}><MessageSquarePlus aria-hidden="true" />开始聊天</button>
-              <button type="button" disabled={selectionContainsFolder || working} onClick={downloadSelected}><Download aria-hidden="true" />下载</button>
-              <button type="button" disabled={working} onClick={openMoveDialog}><FolderInput aria-hidden="true" />移动</button>
-              <button className="danger" type="button" disabled={working} onClick={() => void deleteSelected()}><Trash2 aria-hidden="true" />移到垃圾桶</button>
-            </div> : libraryView === "materials" ? <div className="libraryFilters" role="tablist" aria-label="资料类型">
-              {[["all", "全部"], ["images", "图片"], ["files", "文件"]].map(([value, label]) => <button className={filter === value ? "active" : ""} type="button" key={value} role="tab" aria-selected={filter === value} onClick={() => setFilter(value)}>{label}</button>)}
-            </div> : <span className="libraryCatalogAll">全部</span>}
-            <label className="librarySearch"><Search aria-hidden="true" /><span className="srOnly">搜索当前库</span><input aria-label="搜索当前库" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索" /></label>
+            {libraryView === "materials" && selectedItems.length ? <div className="librarySelectionBar" aria-label={t("libraryRoute.selectedFileActions")}>
+              <span>{t("library.selected", { count: selectedItems.length })}</span>
+              <button className="primary" type="button" disabled={selectionContainsFolder || working} onClick={startChat}><MessageSquarePlus aria-hidden="true" />{t("libraryRoute.startChat")}</button>
+              <button type="button" disabled={selectionContainsFolder || working} onClick={downloadSelected}><Download aria-hidden="true" />{t("workspaceContextPanel.download")}</button>
+              <button type="button" disabled={working} onClick={openMoveDialog}><FolderInput aria-hidden="true" />{t("libraryRoute.move")}</button>
+              <button className="danger" type="button" disabled={working} onClick={() => void deleteSelected()}><Trash2 aria-hidden="true" />{t("agentRoute.moveToTrash")}</button>
+            </div> : libraryView === "materials" ? <div className="libraryFilters" role="tablist" aria-label={t("libraryRoute.materialType")}>
+              {[["all", t("libraryRoute.all")], ["images", t("attachmentCard.image")], ["files", t("libraryRoute.files")]].map(([value, label]) => <button className={filter === value ? "active" : ""} type="button" key={value} role="tab" aria-selected={filter === value} onClick={() => setFilter(value)}>{label}</button>)}
+            </div> : <span className="libraryCatalogAll">{t("libraryRoute.all")}</span>}
+            <label className="librarySearch"><Search aria-hidden="true" /><span className="srOnly">{t("libraryRoute.searchThisLibrary")}</span><input aria-label={t("libraryRoute.searchThisLibrary")} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("libraryRoute.search")} /></label>
           </div>
 
           {libraryView === "materials" ? <>
-            {folderPath.length > 0 && <nav className="libraryBreadcrumb" aria-label="当前文件夹"><button type="button" onClick={() => navigate(`${base}/library`)}>资料库</button>{folderPath.map((folder) => <span key={folder.id}><ChevronRight aria-hidden="true" /><button type="button" onClick={() => navigate(libraryUrl(folder.id))}>{folder.displayName}</button></span>)}</nav>}
-            {error && <div className="errorBanner libraryError" role="alert">{error}<button type="button" onClick={loadLibrary}>重试</button></div>}
-            <div className={`libraryList ${selectedItems.length ? "hasSelection" : ""}`} role="table" aria-label="个人资料库文件">
+            {folderPath.length > 0 && <nav className="libraryBreadcrumb" aria-label={t("libraryRoute.currentFolder")}><button type="button" onClick={() => navigate(`${base}/library`)}>{t("libraryObjectRoute.library")}</button>{folderPath.map((folder) => <span key={folder.id}><ChevronRight aria-hidden="true" /><button type="button" onClick={() => navigate(libraryUrl(folder.id))}>{folder.displayName}</button></span>)}</nav>}
+            {error && <div className="errorBanner libraryError" role="alert">{error}<button type="button" onClick={loadLibrary}>{t("libraryObjectRoute.retry")}</button></div>}
+            <div className={`libraryList ${selectedItems.length ? "hasSelection" : ""}`} role="table" aria-label={t("libraryRoute.personalLibraryFiles")}>
               <div className="libraryListHeader" role="row">
-                <button className="librarySelect librarySelectAll" type="button" role="checkbox" aria-checked={allVisibleSelected} aria-label={allVisibleSelected ? "取消全选" : "全选当前列表"} onClick={toggleAllVisible}>{allVisibleSelected ? <Minus aria-hidden="true" /> : null}</button>
-                <span role="columnheader">名称</span><span role="columnheader">修改时间</span><span role="columnheader">大小</span>
+                <button className="librarySelect librarySelectAll" type="button" role="checkbox" aria-checked={allVisibleSelected} aria-label={allVisibleSelected ? t("libraryRoute.deselectAll") : t("libraryRoute.selectAllListedItems")} onClick={toggleAllVisible}>{allVisibleSelected ? <Minus aria-hidden="true" /> : null}</button>
+                <span role="columnheader">{t("libraryRoute.name")}</span><span role="columnheader">{t("libraryRoute.modified")}</span><span role="columnheader">{t("libraryRoute.size")}</span>
               </div>
-              {loading ? <div className="libraryEmptyState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />正在加载资料库</div> : visibleObjects.length === 0 ? <div className="libraryEmptyState">{objects.length === 0 ? "还没有资料。会话上传的附件会自动保存在这里。" : "没有符合筛选条件的资料。"}</div> : visibleObjects.map((item) => {
+              {loading ? <div className="libraryEmptyState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryRoute.loadingLibrary")}</div> : visibleObjects.length === 0 ? <div className="libraryEmptyState">{objects.length === 0 ? t("libraryRoute.noMaterialsYetConversationAttachmentsWillBeSavedHere") : t("libraryRoute.noMaterialsMatchYourFilters")}</div> : visibleObjects.map((item) => {
                 const ItemIcon = isFolder(item) ? Folder : isImage(item) ? ImageIcon : FileText;
                 const itemStatus = statusLabel(item);
                 return <div className={`libraryRow ${selectedIds.includes(item.id) ? "selected" : ""}`} role="row" key={item.id}>
-                  <label className="librarySelect"><input type="checkbox" checked={selectedIds.includes(item.id)} onChange={() => toggleSelection(item.id)} /><span className="srOnly">选择 {item.displayName}</span></label>
+                  <label className="librarySelect"><input type="checkbox" checked={selectedIds.includes(item.id)} onChange={() => toggleSelection(item.id)} /><span className="srOnly">{t("libraryRoute.select")}{" "}{item.displayName}</span></label>
                   <button className="libraryName" type="button" role="cell" onClick={() => navigate(isFolder(item) ? libraryUrl(item.id) : `${base}/library/${item.id}?folder=${encodeURIComponent(folderId)}`)}>
                     {isImage(item) && item.status === "ready" ? <img className="libraryThumbnail" src={apiUrl(`/api/library/${item.id}/preview`)} alt="" loading="lazy" /> : <ItemIcon aria-hidden="true" />}<span>{item.displayName}</span>{itemStatus && <small>{itemStatus}</small>}
                   </button>
@@ -486,39 +491,39 @@ function LibraryPageContent() {
                 </div>;
               })}
             </div>
-          </> : libraryView === "knowledge" ? <div className="libraryCatalogEmpty"><BookOpen aria-hidden="true" /><strong>还没有知识库</strong><span>真实 Source 接入后会显示在这里。</span></div>
-            : libraryView === "agents" ? <div className="libraryAgentStrip" aria-label="代理">
-              {visibleAgents.map((agent) => <Link className="libraryAgentCard" to={`${base}/agents/${encodeURIComponent(agent.id)}`} key={agent.id}><AgentMark agent={agent} /><strong>{agent.name}</strong><small>{agent.description || "私人代理"}</small></Link>)}
-              <Link className="libraryAgentCard isAdd" to={`${base}/agents/new`}><span aria-hidden="true">＋</span><strong>新代理</strong></Link>
-              {!visibleAgents.length && normalizedCatalogQuery ? <p className="libraryCatalogNoMatch">没有匹配的代理</p> : null}
+          </> : libraryView === "knowledge" ? <div className="libraryCatalogEmpty"><BookOpen aria-hidden="true" /><strong>{t("libraryRoute.noKnowledgeBasesYet")}</strong><span>{t("libraryRoute.connectedSourcesWillAppearHere")}</span></div>
+            : libraryView === "agents" ? <div className="libraryAgentStrip" aria-label={t("agentRunRow.agent")}>
+              {visibleAgents.map((agent) => <Link className="libraryAgentCard" to={`${base}/agents/${encodeURIComponent(agent.id)}`} key={agent.id}><AgentMark agent={agent} /><strong>{agent.name}</strong><small>{agent.description || t("libraryRoute.privateAgents")}</small></Link>)}
+              <Link className="libraryAgentCard isAdd" to={`${base}/agents/new`}><span aria-hidden="true">＋</span><strong>{t("libraryRoute.newAgent")}</strong></Link>
+              {!visibleAgents.length && normalizedCatalogQuery ? <p className="libraryCatalogNoMatch">{t("libraryRoute.noMatchingAgents")}</p> : null}
             </div>
               : <>
                   {catalogError ? <div className="errorBanner libraryError" role="alert">{catalogError}</div> : null}
-                  {skills === null && !catalogError ? <div className="libraryCatalogEmpty" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />正在读取 Skills</div> : null}
-                  {skills?.length === 0 && !catalogError ? <div className="libraryCatalogEmpty"><Layers aria-hidden="true" /><strong>当前工作区没有可用 Skills</strong><span>启用包含 Skill 的插件后会显示在这里。</span></div> : null}
+                  {skills === null && !catalogError ? <div className="libraryCatalogEmpty" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryRoute.loadingSkills")}</div> : null}
+                  {skills?.length === 0 && !catalogError ? <div className="libraryCatalogEmpty"><Layers aria-hidden="true" /><strong>{t("libraryRoute.noSkillsAvailableInThisWorkspace")}</strong><span>{t("libraryRoute.enableAPluginContainingSkillsToSeeThemHere")}</span></div> : null}
                   {skills?.length ? <div className="librarySkillTable" role="table" aria-label="Skills">
-                    <div className="librarySkillRow isHead" role="row"><span>名称</span><span>描述</span><span>来源</span><span>调用</span></div>
-                    {visibleSkills.map((skill) => <button className={`librarySkillRow ${selectedSkillId === skill.skillId ? "isSelected" : ""}`} type="button" role="row" aria-label={`预览 ${skill.name}`} onClick={() => void openSkill(skill.skillId)} key={skill.skillId}><span role="cell"><Layers aria-hidden="true" /><strong>{skill.name}</strong></span><span role="cell">{skill.description}</span><span role="cell">{skill.skillId.startsWith("system:") ? "系统" : "插件"}</span><span role="cell">{skill.allowImplicitInvocation ? "自动" : "显式"}</span></button>)}
-                    {!visibleSkills.length && normalizedCatalogQuery ? <p className="libraryCatalogNoMatch">没有匹配的 Skill</p> : null}
+                    <div className="librarySkillRow isHead" role="row"><span>{t("libraryRoute.name")}</span><span>{t("libraryRoute.description")}</span><span>{t("libraryRoute.source")}</span><span>{t("libraryRoute.invocation")}</span></div>
+                    {visibleSkills.map((skill) => <button className={`librarySkillRow ${selectedSkillId === skill.skillId ? "isSelected" : ""}`} type="button" role="row" aria-label={t("attachmentCard.previewValue", { value1: skill.name })} onClick={() => void openSkill(skill.skillId)} key={skill.skillId}><span role="cell"><Layers aria-hidden="true" /><strong>{skill.name}</strong></span><span role="cell">{skill.description}</span><span role="cell">{skill.skillId.startsWith("system:") ? t("libraryRoute.system") : t("libraryRoute.plugins")}</span><span role="cell">{skill.allowImplicitInvocation ? t("appRoute.auto") : t("libraryRoute.explicit")}</span></button>)}
+                    {!visibleSkills.length && normalizedCatalogQuery ? <p className="libraryCatalogNoMatch">{t("libraryRoute.noMatchingSkills")}</p> : null}
                   </div> : null}
                 </>}
         </div>
         </section>
 
-        <aside className={`librarySkillPeek ${selectedSkillId ? "isOpen" : ""}`} aria-label="Skill 预览" aria-hidden={!selectedSkillId}>
-          <header><button className="quietCloseButton" type="button" aria-label="关闭 Skill 预览" onClick={() => setSelectedSkillId("")}><X aria-hidden="true" /></button><span>Skill</span></header>
-          {skillDetailLoading ? <div className="librarySkillPeekState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />正在打开 Skill</div> : null}
+        <aside className={`librarySkillPeek ${selectedSkillId ? "isOpen" : ""}`} aria-label={t("libraryRoute.skillPreview")} aria-hidden={!selectedSkillId}>
+          <header><button className="quietCloseButton" type="button" aria-label={t("libraryRoute.closeSkillPreview")} onClick={() => setSelectedSkillId("")}><X aria-hidden="true" /></button><span>Skill</span></header>
+          {skillDetailLoading ? <div className="librarySkillPeekState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryRoute.openingSkill")}</div> : null}
           {skillDetailError ? <div className="errorBanner libraryError" role="alert">{skillDetailError}</div> : null}
           {skillDetail ? <div className="librarySkillPeekScroll">
-            <div className="librarySkillBanner"><Layers aria-hidden="true" />此文件作为 Skill 挂载给代理</div>
+            <div className="librarySkillBanner"><Layers aria-hidden="true" />{t("libraryRoute.thisFileIsMountedAsASkillForThe")}</div>
             <section className="librarySkillSummary">
               <span className="librarySkillIcon"><Layers aria-hidden="true" /></span>
               <h2>{skillDetail.skill.name}</h2>
               <p>{skillDetail.skill.description}</p>
               <dl>
-                <div><dt>来源</dt><dd>{skillDetail.skill.skillId.startsWith("system:") ? "系统挂载" : "插件挂载"}</dd></div>
-                <div><dt>调用</dt><dd>{skillDetail.skill.allowImplicitInvocation ? "自动或显式" : "仅显式"}</dd></div>
-                <div><dt>允许工具</dt><dd>{skillDetail.skill.allowedTools.length ? skillDetail.skill.allowedTools.join(" · ") : "未限制"}</dd></div>
+                <div><dt>{t("libraryRoute.source")}</dt><dd>{skillDetail.skill.skillId.startsWith("system:") ? t("libraryRoute.systemMount") : t("libraryRoute.pluginMount")}</dd></div>
+                <div><dt>{t("libraryRoute.invocation")}</dt><dd>{skillDetail.skill.allowImplicitInvocation ? t("libraryRoute.automaticOrExplicit") : t("libraryRoute.explicitOnly")}</dd></div>
+                <div><dt>{t("libraryRoute.allowedTools")}</dt><dd>{skillDetail.skill.allowedTools.length ? skillDetail.skill.allowedTools.join(" · ") : t("libraryRoute.unrestricted")}</dd></div>
               </dl>
             </section>
             <article className="librarySkillDocument"><SkillMarkdown content={skillDetail.content} /></article>
@@ -529,7 +534,7 @@ function LibraryPageContent() {
       {dialog && <div className="libraryDialogBackdrop" role="presentation" onMouseDown={closeDialog}>
         <section className={`libraryDialog ${dialog === "move" ? "libraryMoveDialog" : ""} ${dialog === "upload" ? "libraryUploadDialog" : ""}`} ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="library-dialog-title" tabIndex={-1} onMouseDown={(event) => event.stopPropagation()}>
           {dialog === "upload" && <>
-            <header className="libraryUploadHeader"><div><h2 id="library-dialog-title">上传文件</h2><p>添加到{folderPath.length ? `“${folderPath.at(-1).displayName}”` : "我的资料"}</p></div><span>{uploadQueue.length}/{MAX_UPLOAD_BATCH_FILES}</span></header>
+            <header className="libraryUploadHeader"><div><h2 id="library-dialog-title">{t("libraryRoute.uploadFiles")}</h2><p>{t("library.destination", { destination: folderPath.length ? `“${folderPath.at(-1).displayName}”` : t("libraryRoute.myMaterials") })}</p></div><span>{uploadQueue.length}/{MAX_UPLOAD_BATCH_FILES}</span></header>
             <div
               className={`libraryUploadDropzone ${uploadDragActive ? "is-dragging" : ""}`}
               role="button"
@@ -543,17 +548,17 @@ function LibraryPageContent() {
               onDrop={(event) => { event.preventDefault(); setUploadDragActive(false); addUploadFiles(event.dataTransfer.files); }}
             >
               <span className="libraryUploadDropIcon"><Upload aria-hidden="true" /></span>
-              <strong>{uploadDragActive ? "松开即可加入队列" : "拖入一个或多个文件"}</strong>
-              <p>或者点击这里，每次选择一个文件</p>
+              <strong>{uploadDragActive ? t("libraryRoute.dropToAddToTheQueue") : t("libraryRoute.dragOneOrMoreFilesHere")}</strong>
+              <p>{t("libraryRoute.orClickHereToChooseOneFileAtA")}</p>
             </div>
-            <input ref={fileInputRef} className="srOnly" type="file" aria-label="选择一个文件" disabled={uploading} onChange={selectUploadFile} />
+            <input ref={fileInputRef} className="srOnly" type="file" aria-label={t("libraryRoute.chooseAFile")} disabled={uploading} onChange={selectUploadFile} />
             {uploadDialogError && <div className="libraryUploadError" role="alert">{uploadDialogError}</div>}
-            {uploadQueue.length ? <div className="libraryUploadQueue" aria-label="上传队列">{uploadQueue.map((file) => <div className="libraryUploadQueueItem" key={uploadFileKey(file)}><span><FileText aria-hidden="true" /></span><div><strong>{file.name}</strong><small>{formatBytes(file.size)}</small></div><button type="button" disabled={uploading} onClick={() => removeUploadFile(file)} aria-label={`移除 ${file.name}`}><X aria-hidden="true" /></button></div>)}</div> : null}
-            <div className="libraryDialogActions libraryUploadActions"><button type="button" disabled={uploading} onClick={closeUploadDialog}>取消</button><button className="primary" type="button" disabled={uploading || !uploadQueue.length} aria-live="polite" onClick={uploadQueuedFiles}>{uploading ? <><LoaderCircle className="statusIcon" aria-hidden="true" />正在上传</> : `上传 ${uploadQueue.length} 个文件`}</button></div>
+            {uploadQueue.length ? <div className="libraryUploadQueue" aria-label={t("libraryRoute.uploadQueue")}>{uploadQueue.map((file) => <div className="libraryUploadQueueItem" key={uploadFileKey(file)}><span><FileText aria-hidden="true" /></span><div><strong>{file.name}</strong><small>{formatBytes(file.size)}</small></div><button type="button" disabled={uploading} onClick={() => removeUploadFile(file)} aria-label={t("attachmentCard.removeValue", { value1: file.name })}><X aria-hidden="true" /></button></div>)}</div> : null}
+            <div className="libraryDialogActions libraryUploadActions"><button type="button" disabled={uploading} onClick={closeUploadDialog}>{t("agentRunRow.cancel")}</button><button className="primary" type="button" disabled={uploading || !uploadQueue.length} aria-live="polite" onClick={uploadQueuedFiles}>{uploading ? <><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryRoute.uploading")}</> : t("libraryRoute.uploadValueFiles", { value1: uploadQueue.length })}</button></div>
           </>}
-          {dialog === "folder" && <><h2 id="library-dialog-title">新建文件夹</h2><input autoFocus value={dialogTitle} onChange={(event) => setDialogTitle(event.target.value)} placeholder="文件夹名称" /><div className="libraryDialogActions"><button type="button" onClick={() => setDialog("")}>取消</button><button className="primary" type="button" disabled={working || !dialogTitle.trim()} onClick={createFolder}>创建</button></div></>}
-          {dialog === "move" && <><header className="libraryMoveHeader"><h2 id="library-dialog-title">移动到…</h2><button type="button" onClick={() => setDialog("")} aria-label="关闭移动"><X aria-hidden="true" /></button></header><button className="libraryMoveRoot" type="button" onClick={() => loadMoveDirectory("")}>库</button>{error && <div className="errorBanner" role="alert">{error}</div>}<div className="libraryMoveObjects">{moveLoading ? <div className="libraryEmptyState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />正在读取目录</div> : moveObjects.map((item) => { const ItemIcon = isFolder(item) ? Folder : isImage(item) ? ImageIcon : FileText; const disabled = !isFolder(item) || selectedIds.includes(item.id); return isFolder(item) ? <button className="libraryMoveObject folder" type="button" key={item.id} disabled={disabled} onClick={() => loadMoveDirectory(item.id)}><ItemIcon aria-hidden="true" /><span>{item.displayName}</span></button> : <div className="libraryMoveObject file" key={item.id}><ItemIcon aria-hidden="true" /><span>{item.displayName}</span></div>; })}</div><footer className="libraryMoveActions">{creatingMoveFolder ? <form className="libraryMoveCreate" onSubmit={(event) => { event.preventDefault(); createMoveFolder(); }}><input autoFocus value={moveFolderName} onChange={(event) => setMoveFolderName(event.target.value)} placeholder="新建文件夹名称" /><button className="primary" type="submit" disabled={working || !moveFolderName.trim()}>创建</button></form> : <button type="button" disabled={working} onClick={() => { setError(""); setCreatingMoveFolder(true); }}>新建文件夹</button>}<span /><button type="button" onClick={() => setDialog("")}>取消</button><button className="primary" type="button" disabled={working || moveLoading} onClick={moveSelected}>移动到这里</button></footer></>}
-          {dialog === "agent" && <><h2 id="library-dialog-title">选择代理</h2><div className="libraryAgentChoices">{agents.map((agent) => <button type="button" key={agent.id} onClick={() => void createChat(agent.id)}>{agent.name}</button>)}</div><div className="libraryDialogActions"><button type="button" onClick={() => setDialog("")}>取消</button></div></>}
+          {dialog === "folder" && <><h2 id="library-dialog-title">{t("libraryRoute.newFolder")}</h2><input autoFocus value={dialogTitle} onChange={(event) => setDialogTitle(event.target.value)} placeholder={t("libraryRoute.folderName")} /><div className="libraryDialogActions"><button type="button" onClick={() => setDialog("")}>{t("agentRunRow.cancel")}</button><button className="primary" type="button" disabled={working || !dialogTitle.trim()} onClick={createFolder}>{t("libraryRoute.create")}</button></div></>}
+          {dialog === "move" && <><header className="libraryMoveHeader"><h2 id="library-dialog-title">{t("libraryRoute.moveTo")}</h2><button type="button" onClick={() => setDialog("")} aria-label={t("libraryRoute.closeMoveDialog")}><X aria-hidden="true" /></button></header><button className="libraryMoveRoot" type="button" onClick={() => loadMoveDirectory("")}>{t("workspaceContextPanel.library")}</button>{error && <div className="errorBanner" role="alert">{error}</div>}<div className="libraryMoveObjects">{moveLoading ? <div className="libraryEmptyState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryRoute.loadingFolders")}</div> : moveObjects.map((item) => { const ItemIcon = isFolder(item) ? Folder : isImage(item) ? ImageIcon : FileText; const disabled = !isFolder(item) || selectedIds.includes(item.id); return isFolder(item) ? <button className="libraryMoveObject folder" type="button" key={item.id} disabled={disabled} onClick={() => loadMoveDirectory(item.id)}><ItemIcon aria-hidden="true" /><span>{item.displayName}</span></button> : <div className="libraryMoveObject file" key={item.id}><ItemIcon aria-hidden="true" /><span>{item.displayName}</span></div>; })}</div><footer className="libraryMoveActions">{creatingMoveFolder ? <form className="libraryMoveCreate" onSubmit={(event) => { event.preventDefault(); createMoveFolder(); }}><input autoFocus value={moveFolderName} onChange={(event) => setMoveFolderName(event.target.value)} placeholder={t("libraryRoute.newFolderName")} /><button className="primary" type="submit" disabled={working || !moveFolderName.trim()}>{t("libraryRoute.create")}</button></form> : <button type="button" disabled={working} onClick={() => { setError(""); setCreatingMoveFolder(true); }}>{t("libraryRoute.newFolder")}</button>}<span /><button type="button" onClick={() => setDialog("")}>{t("agentRunRow.cancel")}</button><button className="primary" type="button" disabled={working || moveLoading} onClick={moveSelected}>{t("libraryRoute.moveHere")}</button></footer></>}
+          {dialog === "agent" && <><h2 id="library-dialog-title">{t("libraryRoute.selectAgent")}</h2><div className="libraryAgentChoices">{agents.map((agent) => <button type="button" key={agent.id} onClick={() => void createChat(agent.id)}>{agent.name}</button>)}</div><div className="libraryDialogActions"><button type="button" onClick={() => setDialog("")}>{t("agentRunRow.cancel")}</button></div></>}
         </section>
       </div>}
     </ShellPage>
@@ -561,5 +566,6 @@ function LibraryPageContent() {
 }
 
 export default function LibraryPage() {
+  useTranslation();
   return <LibraryPageContent />;
 }

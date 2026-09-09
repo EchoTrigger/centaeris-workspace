@@ -28,12 +28,12 @@ test("returns an anonymous deep link after login", async ({ page }) => {
   await expect(page).toHaveURL(/\/login\?/);
   expect(new URL(page.url()).searchParams.get("next")).toBe("/w/ws_1/settings/general?source=deep-link");
 
-  await page.getByLabel("邮箱").fill("owner@example.com");
-  await page.getByLabel("密码").fill("correct-password");
-  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.getByLabel("Email").fill("owner@example.com");
+  await page.getByLabel("Password").fill("correct-password");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
 
   await expect(page).toHaveURL(/\/w\/ws_1\/settings\/general\?source=deep-link$/);
-  await expect(page.getByRole("dialog", { name: "通用" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "General" })).toBeVisible();
 });
 
 for (const response of [
@@ -45,8 +45,8 @@ for (const response of [
     await page.goto("/w/ws_1/settings/general");
 
     await expect(page).toHaveURL(/\/w\/ws_1\/settings\/general$/);
-    await expect(page.getByRole("heading", { name: "页面暂时无法加载" })).toBeVisible();
-    await expect(page.getByRole("alert")).toContainText("重新加载后仍有问题");
+    await expect(page.getByRole("heading", { name: "This page could not be loaded" })).toBeVisible();
+    await expect(page.getByRole("alert")).toContainText("If reloading does not help");
   });
 }
 
@@ -64,19 +64,19 @@ test("requests a reset link without revealing whether the account exists", async
   });
 
   await page.goto("/login");
-  await page.getByRole("link", { name: "忘记密码？" }).click();
+  await page.getByRole("link", { name: "Forgot password?" }).click();
   await expect(page).toHaveURL(/\/forgot-password$/);
-  await expect(page.getByRole("heading", { name: "重置密码" })).toBeVisible();
-  await page.getByLabel("邮箱").fill("member@example.com");
+  await expect(page.getByRole("heading", { name: "Reset password" })).toBeVisible();
+  await page.getByLabel("Email").fill("member@example.com");
   const [response] = await Promise.all([
     page.waitForResponse((item) => item.request().method() === "POST"
       && new URL(item.url()).pathname === "/api/account/password-reset-requests"),
-    page.getByRole("button", { name: "发送重置链接" }).click(),
+    page.getByRole("button", { name: "Send reset link" }).click(),
   ]);
 
   expect(response.status()).toBe(202);
-  await expect(page.getByRole("heading", { name: "检查邮箱" })).toBeVisible();
-  await expect(page.getByRole("status")).toContainText("如果该邮箱对应可用账号");
+  await expect(page.getByRole("heading", { name: "Check your email" })).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("If this email belongs to an available account");
   expect(requestBody).toEqual({ email: "member@example.com" });
 });
 
@@ -95,12 +95,12 @@ test("resets a password from a fragment token and removes it from the address", 
 
   await page.goto("/reset-password#uid=dXNlcl8x&token=reset-token");
   await expect(page).toHaveURL(/\/reset-password$/);
-  await page.getByLabel("新密码", { exact: true }).fill("Replacement-Passphrase!2027");
-  await page.getByLabel("再次输入新密码").fill("Replacement-Passphrase!2027");
-  await page.getByRole("button", { name: "更新密码" }).click();
+  await page.getByLabel("New password", { exact: true }).fill("Replacement-Passphrase!2027");
+  await page.getByLabel("Enter new password again").fill("Replacement-Passphrase!2027");
+  await page.getByRole("button", { name: "Update password" }).click();
 
   await expect(page).toHaveURL(/\/login\?reset=1$/);
-  await expect(page.getByRole("status")).toHaveText("密码已更新，请使用新密码登录。");
+  await expect(page.getByRole("status")).toHaveText("Your password has been updated. Sign in with your new password.");
   expect(resetBody).toEqual({
     uid: "dXNlcl8x",
     token: "reset-token",
@@ -119,7 +119,13 @@ test("shows when password reset email is not configured", async ({ page }) => {
   });
 
   await page.goto("/forgot-password");
-  await page.getByLabel("邮箱").fill("member@example.com");
-  await page.getByRole("button", { name: "发送重置链接" }).click();
-  await expect(page.getByRole("alert")).toHaveText("管理员尚未配置邮件服务，请联系管理员重置密码。");
+  await page.getByLabel("Email").fill("member@example.com");
+  await page.getByRole("button", { name: "Send reset link" }).click();
+  await expect(page.getByRole("alert")).toHaveText("Email is not configured. Contact your administrator to reset your password.");
+});
+
+
+
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("centaeris:language:v1", "en"));
 });

@@ -53,7 +53,7 @@ def main():
             WorkspaceMembership.objects.create(workspace=workspace, user=user, role="owner")
             session = create_session(workspace=workspace, owner=user)
             model = ModelConfig.objects.create(id="material-model", displayName="Test")
-            content = b"Real Rust client material evidence.\n"
+            content = (("Real Rust client material evidence 界😀. " * 6000) + "\n").encode("utf-8")
             key = default_storage.save("test/material.md", ContentFile(content))
             item = UserLibraryObject.objects.create(owner=user, displayName="Material.md", objectKind="file",
                 contentType="text/markdown", sizeBytes=len(content), sha256=sha256_bytes(content), storageKey=key,
@@ -96,23 +96,24 @@ def main():
             fixture = {"apiUrl": address, "token": settings.INTERNAL_API_TOKEN, "runId": run.id,
                 "sessionId": session.id, "workspaceId": workspace.id, "turnId": run.turn_id,
                 "authorizationDigest": authorization.digest, "specification": specification,
-                "specDigest": digest, "inputRef": link.id,
+                "specDigest": digest, "inputRef": link.id, "expectedTextSha256": sha256_bytes(content),
                 "database": {key: database[key] for key in ("HOST", "PORT", "NAME", "USER", "PASSWORD")}}
             environment = {**os.environ, "PLATFORM_MCP_CLIENT_FIXTURE": json.dumps(fixture)}
             subprocess.run(["cargo", "test", "--locked", "-p", "runtime_server",
                 "platform_materials::tests::python_http_interoperability", "--", "--ignored", "--exact", "--nocapture"],
                 cwd=root, env=environment, check=True, timeout=180)
-            assert requests.count("/internal/mcp/credential") == 4, requests
-            assert MaterialEvidenceReceipt.objects.count() == 2
+            count = MaterialEvidenceReceipt.objects.count()
+            assert requests.count("/internal/mcp/credential") == count + 2, requests
+            assert count > 1
             projected = rebuild_agent_run_citation_projection(run)
-            assert len(projected) == 2
-            assert len(rebuild_agent_run_citation_projection(run)) == 2
+            assert len(projected) == count
+            assert len(rebuild_agent_run_citation_projection(run)) == count
             browser = Client(HTTP_HOST="localhost")
             browser.force_login(user)
             snapshot_response = browser.get(f"/api/sessions/{session.id}/agent-runs/{run.id}/citations")
             assert snapshot_response.status_code == 200
             snapshot = snapshot_response.json()
-            assert len(snapshot["citations"]) == 2
+            assert len(snapshot["citations"]) == count
             # Cross-language parity: the real Python response must pass the web validator.
             subprocess.run(["node", "--input-type=module", "-e",
                 "import {readFileSync} from 'node:fs'; import {validateCitationSnapshot} from './packages/web/src/chat/citationSnapshot.ts'; "

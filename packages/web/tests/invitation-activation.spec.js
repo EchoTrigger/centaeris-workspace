@@ -51,17 +51,17 @@ test("creates a new invited account without exposing its token in a request URL"
   const requests = await installFixture(page);
   await page.goto("/activate#token=token_1");
   await expect(page).toHaveURL(/\/activate$/);
-  await expect(page.getByRole("heading", { name: "加入 Default" })).toBeVisible();
-  await expect(page.getByText("密码至少 15 个字符。", { exact: true })).toBeVisible();
-  await expect(page.getByLabel("设置密码")).toHaveAttribute("minlength", "15");
-  await page.getByLabel("姓名").fill("Lumi User");
-  await page.getByLabel("设置密码").fill("A-strong-password-2026");
-  await page.getByLabel("确认密码").fill("different-password");
-  await page.getByRole("button", { name: "接受并进入工作区" }).click();
-  await expect(page.getByRole("alert")).toHaveText("两次输入的密码不一致。");
+  await expect(page.getByRole("heading", { name: "Join Default" })).toBeVisible();
+  await expect(page.getByText("Use at least 15 characters.", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Set password")).toHaveAttribute("minlength", "15");
+  await page.getByLabel("Name").fill("Lumi User");
+  await page.getByLabel("Set password").fill("A-strong-password-2026");
+  await page.getByLabel("Confirm password").fill("different-password");
+  await page.getByRole("button", { name: "Accept and open workspace" }).click();
+  await expect(page.getByRole("alert")).toHaveText("The passwords do not match.");
   expect(requests.some((request) => request.path === "/api/invitations/accept")).toBe(false);
-  await page.getByLabel("确认密码").fill("A-strong-password-2026");
-  await page.getByRole("button", { name: "接受并进入工作区" }).click();
+  await page.getByLabel("Confirm password").fill("A-strong-password-2026");
+  await page.getByRole("button", { name: "Accept and open workspace" }).click();
   await expect(page).toHaveURL(/\/w\/ws_1\/app$/);
   expect(requests.find((request) => request.path === "/api/invitations/accept").body).toEqual({ token: "token_1", name: "Lumi User", password: "A-strong-password-2026" });
   expect(requests.some((request) => request.url.includes("token_1"))).toBe(false);
@@ -70,16 +70,16 @@ test("creates a new invited account without exposing its token in a request URL"
 test("logs an existing invited account in on the same card before accepting", async ({ page }) => {
   const requests = await installFixture(page, { accountExists: true });
   await page.goto("/activate#token=token_1");
-  await page.getByRole("button", { name: "接受并进入工作区" }).click();
+  await page.getByRole("button", { name: "Accept and open workspace" }).click();
 
   await expect(page).toHaveURL(/\/activate$/);
-  await expect(page.getByRole("heading", { name: "登录受邀账号", level: 2 })).toBeVisible();
-  await expect(page.getByLabel("邮箱")).toHaveValue("invitee@example.com");
-  await expect(page.getByLabel("邮箱")).toHaveAttribute("readonly", "");
-  await page.getByLabel("密码").fill("existing-password");
-  await page.getByRole("button", { name: "登录受邀账号" }).click();
-  await expect(page.getByText("已登录受邀账号，请确认加入工作区。")).toBeVisible();
-  await page.getByRole("button", { name: "接受并进入工作区" }).click();
+  await expect(page.getByRole("heading", { name: "Sign in with the invited account", level: 2 })).toBeVisible();
+  await expect(page.getByLabel("Email")).toHaveValue("invitee@example.com");
+  await expect(page.getByLabel("Email")).toHaveAttribute("readonly", "");
+  await page.getByLabel("Password").fill("existing-password");
+  await page.getByRole("button", { name: "Sign in with the invited account" }).click();
+  await expect(page.getByText("You are signed in with the invited account. Confirm to join the workspace.")).toBeVisible();
+  await page.getByRole("button", { name: "Accept and open workspace" }).click();
 
   await expect(page).toHaveURL(/\/w\/ws_1\/app$/);
   expect(requests.filter((request) => request.path === "/api/invitations/accept").map((request) => request.body)).toEqual([{ token: "token_1" }, { token: "token_1" }]);
@@ -89,26 +89,32 @@ test("logs an existing invited account in on the same card before accepting", as
 test("offers an explicit account switch when the current account does not match", async ({ page }) => {
   const requests = await installFixture(page, { accountExists: true, loggedInAs: "other@example.com" });
   await page.goto("/activate#token=token_1");
-  await page.getByRole("button", { name: "接受并进入工作区" }).click();
+  await page.getByRole("button", { name: "Accept and open workspace" }).click();
 
-  await expect(page.getByRole("alert")).toContainText("当前登录账号与邀请邮箱不一致");
-  await page.getByRole("button", { name: "切换到受邀账号" }).click();
-  await expect(page.getByRole("heading", { name: "登录受邀账号", level: 2 })).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("The signed-in account does not match the invitation email");
+  await page.getByRole("button", { name: "Switch to the invited account" }).click();
+  await expect(page.getByRole("heading", { name: "Sign in with the invited account", level: 2 })).toBeVisible();
   expect(requests.some((request) => request.path === "/api/logout")).toBe(true);
 });
 
 test("shows an expired invitation without an acceptance form", async ({ page }) => {
   await installFixture(page, { previewError: "invitation_expired" });
   await page.goto("/activate#token=token_1");
-  await expect(page.getByRole("heading", { name: "无法接受邀请" })).toBeVisible();
-  await expect(page.getByRole("alert")).toContainText("已经过期");
-  await expect(page.getByRole("button", { name: "接受并进入工作区" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Unable to accept invitation" })).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("has expired");
+  await expect(page.getByRole("button", { name: "Accept and open workspace" })).toHaveCount(0);
 });
 
 test("does not accept the removed query-string invitation format", async ({ page }) => {
   const requests = await installFixture(page);
   await page.goto("/activate?token=token_1");
-  await expect(page.getByRole("heading", { name: "无法接受邀请" })).toBeVisible();
-  await expect(page.getByRole("alert")).toHaveText("这个邀请链接缺少 token。");
+  await expect(page.getByRole("heading", { name: "Unable to accept invitation" })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveText("The invitation link is missing its token.");
   expect(requests.some((request) => request.path === "/api/invitations/preview")).toBe(false);
+});
+
+
+
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("centaeris:language:v1", "en"));
 });

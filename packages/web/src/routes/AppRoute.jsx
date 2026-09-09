@@ -1,3 +1,5 @@
+import { t } from "../i18n";
+import { useTranslation } from "../i18n";
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, matchPath, useNavigate, useRouteLoaderData } from "react-router";
 import { apiResponse } from "../api";
@@ -48,14 +50,14 @@ import {
 
 const CLOSED_CONTEXT_PANEL = Object.freeze({ mode: "closed" });
 
-const THINKING_MODE_LABELS = Object.freeze({
-  none: "关闭",
-  low: "低",
-  medium: "中",
-  high: "高",
-  xhigh: "极高",
-  max: "最高",
-});
+const THINKING_MODE_LABELS = () => (Object.freeze({
+  none: t("workspaceContextPanel.close"),
+  low: t("appRoute.low"),
+  medium: t("appRoute.medium"),
+  high: t("appRoute.high"),
+  xhigh: t("appRoute.veryHigh"),
+  max: t("appRoute.maximum"),
+}));
 
 const ARTIFACT_PREVIEW_MAX_BYTES = 1024 * 1024;
 const ARTIFACT_PREVIEW_CONTENT_TYPES = new Set([
@@ -85,7 +87,7 @@ function sortSessions(items) {
 }
 
 function thinkingModeLabel(mode) {
-  return THINKING_MODE_LABELS[mode] || mode;
+  return THINKING_MODE_LABELS()[mode] || mode;
 }
 
 function closeComposerPicker(event) {
@@ -104,32 +106,34 @@ function closeComposerPickerOnEscape(event) {
 }
 
 function ComposerThinkingPicker({ model, value, onChange, disabled }) {
+  const { t } = useTranslation();
   const modes = model?.thinkingModes || [];
   return <details className="workspaceComposerPicker workspaceComposerThinking" onBlur={closeComposerPickerOnBlur} onKeyDown={closeComposerPickerOnEscape}>
     <summary
       role="button"
-      aria-label="思考力度"
+      aria-label={t("appRoute.reasoningEffort")}
       aria-disabled={disabled}
       aria-haspopup="menu"
       onClick={(event) => disabled && event.preventDefault()}
     ><ChartNoAxesColumnIncreasing aria-hidden="true" /></summary>
-    <div className="workspaceComposerPickerPanel is-thinking" aria-label="选择思考力度">
-      <small>思考力度</small>
+    <div className="workspaceComposerPickerPanel is-thinking" aria-label={t("appRoute.selectReasoningEffort")}>
+      <small>{t("appRoute.reasoningEffort")}</small>
       {modes.map((mode) => <button type="button" aria-pressed={value === mode} key={mode} onClick={(event) => { onChange(mode); closeComposerPicker(event); }}><span>{thinkingModeLabel(mode)}</span>{value === mode ? <Check aria-hidden="true" /> : null}</button>)}
     </div>
   </details>;
 }
 
 function ComposerModelPicker({ groups, model, value, onChange, disabled }) {
+  const { t } = useTranslation();
   return <details className="workspaceComposerPicker workspaceComposerModel" onBlur={closeComposerPickerOnBlur} onKeyDown={closeComposerPickerOnEscape}>
     <summary
       role="button"
-      aria-label="AI 模型"
+      aria-label={t("appRoute.aiModel")}
       aria-disabled={disabled}
       aria-haspopup="menu"
       onClick={(event) => disabled && event.preventDefault()}
-    ><span>{model?.displayName || (groups.length ? "选择模型" : "未配置")}</span><ChevronDown aria-hidden="true" /></summary>
-    <div className="workspaceComposerPickerPanel is-model" aria-label="选择 AI 模型">
+    ><span>{model?.displayName || (groups.length ? t("appRoute.selectModel") : t("appRoute.notConfigured"))}</span><ChevronDown aria-hidden="true" /></summary>
+    <div className="workspaceComposerPickerPanel is-model" aria-label={t("appRoute.selectAiModel")}>
       {groups.map((group) => <section key={group.provider}>
         <small>{group.label}</small>
         {group.models.map((option) => <button type="button" aria-pressed={value === option.id} key={option.id} onClick={(event) => { onChange(option.id); closeComposerPicker(event); }}><span>{option.displayName}</span>{value === option.id ? <Check aria-hidden="true" /> : null}</button>)}
@@ -139,6 +143,7 @@ function ComposerModelPicker({ groups, model, value, onChange, disabled }) {
 }
 
 function ConnectedWorkspaceContextPanel({ panel, browserWidthPx, onBrowserWidthChange, onClose, onReturn }) {
+  useTranslation();
   return (
     <WorkspaceContextPanel
       panel={panel}
@@ -151,6 +156,7 @@ function ConnectedWorkspaceContextPanel({ panel, browserWidthPx, onBrowserWidthC
 }
 
 export function AppPageContent({ agentId, workspaceDraft, location, modelsVersion, onSessionAccepted }) {
+  const { t } = useTranslation();
   const { user } = useRouteLoaderData("authenticated");
   const { workspace, agents } = useRouteLoaderData("workspace");
   const navigate = useNavigate();
@@ -221,10 +227,10 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     });
     return [...groups].map(([provider, providerModels]) => ({
       provider,
-      label: providerModels[0].providerDisplayName || "模型",
+      label: providerModels[0].providerDisplayName || t("appRoute.models"),
       models: providerModels,
     }));
-  }, [models]);
+  }, [models, t]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: Model identity resets a user override when defaults match.
   useEffect(() => {
     setThinkingMode(currentModel?.thinkingMode || "");
@@ -272,6 +278,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     streamAbortRef.current?.abort();
     chatControllerRef.current?.dispose();
   }, []);
+  const reportLoadError = useEffectEvent((key) => setError(t(key)));
   const markSelectedSessionRead = useEffectEvent(markSessionRead);
   const connectLoadedAgentRun = useEffectEvent(connectAgentRun);
   const handleLoadedAgentRunStreamFailure = useEffectEvent(handleAgentRunStreamFailure);
@@ -285,7 +292,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         const data = await response.json();
         if (!controller.signal.aborted) acceptModels(data.models);
       } catch {
-        if (!controller.signal.aborted) setError("无法刷新模型列表，请重试。");
+        if (!controller.signal.aborted) reportLoadError("appRoute.unableToRefreshModelsPleaseTryAgain");
       }
     }
     load();
@@ -355,7 +362,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       })
       .catch(() => {
         if (!active || requestScopeRef.current.key !== navigationScopeKey) return;
-        setError("无法读取会话列表，请刷新后重试。");
+        reportLoadError("appRoute.unableToLoadConversationsRefreshThePageAndTry");
         setLoadingHistory(false);
       });
     return () => { active = false; };
@@ -390,7 +397,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
           if (activeSessionIdRef.current === sessionId) setAssets(data.assets);
         })
         .catch(() => {
-          if (activeSessionIdRef.current === sessionId) setError("无法刷新会话材料");
+          if (activeSessionIdRef.current === sessionId) reportLoadError("appRoute.unableToRefreshConversationMaterials");
         });
       connectLoadedAgentRun(acceptedSession.agentRunId, workspace.id, sessionId, controller).catch((streamError) => {
         handleLoadedAgentRunStreamFailure(streamError, acceptedSession.agentRunId);
@@ -426,7 +433,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
           });
         }
       })
-      .catch(() => active && setError("无法读取会话记录，请刷新后重试。"))
+      .catch(() => active && reportLoadError("appRoute.unableToLoadConversationHistoryRefreshThePageAnd"))
       .finally(() => active && setLoadingHistory(false));
     return () => {
       active = false;
@@ -437,7 +444,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
 
   function showStreamError(errorValue) {
     if (errorValue?.name === "AbortError") return;
-    setError("操作未完成，请重试。");
+    setError(t("appRoute.theActionCouldNotBeCompletedPleaseTryAgain"));
   }
 
   function handleAgentRunStreamFailure(errorValue, agentRunId) {
@@ -500,7 +507,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
 
   function markSessionRead(session) {
     if (!session.isUnread) return;
-    updateSession(session.id, { isUnread: false }).catch(() => setError("无法更新会话未读状态"));
+    updateSession(session.id, { isUnread: false }).catch(() => setError(t("appRoute.unableToUpdateUnreadStatus")));
   }
 
   async function connectAgentRun(agentRunId, targetWorkspaceId, targetSessionId, abortController, resume = {}) {
@@ -514,7 +521,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     const disposeCitations = () => citations.dispose();
     abortController.signal.addEventListener("abort", disposeCitations, { once: true });
     const refreshCitations = () => citations.request().catch((error) => {
-      if (error?.name !== "AbortError" && !abortController.signal.aborted) setError("无法刷新引用，请重新打开会话重试");
+      if (error?.name !== "AbortError" && !abortController.signal.aborted) setError(t("appRoute.citationRefreshFailed"));
     });
     const controller = new WorkspaceChatController({
       store: chatStore,
@@ -547,7 +554,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
               await updateSession(targetSessionId, { isUnread: false });
             }
           } catch {
-            setError("无法刷新会话列表");
+            setError(t("appRoute.unableToRefreshConversations"));
           }
         }
       } finally {
@@ -597,7 +604,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     try {
       await updateSession(session.id, { title });
     } catch {
-      setError("无法重命名会话，请重试。");
+      setError(t("appRoute.unableToRenameTheConversationPleaseTryAgain"));
     }
   }
 
@@ -643,7 +650,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         clearContextPanel();
       }
     } catch {
-      setError("无法删除此对话，请重试。");
+      setError(t("appRoute.unableToDeleteThisConversationPleaseTryAgain"));
     } finally {
       setDeletingSessionId("");
     }
@@ -671,7 +678,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         await refreshAgentRunResumeState(targetAgentRunId, workspace.id, targetSessionId);
       }
     } catch (requestError) {
-      setError(requestError?.message === "agent_run_cancel_unavailable" ? "运行暂时无法停止，请稍后重试" : "停止运行失败");
+      setError(requestError?.message === "agent_run_cancel_unavailable" ? t("appRoute.unableToStopThisRunRightNowPleaseTry") : t("appRoute.unableToStopRun"));
     } finally {
       setCancellingRunId("");
     }
@@ -693,7 +700,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     if (hasActiveAgentRun) {
       if (!sessionId || !activeAgentRunId) return;
       if (pendingAttachmentIds.length || pendingUploadFiles.length) {
-        setError("补充输入暂不支持附件，请先移除材料");
+        setError(t("appRoute.supplementalInputDoesNotSupportAttachmentsYetRemoveThe"));
         return;
       }
       setSending(true);
@@ -722,7 +729,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         }
         setDraft("");
       } catch (requestError) {
-        if (isCurrentRequest()) setError(requestError?.message === "agent_run_supplement_unavailable" ? "补充输入暂时无法投递，请稍后重试" : "补充输入失败");
+        if (isCurrentRequest()) setError(requestError?.message === "agent_run_supplement_unavailable" ? t("appRoute.unableToDeliverSupplementalInputRightNowPleaseTry") : t("appRoute.unableToSendSupplementalInput"));
       } finally {
         if (isCurrentRequest()) setSending(false);
       }
@@ -735,7 +742,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     const pendingTurnId = `${pendingId}:turn`;
     const replacedAgentRun = inlineEdit ? chatStore.getAgentRunSnapshot(inlineEdit.agentRunId) : null;
     if (inlineEdit && !replacedAgentRun) {
-      setError("要编辑的上一轮已不存在，请刷新后重试");
+      setError(t("appRoute.thePreviousTurnNoLongerExistsRefreshThePage"));
       setSending(false);
       return;
     }
@@ -901,7 +908,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       setHistoryCursor(page.nextCursor);
       setHasMoreHistory(page.hasMore);
     } catch {
-      setError("无法读取更早的会话内容，请重试。");
+      setError(t("appRoute.unableToLoadEarlierMessagesPleaseTryAgain"));
     } finally {
       if (activeSessionIdRef.current === requestedForSessionId) setLoadingOlderHistory(false);
     }
@@ -913,7 +920,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     if (!files.length || uploadingAttachment) return;
     if (files.length + pendingUploadFiles.length > MAX_UPLOAD_BATCH_FILES) {
       input.value = "";
-      setError(`一次最多添加 ${MAX_UPLOAD_BATCH_FILES} 份材料`);
+      setError(t("appRoute.addUpToValueMaterialsAtATime", { value1: MAX_UPLOAD_BATCH_FILES }));
       return;
     }
     if (!sessionId) {
@@ -956,7 +963,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         ...new Set([...items, ...uploaded.assets.map((asset) => asset.id)]),
       ]);
     } catch {
-      setError("附件上传失败");
+      setError(t("appRoute.attachmentUploadFailed"));
     } finally {
       input.value = "";
       setUploadingAttachment(false);
@@ -1033,12 +1040,12 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       if (previewRequestIdRef.current !== requestId) return;
       const reason = requestError instanceof Error ? requestError.message : String(requestError);
       const message = reason === "citation_preview_unsupported"
-        ? "此文件类型暂不支持内嵌预览。"
+        ? t("appRoute.inlinePreviewIsUnavailableForThisFileType")
         : reason === "citation_source_stale"
-          ? "引用绑定的文件版本已经变化，无法预览原始证据。"
+          ? t("appRoute.theReferencedFileVersionHasChangedTheOriginalEvidence")
           : reason === "citation_source_not_available" || reason === "citation_not_found"
-            ? "引用文件不存在、已删除或当前无权读取。"
-            : "无法读取引用文件。";
+            ? t("appRoute.theReferenceFileIsMissingDeletedOrInaccessible")
+            : t("appRoute.unableToLoadTheReferenceFile");
       setContextPanel({
         mode: "filePreview",
         citationId: citation.citationId,
@@ -1102,7 +1109,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         mode: "filePreview",
         ...panelIdentity,
         status: "error",
-        error: "无法读取该文件。",
+        error: t("appRoute.unableToLoadThisFile"),
       });
     }
   }
@@ -1172,7 +1179,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         >
           <input
             name="title"
-            aria-label={`重命名 ${session.title}`}
+            aria-label={t("appRoute.renameValue", { value1: session.title })}
             autoFocus
             defaultValue={session.title}
             maxLength={200}
@@ -1200,21 +1207,21 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         >
           {icon ? <MessageSquare className="workspaceSessionKindIcon" aria-hidden="true" /> : null}
           <span className="workspaceSessionContent">
-            <span className="workspaceSessionTitle"><span>{session.title}</span>{session.isPinned ? <Pin aria-label="已置顶" /> : null}</span>
+            <span className="workspaceSessionTitle"><span>{session.title}</span>{session.isPinned ? <Pin aria-label={t("appRoute.pinned")} /> : null}</span>
             <span className="workspaceSessionMetadata">
-              {session.origin === "automation" ? <span className="workspaceSessionAutomation">自动</span> : null}
-              {session.isUnread ? <span className="workspaceSessionUnread" aria-label="未读" /> : null}
+              {session.origin === "automation" ? <span className="workspaceSessionAutomation">{t("appRoute.auto")}</span> : null}
+              {session.isUnread ? <span className="workspaceSessionUnread" aria-label={t("appRoute.unread")} /> : null}
             </span>
           </span>
         </button>
         {(session.id === sessionId ? hasActiveAgentRun : session.hasActiveAgentRun) ? (
-          <span className="workspaceAgentRunning" aria-label="运行中"><LoaderCircle aria-hidden="true" /></span>
+          <span className="workspaceAgentRunning" aria-label={t("appRoute.running")}><LoaderCircle aria-hidden="true" /></span>
         ) : null}
         <div className="workspaceSessionActions">
           <button
             className="workspaceSessionActionButton"
             type="button"
-            aria-label={`会话操作 ${session.title}`}
+            aria-label={t("appRoute.conversationActionsForValue", { value1: session.title })}
             aria-expanded={openSessionMenuId === session.id}
             onClick={() => setOpenSessionMenuId((current) => current === session.id ? "" : session.id)}
           >
@@ -1225,19 +1232,19 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
               <button type="button" role="menuitem" onClick={() => {
                 setEditingSessionId(session.id);
                 setOpenSessionMenuId("");
-              }}><Pencil aria-hidden="true" />重命名</button>
+              }}><Pencil aria-hidden="true" />{t("appRoute.rename")}</button>
               <button type="button" role="menuitem" disabled={isSaving} onClick={() => {
-                updateSession(session.id, { isPinned: !session.isPinned }).catch(() => setError("无法更新会话置顶状态"));
+                updateSession(session.id, { isPinned: !session.isPinned }).catch(() => setError(t("appRoute.unableToUpdatePinnedStatus")));
                 setOpenSessionMenuId("");
-              }}>{session.isPinned ? <PinOff aria-hidden="true" /> : <Pin aria-hidden="true" />}{session.isPinned ? "取消置顶" : "置顶"}</button>
+              }}>{session.isPinned ? <PinOff aria-hidden="true" /> : <Pin aria-hidden="true" />}{session.isPinned ? t("appRoute.unpin") : t("appRoute.pin")}</button>
               <button type="button" role="menuitem" disabled={isSaving} onClick={() => {
-                updateSession(session.id, { isUnread: !session.isUnread }).catch(() => setError("无法更新会话未读状态"));
+                updateSession(session.id, { isUnread: !session.isUnread }).catch(() => setError(t("appRoute.unableToUpdateUnreadStatus")));
                 setOpenSessionMenuId("");
-              }}>{session.isUnread ? <MailOpen aria-hidden="true" /> : <Mail aria-hidden="true" />}{session.isUnread ? "标为已读" : "标为未读"}</button>
+              }}>{session.isUnread ? <MailOpen aria-hidden="true" /> : <Mail aria-hidden="true" />}{session.isUnread ? t("appRoute.markAsRead") : t("appRoute.markAsUnread")}</button>
               <button className="isDanger" type="button" role="menuitem" disabled={Boolean(deletingSessionId)} onClick={() => {
                 setOpenSessionMenuId("");
                 setDeleteConfirmationSessionId(session.id);
-              }}><Trash2 aria-hidden="true" />删除</button>
+              }}><Trash2 aria-hidden="true" />{t("appRoute.delete")}</button>
             </div>
           ) : null}
         </div>
@@ -1275,13 +1282,13 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
             className="workspacePanelToggle"
             type="button"
             onClick={() => setIsSidebarOpen(true)}
-            aria-label="显示左侧栏"
+            aria-label={t("appRoute.showSidebar")}
             aria-expanded="false"
-            title="显示左侧栏"
+            title={t("appRoute.showSidebar")}
           >
             <PanelLeft aria-hidden="true" />
           </button> : null}
-          {isSidebarOpen && activeSession ? <nav className="workspaceConversationBreadcrumb" aria-label="当前会话">
+          {isSidebarOpen && activeSession ? <nav className="workspaceConversationBreadcrumb" aria-label={t("appRoute.currentConversation")}>
             <AgentMark className="workspaceConversationAgentIcon" agent={activeAgent} />
             <Link to={`/w/${encodeURIComponent(workspace.id)}/agents/${encodeURIComponent(activeAgent.id)}/settings`}>{activeAgent.name}</Link><span>/</span><span>{activeSession.title}</span>
           </nav> : null}
@@ -1289,7 +1296,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       </header>
 
       <section className="workspaceChatColumn">
-        {error || groupedSessions.projectionError ? <div className="errorBanner" role="alert">{error || "部分会话暂时无法显示，请刷新后重试。"}</div> : null}
+        {error || groupedSessions.projectionError ? <div className="errorBanner" role="alert">{error || t("appRoute.someConversationsAreTemporarilyUnavailableRefreshThePageAnd")}</div> : null}
 
         <div className={`workspaceConversationPlane ${isHome ? "isEmpty" : ""}`}>
           <VirtualAgentRunList
@@ -1325,7 +1332,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
 
           <form ref={composerRef} className={`workspaceComposer ${isHome ? "shComposerHero" : ""}`} onSubmit={sendMessage}>
             {pendingAttachments.length || pendingUploadFiles.length ? (
-              <div className="workspaceComposerAttachments" aria-label="本次对话参考材料">
+              <div className="workspaceComposerAttachments" aria-label={t("appRoute.referenceMaterialsForThisConversation")}>
                 {pendingAttachments.map((link) => (
                   <AttachmentCard className="workspaceComposerAttachment" attachment={link} onPreview={() => setAttachmentPreview(link)} onRemove={() => removePendingAttachment(link)} key={link.id} />
                 ))}
@@ -1334,7 +1341,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
                 ))}
               </div>
             ) : null}
-            <label className="srOnly" htmlFor="messageDraft">输入消息</label>
+            <label className="srOnly" htmlFor="messageDraft">{t("appRoute.message")}</label>
             <textarea
               id="messageDraft"
               autoFocus={isHome}
@@ -1350,41 +1357,41 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
                   event.currentTarget.form?.requestSubmit();
                 }
               }}
-              placeholder={`描述你希望 ${activeAgent.name} 协助完成的任务…`}
+              placeholder={t("appRoute.describeATaskForValue", { value1: activeAgent.name })}
               disabled={!workspace || sending || loadingHistory || !!editingTail}
             />
             <div className="workspaceComposerFooter">
               <div className="workspaceComposerControlGroup">
-                <span className="workspaceComposerControl" data-tooltip="添加">
+                <span className="workspaceComposerControl" data-tooltip={t("appRoute.add")}>
                   <button
                     className="workspaceComposerIconButton"
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
                     disabled={hasActiveAgentRun || sending || uploadingAttachment || !!editingTail}
-                    aria-label="添加"
+                    aria-label={t("appRoute.add")}
                   >
                     {uploadingAttachment ? <LoaderCircle className="statusIcon" aria-hidden="true" /> : <Plus aria-hidden="true" />}
                   </button>
                 </span>
-                <span className="workspaceComposerControl isPending" data-tooltip="设置 · 待接入" role="img" aria-label="设置，待接入">
+                <span className="workspaceComposerControl isPending" data-tooltip={t("appRoute.settingsComingSoon")} role="img" aria-label={t("appRoute.settingsComingSoon2")}>
                   <SlidersHorizontal aria-hidden="true" />
                 </span>
                 <ContextUsagePicker sessionId={sessionId} isRunning={hasActiveAgentRun} />
               </div>
-              <input ref={fileInputRef} className="srOnly" type="file" multiple aria-label="选择一个或多个材料" onChange={uploadAttachment} />
+              <input ref={fileInputRef} className="srOnly" type="file" multiple aria-label={t("appRoute.selectOneOrMoreMaterials")} onChange={uploadAttachment} />
               <div className="workspaceComposerControlGroup isRuntime">
-                <span className="workspaceComposerControl" data-tooltip={thinkingMode ? `思考力度 · ${thinkingModeLabel(thinkingMode)}` : "思考力度"}>
+                <span className="workspaceComposerControl" data-tooltip={thinkingMode ? t("appRoute.reasoningEffortValue", { value1: thinkingModeLabel(thinkingMode) }) : t("appRoute.reasoningEffort")}>
                   <ComposerThinkingPicker model={currentModel} value={thinkingMode} onChange={setThinkingMode} disabled={!currentModel?.thinkingModes?.length || sending || hasActiveAgentRun || !!editingTail} />
                 </span>
-                <span className="workspaceComposerControl" data-tooltip={`AI 模型 · ${currentModel?.displayName || (models.length ? "请选择" : "未配置")}`}>
+                <span className="workspaceComposerControl" data-tooltip={t("appRoute.aiModelValue", { value1: currentModel?.displayName || (models.length ? t("appRoute.selectAnOption") : t("appRoute.notConfigured")) })}>
                   <ComposerModelPicker groups={modelGroups} model={currentModel} value={modelId} onChange={setModelId} disabled={!models.length || sending || !!editingTail} />
                 </span>
-                <span className="workspaceComposerControl" data-tooltip={hasActiveAgentRun ? "停止" : "输入"}>
+                <span className="workspaceComposerControl" data-tooltip={hasActiveAgentRun ? t("appRoute.stop") : t("appRoute.input")}>
                   {hasActiveAgentRun ? (
                     <button
                       className="workspaceSendButton"
                       type="button"
-                      aria-label="停止"
+                      aria-label={t("appRoute.stop")}
                       disabled={!activeAgentRunId || Boolean(cancellingAgentRunId)}
                       onClick={cancelActiveAgentRun}
                     >
@@ -1394,7 +1401,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
                     <button
                       className="workspaceSendButton"
                       type="submit"
-                      aria-label="输入"
+                      aria-label={t("appRoute.input")}
                       disabled={!workspace || !draft.trim() || !modelId || sending || loadingHistory || !!editingTail}
                     >
                       {sending ? <LoaderCircle className="statusIcon" aria-hidden="true" /> : <ArrowUp aria-hidden="true" />}
@@ -1417,16 +1424,16 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       />
       <ConfirmDialog
         open={Boolean(deleteConfirmationSessionId)}
-        title="确定要删除此对话？"
+        title={t("appRoute.deleteThisConversation")}
         busy={Boolean(deletingSessionId)}
         onCancel={() => setDeleteConfirmationSessionId("")}
         onConfirm={() => void deleteSession(deleteConfirmationSessionId)}
       />
       {attachmentPreview ? (
         <div className="attachmentPreviewBackdrop" role="presentation" onMouseDown={() => setAttachmentPreview(null)}>
-          <section className="attachmentPreviewDialog" ref={attachmentDialogRef} role="dialog" aria-modal="true" aria-label={`预览 ${attachmentPreview.displayName}`} tabIndex={-1} onMouseDown={(event) => event.stopPropagation()}>
-            <header><strong>{attachmentPreview.displayName}</strong><button type="button" onClick={() => setAttachmentPreview(null)} aria-label="关闭预览"><X aria-hidden="true" /></button></header>
-            {attachmentCanPreview(attachmentPreview) ? attachmentIsImage(attachmentPreview) ? <img src={attachmentPreviewUrl(attachmentPreview)} alt={attachmentPreview.displayName} /> : <iframe src={attachmentPreviewUrl(attachmentPreview)} title={attachmentPreview.displayName} /> : <div className="attachmentPreviewUnavailable"><ImageIcon aria-hidden="true" /><span>此材料暂不支持在线预览。</span><a href={attachmentDownloadUrl(attachmentPreview)}>下载材料</a></div>}
+          <section className="attachmentPreviewDialog" ref={attachmentDialogRef} role="dialog" aria-modal="true" aria-label={t("attachmentCard.previewValue", { value1: attachmentPreview.displayName })} tabIndex={-1} onMouseDown={(event) => event.stopPropagation()}>
+            <header><strong>{attachmentPreview.displayName}</strong><button type="button" onClick={() => setAttachmentPreview(null)} aria-label={t("attachmentCard.closePreview")}><X aria-hidden="true" /></button></header>
+            {attachmentCanPreview(attachmentPreview) ? attachmentIsImage(attachmentPreview) ? <img src={attachmentPreviewUrl(attachmentPreview)} alt={attachmentPreview.displayName} /> : <iframe src={attachmentPreviewUrl(attachmentPreview)} title={attachmentPreview.displayName} /> : <div className="attachmentPreviewUnavailable"><ImageIcon aria-hidden="true" /><span>{t("appRoute.onlinePreviewIsUnavailableForThisMaterial")}</span><a href={attachmentDownloadUrl(attachmentPreview)}>{t("appRoute.downloadMaterial")}</a></div>}
           </section>
         </div>
       ) : null}

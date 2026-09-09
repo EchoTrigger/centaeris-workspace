@@ -1,3 +1,5 @@
+import { t } from "../i18n";
+import { useTranslation } from "../i18n";
 import { useId } from "react";
 import { useModalDialog } from "./useModalDialog";
 
@@ -5,12 +7,13 @@ export function ConfirmDialog({
   open,
   title,
   message,
-  confirmLabel = "确认",
-  cancelLabel = "取消",
+  confirmLabel = t("confirmDialog.confirm"),
+  cancelLabel = t("agentRunRow.cancel"),
   busy = false,
   onCancel,
   onConfirm,
 }) {
+  const { t } = useTranslation();
   const titleId = useId();
   const dialogRef = useModalDialog({ open, busy, onClose: onCancel });
 
@@ -21,7 +24,7 @@ export function ConfirmDialog({
       {message ? <p>{message}</p> : null}
       <footer>
         <button type="button" autoFocus disabled={busy} onClick={onCancel}>{cancelLabel}</button>
-        <button type="button" className="isDanger" disabled={busy} onClick={onConfirm}>{busy ? `${confirmLabel}中…` : confirmLabel}</button>
+        <button type="button" className="isDanger" disabled={busy} onClick={onConfirm}>{busy ? t("confirmDialog.value", { value1: confirmLabel }) : confirmLabel}</button>
       </footer>
     </section>
   </div>;

@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 RETIRED = {
@@ -34,6 +35,14 @@ def compose_config(**overrides):
 
 
 class DeploymentContractTests(unittest.TestCase):
+    def test_platform_mcp_accepts_runtime_internal_host_without_wildcards(self):
+        services = compose_config()["services"]
+        host = urlsplit(services["runtime"]["environment"]["API_INTERNAL_URL"]).hostname
+        allowed = services["api"]["environment"].get("PLATFORM_MCP_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
+        self.assertIn(host, allowed)
+        self.assertEqual(set(allowed), {host, "localhost", "127.0.0.1"})
+        self.assertFalse(any("*" in value for value in allowed))
+
     def test_docker_release_gate_accepts_current_processor_ownership(self):
         source = (ROOT / "scripts/docker-release-gate.sh").read_text(encoding="utf-8")
         validator = source.split("python3 -c '\n", 1)[1].split("\n'\n", 1)[0]

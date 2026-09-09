@@ -13,7 +13,7 @@ from .models import MaterialEvidenceReceipt, SessionCitationProjection, SessionE
 
 
 PROVIDER_ID = "workspace.materials"
-CITABLE_TOOLS = {"read_material", "search_materials"}
+CITABLE_TOOLS = {"read_material", "search_materials", "read_material_result"}
 EVIDENCE_FIELDS = ("inputRef", "ownerRef", "ownerKind", "displayName", "evidenceKind",
                    "ownerSha256", "ownerGeneration", "representationId", "specDigest",
                    "evidenceSha256", "locator")
@@ -43,7 +43,7 @@ def persist_receipt(access, call, name, result):
     if name not in CITABLE_TOOLS or result.get("disposition") != "ready":
         return result
     evidence = [{field: item[field] for field in EVIDENCE_FIELDS}
-                for item in result["items" if name == "read_material" else "hits"]
+                for item in result["items" if "items" in result else "hits"]
                 if item.get("citationAllowed") is True and item.get("content") and item.get("locator")]
     if not evidence:
         return result
@@ -54,7 +54,7 @@ def persist_receipt(access, call, name, result):
     with transaction.atomic():
         receipt, _ = MaterialEvidenceReceipt.objects.get_or_create(call=call, defaults={
             "id": identity, "authorizationDigest": access.authorization_digest,
-            "responseText": text, "evidence": evidence})
+            "responseText": text, "modelProjection": output, "evidence": evidence})
         if (receipt.authorizationDigest != access.authorization_digest
             or receipt.evidence != evidence or json.loads(receipt.responseText) != output):
             raise ValueError("material_receipt_replay_conflict")
@@ -92,8 +92,8 @@ derive identical rows, requiring no ephemeral callback or extra success RPC.
             actual = json.loads(body["modelContent"])
         except (KeyError, TypeError, ValueError):
             continue
-        # Matches the existing generic MCP adapter's text + structured projection.
-        if actual != {"text": [receipt.responseText], "structuredContent": output}:
+        # The MCP adapter projects structured-only results without duplicated text.
+        if actual != receipt.modelProjection:
             continue
         for index, evidence in enumerate(receipt.evidence):
             projections.append(SessionCitationProjection(

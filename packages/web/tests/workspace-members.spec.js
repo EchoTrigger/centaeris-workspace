@@ -83,11 +83,11 @@ async function installWorkspaceFixture(page, { workspaceRole = "owner", loseAcce
 
 async function openWorkspaceSettings(page) {
   await page.goto("/w/ws_1/app");
-  await page.getByRole("button", { name: "Default 工作区菜单" }).click();
-  await page.getByRole("link", { name: "设置", exact: true }).click();
-  await page.getByRole("dialog", { name: "偏好" }).getByRole("link", { name: "成员" }).click();
+  await page.getByRole("button", { name: "Default workspace menu" }).click();
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  await page.getByRole("dialog", { name: "Preferences" }).getByRole("link", { name: "Member" }).click();
   await expect(page).toHaveURL(/\/w\/ws_1\/settings\/members$/);
-  await expect(page.getByRole("heading", { name: "成员与权限" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Members and permissions" })).toBeVisible();
 }
 
 test("manages member roles, removal, and ownership transfer", async ({ page }) => {
@@ -95,23 +95,23 @@ test("manages member roles, removal, and ownership transfer", async ({ page }) =
   await openWorkspaceSettings(page);
 
   await expect(page.locator(".shWorkspaceSettingsHeader p")).toHaveCount(0);
-  await expect(page.locator(".shWorkspaceSettingsSection").first().locator("header p")).toHaveText("3 位成员");
-  await page.getByLabel("member@example.com 的角色").selectOption("admin");
-  await expect(page.getByRole("status")).toContainText("member@example.com 已设为管理员");
+  await expect(page.locator(".shWorkspaceSettingsSection").first().locator("header p")).toHaveText("3 members");
+  await page.getByLabel("Role for member@example.com").selectOption("admin");
+  await expect(page.getByRole("status")).toContainText("member@example.com is now Administrator");
 
-  await page.getByRole("button", { name: "member@example.com 的成员操作" }).click();
-  await page.getByRole("button", { name: "移除成员" }).click();
-  const removeDialog = page.getByRole("dialog", { name: "移除成员" });
-  await expect(removeDialog).toContainText("历史事实仍会保留");
-  await removeDialog.getByRole("button", { name: "移除" }).click();
+  await page.getByRole("button", { name: "Member actions for member@example.com" }).click();
+  await page.getByRole("button", { name: "Remove member" }).click();
+  const removeDialog = page.getByRole("dialog", { name: "Remove member" });
+  await expect(removeDialog).toContainText("Historical records will be preserved");
+  await removeDialog.getByRole("button", { name: "Remove" }).click();
   await expect(page.getByText("member@example.com", { exact: true })).toHaveCount(0);
 
-  await page.getByRole("button", { name: "admin@example.com 的成员操作" }).click();
-  await page.getByRole("button", { name: "转让所有权" }).click();
-  const transferDialog = page.getByRole("dialog", { name: "转让工作区所有权" });
-  await transferDialog.getByLabel("当前密码").fill("correct horse battery staple");
-  await transferDialog.getByRole("button", { name: "确认转让" }).click();
-  await expect(page.getByRole("status")).toContainText("所有权已转让给 admin@example.com");
+  await page.getByRole("button", { name: "Member actions for admin@example.com" }).click();
+  await page.getByRole("button", { name: "Transfer ownership" }).click();
+  const transferDialog = page.getByRole("dialog", { name: "Transfer workspace ownership" });
+  await transferDialog.getByLabel("Current password").fill("correct horse battery staple");
+  await transferDialog.getByRole("button", { name: "Confirm transfer" }).click();
+  await expect(page.getByRole("status")).toContainText("Ownership transferred to admin@example.com");
 
   expect(requests.find((request) => request.path.endsWith("/membership_member") && request.method === "PATCH").body).toEqual({ role: "admin" });
   expect(requests.find((request) => request.path.endsWith("/owner-transfer") && request.method === "POST").body).toEqual({
@@ -126,66 +126,72 @@ test("locks only the member row being updated", async ({ page }) => {
   await installWorkspaceFixture(page, { roleUpdateGate });
   await openWorkspaceSettings(page);
 
-  const memberRole = page.getByLabel("member@example.com 的角色");
+  const memberRole = page.getByLabel("Role for member@example.com");
   await memberRole.selectOption("admin");
   await expect(memberRole).toBeDisabled();
-  await expect(page.getByLabel("admin@example.com 的角色")).toBeEnabled();
+  await expect(page.getByLabel("Role for admin@example.com")).toBeEnabled();
 
   releaseRoleUpdate();
-  await expect(page.getByRole("status")).toContainText("member@example.com 已设为管理员");
+  await expect(page.getByRole("status")).toContainText("member@example.com is now Administrator");
 });
 
 test("shows invitation URLs once and supports reissue and revoke", async ({ page }) => {
   await installWorkspaceFixture(page);
   await openWorkspaceSettings(page);
 
-  await page.getByRole("button", { name: "邀请成员" }).click();
-  const inviteDialog = page.getByRole("dialog", { name: "邀请成员" });
-  await inviteDialog.getByLabel("邮箱").fill("new@example.com");
-  await inviteDialog.getByLabel("角色").selectOption("admin");
-  await inviteDialog.getByRole("button", { name: "生成邀请链接" }).click();
-  const resultDialog = page.getByRole("dialog", { name: "邀请链接已生成" });
+  await page.getByRole("button", { name: "Invite member" }).click();
+  const inviteDialog = page.getByRole("dialog", { name: "Invite member" });
+  await inviteDialog.getByLabel("Email").fill("new@example.com");
+  await inviteDialog.getByLabel("Role").selectOption("admin");
+  await inviteDialog.getByRole("button", { name: "Create invitation link" }).click();
+  const resultDialog = page.getByRole("dialog", { name: "Invitation link created" });
   await expect(resultDialog.getByText(/token_invite_2/)).toBeVisible();
-  await resultDialog.getByRole("button", { name: "完成" }).click();
+  await resultDialog.getByRole("button", { name: "Done" }).click();
   await expect(page.getByText("new@example.com", { exact: true })).toBeVisible();
 
   const pendingRow = page.locator(".shWorkspaceInvitationRow").filter({ hasText: "pending@example.com" });
-  await pendingRow.getByRole("button", { name: "重新签发" }).click();
-  await page.getByRole("dialog", { name: "重新签发邀请" }).getByRole("button", { name: "重新签发" }).click();
-  await expect(page.getByRole("dialog", { name: "邀请链接已生成" })).toContainText("pending@example.com");
-  await page.getByRole("dialog", { name: "邀请链接已生成" }).getByRole("button", { name: "完成" }).click();
+  await pendingRow.getByRole("button", { name: "Reissue" }).click();
+  await page.getByRole("dialog", { name: "Reissue invitation" }).getByRole("button", { name: "Reissue" }).click();
+  await expect(page.getByRole("dialog", { name: "Invitation link created" })).toContainText("pending@example.com");
+  await page.getByRole("dialog", { name: "Invitation link created" }).getByRole("button", { name: "Done" }).click();
 
   const reissuedRow = page.locator(".shWorkspaceInvitationRow").filter({ hasText: "pending@example.com" });
-  await reissuedRow.getByRole("button", { name: "撤销" }).click();
-  await page.getByRole("dialog", { name: "撤销邀请" }).getByRole("button", { name: "撤销" }).click();
+  await reissuedRow.getByRole("button", { name: "Revoke" }).click();
+  await page.getByRole("dialog", { name: "Revoke invitation" }).getByRole("button", { name: "Revoke" }).click();
   await expect(page.getByText("pending@example.com", { exact: true })).toHaveCount(0);
 });
 
 test("hides workspace management from ordinary members and rejects direct navigation", async ({ page }) => {
   await installWorkspaceFixture(page, { workspaceRole: "member" });
   await page.goto("/w/ws_1/app");
-  await page.getByRole("button", { name: "Default 工作区菜单" }).click();
+  await page.getByRole("button", { name: "Default workspace menu" }).click();
   await expect(page.getByRole("link", { name: "工作区设置" })).toHaveCount(0);
-  await expect(page.getByRole("link", { name: "设置", exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Settings", exact: true })).toBeVisible();
 
   await page.goto("/w/ws_1/settings/members");
   await expect(page).toHaveURL(/\/w\/ws_1\/app$/);
-  await expect(page.getByRole("status")).toHaveText("你没有权限访问工作区设置。");
+  await expect(page.getByRole("status")).toHaveText("You do not have access to workspace settings.");
 });
 
 test("returns home when management permission disappears during a mutation", async ({ page }) => {
   await installWorkspaceFixture(page, { loseAccessOnRoleUpdate: true });
   await openWorkspaceSettings(page);
-  await page.getByLabel("member@example.com 的角色").selectOption("admin");
+  await page.getByLabel("Role for member@example.com").selectOption("admin");
   await expect(page).toHaveURL(/\/w\/ws_1\/app$/);
-  await expect(page.getByRole("status")).toHaveText("你已没有权限访问工作区设置。");
+  await expect(page.getByRole("status")).toHaveText("You no longer have access to workspace settings.");
 });
 
 test("returns to the chooser when the current membership is removed", async ({ page }) => {
   await installWorkspaceFixture(page, { membershipRemovedOnRoleUpdate: true });
   await openWorkspaceSettings(page);
-  await page.getByLabel("member@example.com 的角色").selectOption("admin");
+  await page.getByLabel("Role for member@example.com").selectOption("admin");
   await expect(page).toHaveURL(/\/workspaces$/);
-  await expect(page.getByRole("status")).toHaveText("你已不再是 Default 的成员。");
-  await expect(page.getByText("当前账号还没有可访问的工作区。")).toBeVisible();
+  await expect(page.getByRole("status")).toHaveText("You are no longer a member of Default.");
+  await expect(page.getByText("Your account does not have access to any workspaces yet.")).toBeVisible();
+});
+
+
+
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("centaeris:language:v1", "en"));
 });

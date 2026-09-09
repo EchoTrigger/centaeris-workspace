@@ -257,6 +257,7 @@ fn validate_tool_names(names: &[String]) -> Result<(), String> {
         "list_materials",
         "read_material",
         "search_materials",
+        "read_material_result",
         "get_operation",
         "cancel_operation",
     ]);
@@ -323,16 +324,18 @@ mod tests {
             database.execute("INSERT INTO app_core_sessionevent (\"eventId\",workspace_id,session_id,agent_run_id,sequence,agent_run_sequence,projects_to_agent_run_stream,payload,\"createdAtMs\",\"insertedAt\") VALUES ($1,$2,$3,$4,$5,$5,true,$6::text::jsonb,1,now())",
                 &[&event["eventId"].as_str().unwrap(), &text("workspaceId"), &text("sessionId"), &text("runId"), &sequence, &event.to_string()]).unwrap();
         };
-        for index in 0..3 {
-            let input_ref = if index == 2 {
-                "not-authorized".to_string()
-            } else {
-                text("inputRef")
-            };
+        let mut next =
+            json!({"tool":"read_material", "arguments":{"input_ref":text("inputRef"),"limit":10}});
+        let mut collected = String::new();
+        for index in 0..100 {
+            let reject = next.is_null();
+            if reject {
+                next = json!({"tool":"read_material", "arguments":{"input_ref":"not-authorized"}});
+            }
             let call = ToolCallEnvelope {
                 id: format!("material-client-{index}"),
-                name: "read_material".into(),
-                args_json: json!({"input_ref":input_ref,"limit":10}).to_string(),
+                name: next["tool"].as_str().unwrap().into(),
+                args_json: next["arguments"].to_string(),
             };
             append(
                 canonical_tool_call_record(
@@ -353,7 +356,22 @@ mod tests {
                 tool_name: call.name.clone(),
                 args_json: call.args_json.clone(),
             }));
-            assert_eq!(result.status, if index == 2 { "error" } else { "ok" });
+            assert_eq!(
+                result.status,
+                if reject { "error" } else { "ok" },
+                "{}",
+                result.content
+            );
+            if !reject {
+                assert!(
+                    result.content.len()
+                        <= centaeris_core::tool::layer::MODEL_TOOL_RESULT_MAX_BYTES
+                );
+                let page: Value = serde_json::from_str(&result.content).unwrap();
+                assert!(page["message"].as_str().unwrap().contains("Showing"));
+                collected.push_str(page["items"][0]["content"].as_str().unwrap());
+                next = page["continuation"].clone();
+            }
             assert!(result.facts.is_empty());
             append(
                 canonical_tool_result_record(
@@ -367,7 +385,17 @@ mod tests {
                 .unwrap(),
                 index * 2 + 2,
             );
+            if reject {
+                use sha2::{Digest, Sha256};
+                assert_eq!(
+                    format!("sha256:{:x}", Sha256::digest(collected.as_bytes())),
+                    text("expectedTextSha256")
+                );
+                assert!(index > 1, "large fixture must require continuation");
+                return;
+            }
         }
+        panic!("material continuation did not terminate");
     }
 
     #[test]
@@ -377,6 +405,7 @@ mod tests {
             "list_materials",
             "read_material",
             "search_materials",
+            "read_material_result",
             "get_operation",
             "cancel_operation",
         ]

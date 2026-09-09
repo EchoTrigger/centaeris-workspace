@@ -8,6 +8,13 @@ import { isAgentRunActive, validateHistoryPage, applyStreamEntry } from "../../s
 import { reasoningPreview } from "../../src/chat/reasoningPreview.ts";
 import { buildAgentRunSections, formatPhaseElapsed, runningActivityPresentation, toolAtom } from "../../src/chat/agentRunPresentation.mjs";
 
+test("tool copy can change language without translating a model-supplied description", () => {
+  const translate = (label) => ({ "Running a command": "正在运行命令", "Read files": "已读取文件" })[label] || label;
+  assert.equal(runningActivityPresentation({ toolName: "bash", status: "running", call: {} }, translate).label, "正在运行命令");
+  assert.equal(runningActivityPresentation({ toolName: "bash", status: "running", call: { normalizedInput: { description: "Running a command" } } }, translate).label, "Running a command");
+  assert.equal(toolAtom("read", translate).title, "已读取文件");
+});
+
 test("action icons follow the agreed cross-client vocabulary", () => {
   for (const [tool, icon] of Object.entries({ read: "search", web_search: "globe", bash: "terminal", write: "edit", edit: "edit", agent: "agent", task_output: "listChecks", publish_artifact: "fileOutput" })) {
     assert.equal(toolAtom(tool).icon, icon);

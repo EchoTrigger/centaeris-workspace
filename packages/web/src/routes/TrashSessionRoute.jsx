@@ -1,3 +1,5 @@
+
+import { useTranslation } from "../i18n";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useRevalidator, useRouteLoaderData } from "react-router";
 import { ArrowLeft, LoaderCircle, RotateCcw, Trash2 } from "lucide-react";
@@ -10,6 +12,7 @@ import { attachmentPreviewUrl } from "../chat/attachments.mjs";
 import { ShellPage } from "../shell/ShellPage";
 
 export default function TrashSessionRoute() {
+  const { t } = useTranslation();
   const { sessionId = "" } = useParams();
   const { workspace, agents } = useRouteLoaderData("workspace");
   const base = `/w/${encodeURIComponent(workspace.id)}`;
@@ -51,10 +54,10 @@ export default function TrashSessionRoute() {
     }).catch((requestError) => {
       if (!active) return;
       if (requestError.status === 404) navigate(`${base}/app`, { replace: true });
-      else setError(`无法读取会话历史：${requestError.message}`);
+      else setError(t("trashSessionRoute.unableToLoadConversationHistoryValue", { value1: requestError.message }));
     }).finally(() => active && setLoading(false));
     return () => { active = false; store.clear(); };
-  }, [agents, base, navigate, sessionId, store, workspace.id]);
+  }, [agents, base, navigate, sessionId, store, workspace.id, t]);
 
   async function loadOlder() {
     if (!cursor || !hasMore || loadingOlder) return;
@@ -66,7 +69,7 @@ export default function TrashSessionRoute() {
       setCursor(page.nextCursor);
       setHasMore(page.hasMore);
     } catch (requestError) {
-      setError(`无法读取更早的会话内容：${requestError.message}`);
+      setError(t("trashSessionRoute.unableToLoadEarlierMessagesValue", { value1: requestError.message }));
     } finally {
       setLoadingOlder(false);
     }
@@ -82,9 +85,9 @@ export default function TrashSessionRoute() {
       navigate(`${base}/agents/${encodeURIComponent(session.agentId)}?sessionId=${encodeURIComponent(session.id)}`);
     } catch (requestError) {
       if (requestError.status === 404 || requestError.status === 410) navigate(`${base}/app`, { replace: true });
-      else if (requestError.message === "agent_deleted") setError("请先恢复该会话所属的代理。");
+      else if (requestError.message === "agent_deleted") setError(t("trashSessionRoute.restoreThisConversationSAgentFirst"));
       else if (requestError.message === "session_not_deleted") navigate(`${base}/agents/${encodeURIComponent(session.agentId)}?sessionId=${encodeURIComponent(session.id)}`, { replace: true });
-      else setError(`恢复失败：${requestError.message}`);
+      else setError(t("trashSessionRoute.unableToRestoreValue", { value1: requestError.message }));
     } finally {
       setRestoring(false);
     }
@@ -100,7 +103,7 @@ export default function TrashSessionRoute() {
       navigate(`${base}/app`, { replace: true });
     } catch (requestError) {
       if (requestError.status === 404 || requestError.status === 410 || requestError.message === "session_not_deleted") navigate(`${base}/app`, { replace: true });
-      else setError(`永久删除失败：${requestError.message}`);
+      else setError(t("trashSessionRoute.unableToDeletePermanentlyValue", { value1: requestError.message }));
     } finally {
       setPurging(false);
     }
@@ -112,14 +115,14 @@ export default function TrashSessionRoute() {
 
   return (
     <ShellPage>
-      <div className="shDeletedTopbar"><Link to={`${base}/app`}><ArrowLeft aria-hidden="true" />返回</Link><span>{session?.title || "已删除会话"}</span></div>
+      <div className="shDeletedTopbar"><Link to={`${base}/app`}><ArrowLeft aria-hidden="true" />{t("trashSessionRoute.back")}</Link><span>{session?.title || t("trashSessionRoute.deletedConversation")}</span></div>
       <div className="shDeletedBanner">
-        <span>{parentActive ? `此会话已被移到垃圾桶${remainingDays ? `，还剩 ${remainingDays} 天` : ""}。` : "此会话随已删除的代理隐藏；请在垃圾桶中恢复代理。"}</span>
-        {session?.status === "deleted" && parentActive ? <button type="button" disabled={restoring} onClick={restore}>{restoring ? <LoaderCircle className="statusIcon" aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}恢复会话</button> : null}
-        {session?.status === "deleted" ? <button type="button" disabled={purging} onClick={() => setPurgeOpen(true)}><Trash2 aria-hidden="true" />永久删除</button> : null}
+        <span>{parentActive ? remainingDays ? t("trash.remaining", { count: remainingDays }) : t("trash.inTrash") : t("trashSessionRoute.thisConversationIsHiddenWithItsDeletedAgentRestore")}</span>
+        {session?.status === "deleted" && parentActive ? <button type="button" disabled={restoring} onClick={restore}>{restoring ? <LoaderCircle className="statusIcon" aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}{t("trashSessionRoute.restoreConversation")}</button> : null}
+        {session?.status === "deleted" ? <button type="button" disabled={purging} onClick={() => setPurgeOpen(true)}><Trash2 aria-hidden="true" />{t("trashSessionRoute.deletePermanently")}</button> : null}
       </div>
       {error ? <div className="errorBanner" role="alert">{error}</div> : null}
-      <section className="shTrashHistory" aria-label="只读会话历史">
+      <section className="shTrashHistory" aria-label={t("trashSessionRoute.readOnlyConversationHistory")}>
         <VirtualAgentRunList
           store={store}
           sessionId={sessionId}
@@ -133,7 +136,7 @@ export default function TrashSessionRoute() {
           onShowAttachment={(asset) => window.open(attachmentPreviewUrl(asset), "_blank", "noopener,noreferrer")}
         />
       </section>
-      <ConfirmDialog open={purgeOpen} title="确定要删除此对话？" busy={purging} onCancel={() => setPurgeOpen(false)} onConfirm={() => void purge()} />
+      <ConfirmDialog open={purgeOpen} title={t("appRoute.deleteThisConversation")} busy={purging} onCancel={() => setPurgeOpen(false)} onConfirm={() => void purge()} />
     </ShellPage>
   );
 }

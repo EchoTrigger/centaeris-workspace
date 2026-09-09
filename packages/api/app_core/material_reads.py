@@ -22,7 +22,7 @@ from .models import DerivedRepresentation, KnowledgeSegment
 MAX_SEARCH_CANDIDATES = 10_000
 
 
-def read_materials(access: MaterialAccess, input_bindings: list, *, offset=None, limit=None) -> dict:
+def read_materials(access: MaterialAccess, input_bindings: list, *, offset=None, limit=None, full_window=False) -> dict:
     inputs = material_access.bind_inputs(access.agent_run, access.authorization_digest, input_bindings, access.spec_digest)
     if not 1 <= len(inputs) <= 4:
         raise KnowledgeError("knowledge_read_inputs_invalid", 400)
@@ -38,7 +38,7 @@ def read_materials(access: MaterialAccess, input_bindings: list, *, offset=None,
     if missing:
         return {"disposition": "pending", "missing": missing}
     items = [
-        _read_representation(item, representation, offset or 0, limit or MAX_READ_LINES)
+        _read_representation(item, representation, offset or 0, limit or MAX_READ_LINES, full_window=full_window)
         for item, representation in zip(inputs, representations, strict=True)
     ]
     return {
@@ -48,7 +48,7 @@ def read_materials(access: MaterialAccess, input_bindings: list, *, offset=None,
     }
 
 
-def search_materials(access: MaterialAccess, input_bindings: list, *, query, ranking, date_range, limit) -> dict:
+def search_materials(access: MaterialAccess, input_bindings: list, *, query, ranking, date_range, limit, full_window=False) -> dict:
     if (
         not isinstance(query, str)
         or not query.strip()
@@ -96,7 +96,7 @@ def search_materials(access: MaterialAccess, input_bindings: list, *, query, ran
     else:
         matches.sort(key=lambda value: (-value[0], -value[1].timestamp(), value[2].segmentId))
     hits = [
-        material_evidence.search_evidence(segment, item, score)
+        material_evidence.search_evidence(segment, item, score, full_window=full_window)
         for score, _updated, segment, item in matches[:limit]
     ]
     return {
@@ -126,13 +126,13 @@ def _representations(inputs: list[BoundInput]):
     return representations, missing
 
 
-def _read_representation(bound: BoundInput, representation, offset: int, limit: int) -> dict:
+def _read_representation(bound: BoundInput, representation, offset: int, limit: int, *, full_window=False) -> dict:
     content = read_stored(
         representation.canonicalTextKey,
         representation.canonicalTextSizeBytes,
         representation.canonicalTextSha256,
     ).decode("utf-8", errors="strict")
-    return material_evidence.read_evidence(content, bound, representation, offset, limit)
+    return material_evidence.read_evidence(content, bound, representation, offset, limit, full_window=full_window)
 
 
 def _date_range(value):

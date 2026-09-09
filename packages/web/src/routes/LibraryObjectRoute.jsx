@@ -1,3 +1,5 @@
+
+import { useTranslation } from "../i18n";
 import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams, useRouteLoaderData, useSearchParams } from "react-router";
 import { ArrowLeft, Download, FileText, LoaderCircle, LockKeyhole, Trash2 } from "lucide-react";
@@ -24,6 +26,7 @@ function composeNote(title, body) {
 }
 
 function LibraryPreviewPageContent() {
+  const { t } = useTranslation();
   const params = useParams();
   const location = useLocation();
   const navigate = useNavigate();
@@ -82,7 +85,7 @@ function LibraryPreviewPageContent() {
         setRenamingTitle(false);
       }
     } catch (requestError) {
-      setError(`无法打开文件：${requestError.message}`);
+      setError(t("libraryObjectRoute.unableToOpenFileValue", { value1: requestError.message }));
     } finally {
       setLoading(false);
     }
@@ -101,7 +104,7 @@ function LibraryPreviewPageContent() {
     if (!itemIdRef.current && !snapshot.markdown.trim()) return Promise.resolve();
     const operation = saveQueueRef.current.then(async () => {
       setError("");
-      setSaveStatus("正在保存…");
+      setSaveStatus(t("libraryObjectRoute.saving"));
       try {
         const result = itemIdRef.current
           ? await api(`/api/library/${itemIdRef.current}/note`, {
@@ -120,10 +123,10 @@ function LibraryPreviewPageContent() {
         if (created) {
           navigate(`${base}/library/${encodeURIComponent(result.object.id)}${folderId ? `?folder=${encodeURIComponent(folderId)}` : ""}`, { replace: true, state: null });
         }
-        setSaveStatus("已保存。");
+        setSaveStatus(t("libraryObjectRoute.saved"));
       } catch (requestError) {
-        setError(`保存失败：${requestError.message}`);
-        setSaveStatus("保存失败。");
+        setError(t("libraryObjectRoute.unableToSaveValue", { value1: requestError.message }));
+        setSaveStatus(t("libraryObjectRoute.unableToSave"));
         throw requestError;
       }
     });
@@ -139,7 +142,7 @@ function LibraryPreviewPageContent() {
   function updateNote(title, body) {
     setNoteTitle(title);
     setMarkdown(body);
-    setSaveStatus("有未保存的更改。");
+    setSaveStatus(t("libraryObjectRoute.youHaveUnsavedChanges"));
     noteRef.current = { displayName: title.trim() || "Untitled", markdown: composeNote(title, body) };
     scheduleSave();
   }
@@ -151,20 +154,20 @@ function LibraryPreviewPageContent() {
       await api(`/api/library/${item.id}`, { method: "DELETE" });
       backToLibrary();
     } catch (requestError) {
-      setError(`无法移到垃圾桶：${requestError.message}`);
+      setError(t("libraryObjectRoute.unableToMoveThisItemToTrashValue", { value1: requestError.message }));
     } finally {
       setDeleting(false);
     }
   }
 
   const isNote = item?.objectKind === "note";
-  const displayedTitle = isNote ? noteTitle || "无标题" : item?.displayName;
+  const displayedTitle = isNote ? noteTitle || t("libraryObjectRoute.untitled") : item?.displayName;
 
   return <div className="libraryPreviewMain">
     <span className="srOnly" role="status" aria-live="polite">{saveStatus}</span>
     <header className="libraryPreviewHeader">
-      {isNote ? <nav className="libraryNoteIdentity" aria-label="笔记地址">
-        <button type="button" onClick={backToLibrary}>私人</button>
+      {isNote ? <nav className="libraryNoteIdentity" aria-label={t("libraryObjectRoute.notePath")}>
+        <button type="button" onClick={backToLibrary}>{t("agentRoute.private")}</button>
         <span aria-hidden="true">/</span>
         {renamingTitle
           ? <input
@@ -177,20 +180,21 @@ function LibraryPreviewPageContent() {
               event.preventDefault();
               setRenamingTitle(false);
             }}
-            aria-label="笔记标题"
-            placeholder="无标题"
+            aria-label={t("libraryObjectRoute.noteTitle")}
+            placeholder={t("libraryObjectRoute.untitled")}
           />
-          : <button className="libraryNoteName" type="button" onClick={() => setRenamingTitle(true)} aria-label="重命名笔记">{displayedTitle}</button>}
-        <small><LockKeyhole aria-hidden="true" />私人</small>
-      </nav> : <nav aria-label="资料库路径"><button type="button" onClick={backToLibrary}><ArrowLeft aria-hidden="true" />资料库</button>{item && <><span>/</span><strong>{displayedTitle}</strong></>}</nav>}
-      {item && !isNote && <div className="libraryPreviewActions"><a href={apiUrl(`/api/library/${item.id}/download`)} aria-label="下载"><Download aria-hidden="true" /></a><button type="button" disabled={deleting} onClick={() => void deleteItem()} aria-label="移到垃圾桶"><Trash2 aria-hidden="true" /></button></div>}
+          : <button className="libraryNoteName" type="button" onClick={() => setRenamingTitle(true)} aria-label={t("libraryObjectRoute.renameNote")}>{displayedTitle}</button>}
+        <small><LockKeyhole aria-hidden="true" />{t("agentRoute.private")}</small>
+      </nav> : <nav aria-label={t("libraryObjectRoute.libraryPath")}><button type="button" onClick={backToLibrary}><ArrowLeft aria-hidden="true" />{t("libraryObjectRoute.library")}</button>{item && <><span>/</span><strong>{displayedTitle}</strong></>}</nav>}
+      {item && !isNote && <div className="libraryPreviewActions"><a href={apiUrl(`/api/library/${item.id}/download`)} aria-label={t("workspaceContextPanel.download")}><Download aria-hidden="true" /></a><button type="button" disabled={deleting} onClick={() => void deleteItem()} aria-label={t("agentRoute.moveToTrash")}><Trash2 aria-hidden="true" /></button></div>}
     </header>
     <section className={`libraryPreviewBody ${item?.objectKind === "note" ? "libraryNotePreview" : ""}`}>
-      {loading ? <div className="libraryEmptyState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />正在打开文件</div> : <>{error && <div className="errorBanner libraryError" role="alert">{error}<button type="button" onClick={load}>重试</button></div>}{isNote ? <div className="libraryNoteEditor"><textarea value={markdown} onChange={(event) => updateNote(noteTitle, event.target.value)} aria-label="笔记正文" placeholder="输入文字，或键入“/”获取命令…" /></div> : error ? null : isImage(item) ? <img className="libraryPreviewImage" src={apiUrl(`/api/library/${item.id}/preview`)} alt={item.displayName} /> : canEmbed(item) ? <iframe className="libraryPreviewFrame" src={apiUrl(`/api/library/${item.id}/preview`)} title={item.displayName} /> : <div className="libraryPreviewUnsupported"><FileText aria-hidden="true" /><strong>{item.displayName}</strong><span>此文件类型暂不支持在线预览。</span><a href={apiUrl(`/api/library/${item.id}/download`)}><Download aria-hidden="true" />下载文件</a></div>}</>}
+      {loading ? <div className="libraryEmptyState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryObjectRoute.openingFile")}</div> : <>{error && <div className="errorBanner libraryError" role="alert">{error}<button type="button" onClick={load}>{t("libraryObjectRoute.retry")}</button></div>}{isNote ? <div className="libraryNoteEditor"><textarea value={markdown} onChange={(event) => updateNote(noteTitle, event.target.value)} aria-label={t("libraryObjectRoute.noteContent")} placeholder={t("libraryObjectRoute.startWritingOrTypeForCommands")} /></div> : error ? null : isImage(item) ? <img className="libraryPreviewImage" src={apiUrl(`/api/library/${item.id}/preview`)} alt={item.displayName} /> : canEmbed(item) ? <iframe className="libraryPreviewFrame" src={apiUrl(`/api/library/${item.id}/preview`)} title={item.displayName} /> : <div className="libraryPreviewUnsupported"><FileText aria-hidden="true" /><strong>{item.displayName}</strong><span>{t("libraryObjectRoute.onlinePreviewIsUnavailableForThisFileType")}</span><a href={apiUrl(`/api/library/${item.id}/download`)}><Download aria-hidden="true" />{t("libraryObjectRoute.downloadFile")}</a></div>}</>}
     </section>
   </div>;
 }
 
 export default function LibraryPreviewPage() {
+  useTranslation();
   return <ShellPage><LibraryPreviewPageContent /></ShellPage>;
 }

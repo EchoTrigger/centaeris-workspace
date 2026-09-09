@@ -1,3 +1,5 @@
+
+import { useTranslation } from "../i18n";
 import { useState } from "react";
 import { useNavigate, useRevalidator, useRouteLoaderData } from "react-router";
 import { apiJson, jsonOptions } from "../api";
@@ -5,6 +7,7 @@ import { AgentEditorModal } from "../shell/AgentEditorModal";
 import { ShellPage } from "../shell/ShellPage";
 
 export default function AgentCreateRoute() {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const revalidator = useRevalidator();
   const { workspace } = useRouteLoaderData("workspace");
@@ -21,7 +24,7 @@ export default function AgentCreateRoute() {
       await revalidator.revalidate();
       navigate(`/w/${encodeURIComponent(workspace.id)}/agents/${encodeURIComponent(result.agent.id)}?new=1`);
     } catch (requestError) {
-      setError(`无法创建代理：${requestError.message}`);
+      setError(t("agentCreateRoute.unableToCreateAgentValue", { value1: requestError.message }));
     } finally {
       setBusy(false);
     }
@@ -29,7 +32,7 @@ export default function AgentCreateRoute() {
 
   return (
     <ShellPage initialTab="chat">
-      <AgentEditorModal agent={draft} heading="创建私人代理" submitLabel="创建代理" busy={busy} error={error} onClose={() => navigate(-1)} onSave={save} />
+      <AgentEditorModal agent={draft} heading={t("agentCreateRoute.createPrivateAgent")} submitLabel={t("agentCreateRoute.createAgent")} busy={busy} error={error} onClose={() => navigate(-1)} onSave={save} />
     </ShellPage>
   );
 }

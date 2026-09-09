@@ -73,8 +73,8 @@ async function installSkillFixture(page, skills, contentBySkillId) {
 }
 
 async function openSkillPreview(page, name) {
-  await page.getByRole("row", { name: `预览 ${name}`, exact: true }).click();
-  const preview = page.getByRole("complementary", { name: "Skill 预览" });
+  await page.getByRole("row", { name: `Preview ${name}`, exact: true }).click();
+  const preview = page.getByRole("complementary", { name: "Skill preview" });
   await expect(preview).toBeVisible();
   return preview;
 }
@@ -150,4 +150,10 @@ test("a Chinese workspace page downloads only the Noto glyph shards it uses", as
     type: "font-transfer",
     description: `${downloaded.length}/${notoFiles.length} shards, ${downloadedBytes}/${repositoryBytes} bytes`,
   });
+});
+
+
+
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("centaeris:language:v1", "en"));
 });

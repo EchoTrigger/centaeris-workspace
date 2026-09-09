@@ -1,3 +1,5 @@
+
+import { useTranslation } from "../i18n";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, Outlet, matchPath, useLocation, useNavigate, useRouteLoaderData } from "react-router";
 import { Bot, Plus } from "lucide-react";
@@ -5,6 +7,7 @@ import { AppPageContent } from "./AppRoute";
 import { ShellPage } from "../shell/ShellPage";
 
 export default function WorkspaceChatLayout() {
+  const { t } = useTranslation();
   const { workspace, agents } = useRouteLoaderData("workspace");
   const location = useLocation();
   const locationRef = useRef(location);
@@ -56,8 +59,8 @@ export default function WorkspaceChatLayout() {
     /> : <ShellPage>
       <div className="shWorkspaceHome"><div className="shWorkspaceAgentEmpty">
         <Bot aria-hidden="true" />
-        <p>当前工作区还没有可用的私人代理。</p>
-        <div><Link className="shPrimaryButton" to={`${base}/agents/new`}><Plus aria-hidden="true" />创建代理</Link></div>
+        <p>{t("workspaceHomeRoute.noPrivateAgentsAreAvailableInThisWorkspaceYet")}</p>
+        <div><Link className="shPrimaryButton" to={`${base}/agents/new`}><Plus aria-hidden="true" />{t("agentCreateRoute.createAgent")}</Link></div>
       </div></div>
     </ShellPage> : null}
     {notice ? <div className="shWorkspaceToast" role="status">{notice}</div> : null}

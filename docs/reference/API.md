@@ -256,3 +256,11 @@ whitespace, and encrypt only the Token. Empty values, embedded whitespace/contro
 characters, and full `Authorization:` header lines are rejected. Saved credentials
 remain manageable if declarations fail. Saving credentials does not establish
 tool availability or bypass contract validation; execution remains strict v1.
+
+### Bounded material tool results
+
+`read_material` and `search_materials` preserve each completed request as an immutable, session-owned result snapshot before returning a bounded page. The model receives one structured result, without a duplicated text projection. English `message` text reports delivered line and UTF-8 byte ranges; byte-range ends are exclusive. `completeResultSaved` describes storage completeness, not model reading coverage.
+
+The response carries `resultRef`, `resultSha256`, and `continuation` (either null or an exact `tool` / `arguments` pair). `read_material_result(result_ref, cursor)` retrieves the next page of the same saved result. Treat its cursor as opaque. It does not rerun a search. When a document window is exhausted, continuation can point to `read_material` with the next zero-based line offset. Single long lines are paged at UTF-8 character boundaries. Only the returned content is eligible for a citation.
+
+Snapshots remain with the source SessionEvent and survive API/runtime restarts. Every continuation rechecks the current run's source permissions, generation, processing identity, and session ownership. Corrupt snapshots, revoked access, and invalid cursors fail explicitly; they are not reported as a successful partial result. Existing citation projections are retained during the schema migration. Roll out API migrations and the matching Runtime tool catalog together, after active runs drain.

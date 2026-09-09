@@ -1,3 +1,5 @@
+
+import { useTranslation } from "../i18n";
 import { useState } from "react";
 import { Link, useNavigate, useParams, useRevalidator, useRouteLoaderData } from "react-router";
 import { Bot, FileText, Lock, Pencil, Trash2 } from "lucide-react";
@@ -7,6 +9,7 @@ import { AgentMark } from "../shell/AgentMark";
 import { ShellPage } from "../shell/ShellPage";
 
 export default function AgentRoute() {
+  const { t } = useTranslation();
   const { agentId } = useParams();
   const { workspace, agents } = useRouteLoaderData("workspace");
   const agent = agents.find((item) => item.id === agentId);
@@ -18,7 +21,7 @@ export default function AgentRoute() {
   const base = `/w/${encodeURIComponent(workspace.id)}`;
 
   if (!agent) {
-    return <ShellPage initialTab="chat"><div className="shEmptyPage"><Bot aria-hidden="true" /><h1>找不到这个代理</h1><Link to={`${base}/app`}>返回工作区</Link></div></ShellPage>;
+    return <ShellPage initialTab="chat"><div className="shEmptyPage"><Bot aria-hidden="true" /><h1>{t("agentRoute.agentNotFound")}</h1><Link to={`${base}/app`}>{t("router.backToWorkspaces")}</Link></div></ShellPage>;
   }
 
   async function save(nextAgent) {
@@ -30,7 +33,7 @@ export default function AgentRoute() {
       await revalidator.revalidate();
       setEditing(false);
     } catch (requestError) {
-      setError(`无法保存代理：${requestError.message}`);
+      setError(t("agentRoute.unableToSaveAgentValue", { value1: requestError.message }));
     } finally {
       setBusy(false);
     }
@@ -45,7 +48,7 @@ export default function AgentRoute() {
       await revalidator.revalidate();
       navigate(`${base}/app`);
     } catch (requestError) {
-      setError(requestError.message === "agent_has_active_agent_run" ? "该代理仍有运行中的会话，完成或停止后再移入垃圾桶。" : `无法移入垃圾桶：${requestError.message}`);
+      setError(requestError.message === "agent_has_active_agent_run" ? t("agentRoute.thisAgentHasActiveConversationsFinishOrStopThem") : t("agentRoute.unableToMoveToTrashValue", { value1: requestError.message }));
     } finally {
       setBusy(false);
     }
@@ -54,29 +57,29 @@ export default function AgentRoute() {
   return (
     <ShellPage initialTab="chat">
       <div className="shAgentTopbar">
-        <span>{agent.name}</span><span><Lock aria-hidden="true" /> 私人</span>
-        <Link to={`${base}/agents/${encodeURIComponent(agent.id)}`}>打开会话</Link>
+        <span>{agent.name}</span><span><Lock aria-hidden="true" />{" "}{t("agentRoute.private")}</span>
+        <Link to={`${base}/agents/${encodeURIComponent(agent.id)}`}>{t("agentRoute.openConversation")}</Link>
       </div>
       {error ? <div className="errorBanner" role="alert">{error}</div> : null}
       <article className="shAgentPage">
         <header className="shAgentPageHeader">
           <AgentMark className="shAgentPageIcon" agent={agent} />
-          <div><h1>{agent.name}</h1><p><Lock aria-hidden="true" />仅你可见</p></div>
+          <div><h1>{agent.name}</h1><p><Lock aria-hidden="true" />{t("agentRoute.onlyYouCanSeeThis")}</p></div>
         </header>
-        <p className="shAgentLead">{agent.description || "尚未填写说明。"}</p>
+        <p className="shAgentLead">{agent.description || t("agentRoute.noDescriptionYet")}</p>
         <section className="shAgentSoulPreview" aria-labelledby="agentSoulHeading">
           <header>
             <span><FileText aria-hidden="true" /></span>
             <div><small>Instructions</small><h2 id="agentSoulHeading" translate="no">SOUL.md</h2></div>
           </header>
-          <p>{agent.instructions || "尚未设置。代理将使用默认行为。"}</p>
+          <p>{agent.instructions || t("agentRoute.noInstructionsYetTheAgentWillUseItsDefault")}</p>
         </section>
         <div className="shAgentSettingsActions">
-          <button className="shQuietButton" type="button" onClick={() => setEditing(true)}><Pencil aria-hidden="true" />编辑代理</button>
-          <button className="shQuietButton isDanger" type="button" disabled={busy} onClick={() => void remove()}><Trash2 aria-hidden="true" />移到垃圾桶</button>
+          <button className="shQuietButton" type="button" onClick={() => setEditing(true)}><Pencil aria-hidden="true" />{t("agentRoute.editAgent")}</button>
+          <button className="shQuietButton isDanger" type="button" disabled={busy} onClick={() => void remove()}><Trash2 aria-hidden="true" />{t("agentRoute.moveToTrash")}</button>
         </div>
       </article>
-      {editing ? <AgentEditorModal agent={agent} heading="编辑代理" submitLabel="保存更改" busy={busy} error={error} onClose={() => setEditing(false)} onSave={save} /> : null}
+      {editing ? <AgentEditorModal agent={agent} heading={t("agentRoute.editAgent")} submitLabel={t("agentRoute.saveChanges")} busy={busy} error={error} onClose={() => setEditing(false)} onSave={save} /> : null}
     </ShellPage>
   );
 }

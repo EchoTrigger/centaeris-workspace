@@ -1,3 +1,4 @@
+import { useStreamPresentation } from "../useStreamPresentation";
 import { Fragment, memo, useEffect, useMemo, useRef } from "react";
 
 function safeHref(href) {
@@ -170,7 +171,8 @@ export const MarkdownContent = memo(function MarkdownContent(/** @type {{ text: 
   return <div className="markdownContent">{nodes}</div>;
 });
 
-export const StreamingMarkdownContent = memo(function StreamingMarkdownContent({ text, finalized = false }) {
+export const StreamingMarkdownContent = memo(function StreamingMarkdownContent({ text: sourceText, finalized = false }) {
+  const text = useStreamPresentation(sourceText, !finalized);
   const committedProjection = useRef(createMarkdownBlockProjection());
   const projection = useMemo(
     () => updateMarkdownBlockProjection(

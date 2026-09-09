@@ -1,3 +1,5 @@
+
+import { useTranslation } from "../i18n";
 import { useEffect, useRef, useState } from "react";
 import { FileText, Lock, Pencil, X } from "lucide-react";
 import { useModalDialog } from "../components/useModalDialog";
@@ -9,6 +11,7 @@ const AVATAR_CHOICES = [
 ];
 
 export function AgentEditorModal({ agent, heading, submitLabel, busy = false, error = "", onClose, onSave }) {
+  const { t } = useTranslation();
   const [view, setView] = useState("profile");
   const [name, setName] = useState(agent.name || "");
   const [description, setDescription] = useState(agent.description || "");
@@ -69,17 +72,17 @@ export function AgentEditorModal({ agent, heading, submitLabel, busy = false, er
         }}
       >
         <header className="libraryPreviewHeader">
-          <nav className="libraryNoteIdentity" aria-label="SOUL.md 地址">
-            <button type="button" onClick={() => setView("profile")}>代理</button>
+          <nav className="libraryNoteIdentity" aria-label={t("agentEditorModal.soulMdPath")}>
+            <button type="button" onClick={() => setView("profile")}>{t("agentRunRow.agent")}</button>
             <span aria-hidden="true">/</span>
             <strong translate="no">SOUL.md</strong>
-            <small><Lock aria-hidden="true" />私人</small>
+            <small><Lock aria-hidden="true" />{t("agentRoute.private")}</small>
           </nav>
-          <button className="shSoulDocumentDone" type="button" onClick={() => setView("profile")}>完成编辑</button>
+          <button className="shSoulDocumentDone" type="button" onClick={() => setView("profile")}>{t("agentEditorModal.finishEditing")}</button>
         </header>
         <section className="libraryPreviewBody libraryNotePreview">
           <div className="libraryNoteEditor">
-            <label className="srOnly" htmlFor="agentInstructions">代理指令</label>
+            <label className="srOnly" htmlFor="agentInstructions">{t("agentEditorModal.agentInstructions")}</label>
             <textarea
               id="agentInstructions"
               name="agentInstructions"
@@ -87,8 +90,8 @@ export function AgentEditorModal({ agent, heading, submitLabel, busy = false, er
               maxLength={16000}
               value={instructions}
               onChange={(event) => setInstructions(event.target.value)}
-              placeholder={"# 身份与职责\n\n写下这个代理应遵循的工作方式与行为边界…"}
-              aria-label="代理指令"
+              placeholder={t("agentEditorModal.identityAndResponsibilitiesDescribeHowThisAgentShouldWork")}
+              aria-label={t("agentEditorModal.agentInstructions")}
             />
           </div>
         </section>
@@ -108,7 +111,7 @@ export function AgentEditorModal({ agent, heading, submitLabel, busy = false, er
         onSubmit={submit}
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <button className="shModalClose quietCloseButton" type="button" disabled={busy} onClick={requestClose} aria-label="关闭"><X aria-hidden="true" /></button>
+        <button className="shModalClose quietCloseButton" type="button" disabled={busy} onClick={requestClose} aria-label={t("workspaceContextPanel.close")}><X aria-hidden="true" /></button>
 
         <h1>{heading}</h1>
             <div className="shAgentIdentity">
@@ -120,14 +123,14 @@ export function AgentEditorModal({ agent, heading, submitLabel, busy = false, er
                 maxLength={255}
                 value={name}
                 onChange={(event) => setName(event.target.value)}
-                placeholder="为代理命名…"
-                aria-label="代理名称"
+                placeholder={t("agentEditorModal.nameYourAgent")}
+                aria-label={t("agentEditorModal.agentName")}
               />
-              <span className="shAgentPrivate"><Lock aria-hidden="true" />仅你可见</span>
+              <span className="shAgentPrivate"><Lock aria-hidden="true" />{t("agentRoute.onlyYouCanSeeThis")}</span>
             </div>
 
             <fieldset className="shAvatarChoices">
-              <legend>选择头像</legend>
+              <legend>{t("agentEditorModal.chooseAvatar")}</legend>
               {AVATAR_CHOICES.map(([kind, label]) => (
                 <button
                   className={avatarKind === kind ? "isActive" : ""}
@@ -142,7 +145,7 @@ export function AgentEditorModal({ agent, heading, submitLabel, busy = false, er
               ))}
             </fieldset>
 
-            <label className="shCreateLabel" htmlFor="agentDescription">简介</label>
+            <label className="shCreateLabel" htmlFor="agentDescription">{t("agentEditorModal.overview")}</label>
             <input
               className="shAgentDescriptionInput"
               id="agentDescription"
@@ -151,31 +154,31 @@ export function AgentEditorModal({ agent, heading, submitLabel, busy = false, er
               maxLength={128}
               value={description}
               onChange={(event) => setDescription(event.target.value)}
-              placeholder="一句话说明它负责什么…"
-              aria-label="代理简介"
+              placeholder={t("agentEditorModal.describeItsResponsibilitiesInOneSentence")}
+              aria-label={t("agentEditorModal.agentDescription")}
             />
 
             <section className="shInstructionsSection" aria-labelledby="agentInstructionsHeading">
               <small id="agentInstructionsHeading">Instructions</small>
-              <button className="shSoulCard" type="button" onClick={() => setView("instructions")} aria-label="编辑 SOUL.md">
+              <button className="shSoulCard" type="button" onClick={() => setView("instructions")} aria-label={t("agentEditorModal.editSoulMd")}>
                 <span className="shSoulCardIcon"><FileText aria-hidden="true" /></span>
                 <span className="shSoulCardCopy">
                   <strong translate="no">SOUL.md</strong>
-                  <small>{instructions.trim().split("\n")[0] || "尚未设置。代理将使用默认行为。"}</small>
+                  <small>{instructions.trim().split("\n")[0] || t("agentRoute.noInstructionsYetTheAgentWillUseItsDefault")}</small>
                 </span>
-                <span className="shSoulCardAction"><Pencil aria-hidden="true" />编辑</span>
+                <span className="shSoulCardAction"><Pencil aria-hidden="true" />{t("agentRunRow.edit")}</span>
               </button>
             </section>
 
             {error ? <div className="errorBanner" role="alert">{error}</div> : null}
             {confirmingClose ? <footer className="shAgentDiscardPrompt" role="alert">
-              <span><strong>放弃未保存的更改？</strong><small>名称、简介、头像和 SOUL.md 草稿都会丢失。</small></span>
-              <button ref={continueEditingRef} type="button" onClick={() => setConfirmingClose(false)}>继续编辑</button>
-              <button className="isDanger" type="button" onClick={onClose}>放弃更改</button>
+              <span><strong>{t("agentEditorModal.discardUnsavedChanges")}</strong><small>{t("agentEditorModal.yourNameDescriptionAvatarAndSoulMdDraftsWill")}</small></span>
+              <button ref={continueEditingRef} type="button" onClick={() => setConfirmingClose(false)}>{t("agentEditorModal.continueEditing")}</button>
+              <button className="isDanger" type="button" onClick={onClose}>{t("agentEditorModal.discardChanges")}</button>
             </footer> : <footer>
-              <span className="srOnly" role="status" aria-live="polite">{busy ? "正在保存代理…" : ""}</span>
-              <button type="button" disabled={busy} onClick={reset}>重置</button>
-              <button className="shPrimaryButton" type="submit" disabled={busy || !name.trim()}>{busy ? "保存中…" : submitLabel}</button>
+              <span className="srOnly" role="status" aria-live="polite">{busy ? t("agentEditorModal.savingAgent") : ""}</span>
+              <button type="button" disabled={busy} onClick={reset}>{t("agentEditorModal.reset")}</button>
+              <button className="shPrimaryButton" type="submit" disabled={busy || !name.trim()}>{busy ? t("modelSettings.saving") : submitLabel}</button>
             </footer>}
       </form>
     </div>

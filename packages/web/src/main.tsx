@@ -1,3 +1,4 @@
+import { t } from "./i18n";
 import { createRoot } from "react-dom/client";
 import { RouterProvider } from "react-router/dom";
 import { configureApi } from "./api";
@@ -16,6 +17,6 @@ loadRuntimeConfig()
   })
   .catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
-    root.render(<main role="alert"><h1>Centaeris 启动失败</h1><p>{message}</p></main>);
+    root.render(<main role="alert"><h1>{t("main.centaerisCouldNotStart")}</h1><p>{message}</p></main>);
     console.error(error);
   });

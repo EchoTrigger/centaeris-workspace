@@ -1,3 +1,6 @@
+import { feedback, useLocalizedFeedback } from "../localizedFeedback";
+import { t } from "../i18n";
+import { useTranslation } from "../i18n";
 import { type FormEvent, useState } from "react";
 import { Link } from "react-router";
 import { ApiError, apiJson, apiResponse, clearCsrfToken, jsonOptions } from "../api";
@@ -25,10 +28,10 @@ export function LoginBrand({ heading, description }: { heading: string; descript
 
 function loginError(error: unknown, reauthenticating: boolean) {
   if (error instanceof ApiError && error.message === "invalid_credentials") {
-    return reauthenticating ? "密码不正确，请重试。" : "邮箱或密码不正确。";
+    return reauthenticating ? feedback("loginForm.incorrectPasswordPleaseTryAgain") : feedback("loginForm.incorrectEmailOrPassword");
   }
-  if (error instanceof ApiError && error.message === "csrf_failed") return "安全校验失败，请重试。";
-  return reauthenticating ? "重新登录失败，请重试。" : "登录失败，请重试。";
+  if (error instanceof ApiError && error.message === "csrf_failed") return feedback("loginForm.securityVerificationFailedPleaseTryAgain");
+  return reauthenticating ? feedback("loginForm.unableToSignInAgainPleaseTryAgain") : feedback("loginForm.unableToSignInPleaseTryAgain");
 }
 
 export function LoginForm({
@@ -36,16 +39,17 @@ export function LoginForm({
   expectedUserId,
   emailReadOnly = false,
   embedded = false,
-  heading = "登录",
+  heading = t("loginForm.signIn"),
   description = "Centaeris Workspace",
-  submitLabel = "登录",
+  submitLabel = t("loginForm.signIn"),
   notice = "",
   onAuthenticated,
 }: LoginFormProps) {
+  const { t } = useTranslation();
   const [email, setEmail] = useState(initialEmail);
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useLocalizedFeedback("");
   const reauthenticating = Boolean(expectedUserId);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -78,15 +82,15 @@ export function LoginForm({
     {!embedded ? <LoginBrand heading={heading} description={description} /> : null}
     {notice ? <div className="success" role="status">{notice}</div> : null}
     <label className="field">
-      <span>邮箱</span>
+      <span>{t("loginForm.email")}</span>
       <input type="email" autoComplete="username" required readOnly={reauthenticating || emailReadOnly} value={email} onChange={(event) => setEmail(event.target.value)} />
     </label>
     <label className="field">
-      <span>密码</span>
+      <span>{t("loginForm.password")}</span>
       <input autoFocus={reauthenticating || emailReadOnly} type="password" autoComplete="current-password" required value={password} onChange={(event) => setPassword(event.target.value)} />
     </label>
-    {!reauthenticating && !embedded ? <div className="loginAuxiliary"><Link to="/forgot-password">忘记密码？</Link></div> : null}
+    {!reauthenticating && !embedded ? <div className="loginAuxiliary"><Link to="/forgot-password">{t("loginForm.forgotPassword")}</Link></div> : null}
     {error ? <div className="error" role="alert">{error}</div> : null}
-    <button className="primary" type="submit" disabled={busy}>{busy ? "正在登录…" : submitLabel}</button>
+    <button className="primary" type="submit" disabled={busy}>{busy ? t("loginForm.signingIn") : submitLabel}</button>
   </form>;
 }
