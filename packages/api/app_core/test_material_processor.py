@@ -12,6 +12,12 @@ from . import material_processor
 
 
 class ProcessorArchiveTests(SimpleTestCase):
+    def test_processor_cpu_quota_fits_four_core_hosts(self):
+        for device in ("cpu", "gpu:0"):
+            with self.subTest(device=device):
+                options = material_processor.container_options("runc", device)
+                self.assertEqual(options["nano_cpus"], 4_000_000_000)
+
     def test_orphan_spec_cleanup_is_owned_and_does_not_interrupt_recent_creation(self):
         worker = object.__new__(material_processor.MaterialWorker)
         worker.namespace, worker.client = "owned", Mock()

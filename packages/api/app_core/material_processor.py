@@ -70,7 +70,7 @@ def container_options(runtime, device):
         raise ValueError("material_processor_device_invalid")
     options = dict(user="10001:10001", network_mode="none", read_only=True,
                    tmpfs={"/tmp": "rw,nosuid,nodev,mode=1777"}, mem_limit=4294967296,
-                   nano_cpus=8000000000, pids_limit=64, cap_drop=["ALL"],
+                   nano_cpus=4_000_000_000, pids_limit=64, cap_drop=["ALL"],
                    security_opt=["no-new-privileges"], runtime=runtime,
                    log_config=docker.types.LogConfig(type="json-file", config={"max-size": "1m", "max-file": "1"}))
     if device == "gpu:0":
