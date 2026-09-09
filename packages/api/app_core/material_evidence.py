@@ -17,8 +17,8 @@ from .material_contract import (
 )
 
 
-def read_evidence(content: str, bound: BoundInput, representation, offset: int, limit: int) -> dict:
-    lines = content.splitlines()
+def read_evidence(content: str, bound: BoundInput, representation, offset: int, limit: int, *, full_window=False) -> dict:
+    lines = content.splitlines(keepends=full_window)
     if offset > len(lines):
         raise KnowledgeError("knowledge_read_offset_exceeds_content", 400)
     selected = []
@@ -31,7 +31,7 @@ def read_evidence(content: str, bound: BoundInput, representation, offset: int, 
             break
         encoded = line.encode("utf-8")
         next_bytes = output_bytes + (1 if selected else 0) + len(encoded)
-        if next_bytes > MAX_READ_BYTES:
+        if not full_window and next_bytes > MAX_READ_BYTES:
             truncated_by = "bytes"
             first_line_exceeds_limit = not selected
             break
@@ -42,7 +42,8 @@ def read_evidence(content: str, bound: BoundInput, representation, offset: int, 
     if not truncated:
         truncated_by = None
         first_line_exceeds_limit = False
-    selected_text = "\n".join(selected)
+    selected_text = ("" if full_window else "\n").join(selected)
+    output_bytes = len(selected_text.encode("utf-8"))
     locator = _line_locator(content, offset + 1, end_offset) if selected_text else None
     page_start, page_end = _locator_pages(representation.manifest, locator) if locator else (None, None)
     if locator is not None:
@@ -86,8 +87,8 @@ def read_evidence(content: str, bound: BoundInput, representation, offset: int, 
     }
 
 
-def search_evidence(segment, bound: BoundInput, score: int) -> dict:
-    content = _bounded_utf8_prefix(segment.boundedText, MAX_SEARCH_SNIPPET_BYTES)
+def search_evidence(segment, bound: BoundInput, score: int, *, full_window=False) -> dict:
+    content = segment.boundedText if full_window else _bounded_utf8_prefix(segment.boundedText, MAX_SEARCH_SNIPPET_BYTES)
     locator = dict(segment.locator)
     locator["endByte"] = locator["startByte"] + len(content.encode("utf-8"))
     locator["endLine"] = locator["startLine"] + content.count("\n")

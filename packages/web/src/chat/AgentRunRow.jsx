@@ -1,3 +1,5 @@
+
+import { useTranslation } from "../i18n";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Bot, Check, ChevronDown, Copy, FileOutput, FileText, Globe, ListChecks, Pencil, Plug, Search, SquareTerminal } from "lucide-react";
 import { useActivityDisclosures, useAgentRun } from "./chatStoreHooks";
@@ -9,11 +11,8 @@ import { ReasoningBlock } from "./ReasoningBlock";
 
 const TOOL_ICONS = { agent: Bot, terminal: SquareTerminal, edit: Pencil, search: Search, globe: Globe, listChecks: ListChecks, plug: Plug, fileOutput: FileOutput };
 
-function operationLabel(operation) {
-  return activityToolAtom(operation.toolName, operation.providerId).title;
-}
-
 function DiffPreview({ content }) {
+  useTranslation();
   const lines = content.split("\n");
   return (
     <pre className="activityOperationOutput isDiff"><code>{lines.map((line, index) => {
@@ -30,7 +29,8 @@ function DiffPreview({ content }) {
 }
 
 function ActivityOperation({ operation, expanded, onToggle }) {
-  const atom = activityToolAtom(operation.toolName, operation.providerId);
+  const { t } = useTranslation();
+  const atom = activityToolAtom(operation.toolName, operation.providerId, (label) => t(`tools.${label}`));
   const Icon = TOOL_ICONS[atom.icon];
   const command = typeof operation.normalizedInput?.command === "string" ? operation.normalizedInput.command : "";
   const description = typeof operation.normalizedInput?.description === "string"
@@ -51,8 +51,8 @@ function ActivityOperation({ operation, expanded, onToggle }) {
     <div className={`activityOperation is-${operation.toolName} ${failed ? "isFailed" : ""}`}>
       <Summary className="activityOperationSummary" {...(hasDetails ? { type: "button", onClick: onToggle, "aria-expanded": expanded } : {})}>
         <Icon aria-hidden="true" />
-        <span title={description || command || path || query || operationLabel(operation)}>{description || command || path || query || operationLabel(operation)}</span>
-        {failed ? <small>Failed</small> : null}
+        <span title={description || command || path || query || atom.title}>{description || command || path || query || atom.title}</span>
+        {failed ? <small>{t("tools.failed")}</small> : null}
         {hasDetails ? <ChevronDown className={expanded ? "isExpanded" : ""} aria-hidden="true" /> : null}
       </Summary>
       {hasDetails && expanded ? <div className="activityOperationDisclosure isExpanded">
@@ -60,17 +60,17 @@ function ActivityOperation({ operation, expanded, onToggle }) {
           {path || query || Number.isInteger(operation.matchCount) || Number.isInteger(operation.added) || Number.isInteger(operation.removed) || Number.isInteger(operation.lines) || Number.isInteger(operation.startLine) ? (
             <div className="activityOperationMeta">
               {path || operation.target ? <span>{path || operation.target}</span> : null}
-              {Number.isInteger(operation.startLine) && Number.isInteger(operation.endLine) && Number.isInteger(operation.totalLines) ? <span>lines {operation.startLine}-{operation.endLine} of {operation.totalLines}</span> : null}
-              {query ? <span>Query: {query}</span> : null}
-              {Number.isInteger(operation.matchCount) ? <span>{operation.matchCount} results</span> : null}
+              {Number.isInteger(operation.startLine) && Number.isInteger(operation.endLine) && Number.isInteger(operation.totalLines) ? <span>{t("tools.lineRange", { start: operation.startLine, end: operation.endLine, total: operation.totalLines })}</span> : null}
+              {query ? <span>{t("tools.query", { query })}</span> : null}
+              {Number.isInteger(operation.matchCount) ? <span>{t("tools.results", { count: operation.matchCount })}</span> : null}
               {Number.isInteger(operation.added) || Number.isInteger(operation.removed) ? <span>+{operation.added || 0} / -{operation.removed || 0}</span> : null}
-              {Number.isInteger(operation.lines) ? <span>{operation.lines} lines</span> : null}
+              {Number.isInteger(operation.lines) ? <span>{t("tools.lines", { count: operation.lines })}</span> : null}
             </div>
           ) : null}
           {atom.detail === "bash" && command ? (
             <div className="activityOperationCommandRow">
               <pre className="activityOperationCommand"><code>$ {command}</code></pre>
-              <button type="button" onClick={() => void navigator.clipboard.writeText(command)} aria-label="Copy command" title="Copy command"><Copy aria-hidden="true" /></button>
+              <button type="button" onClick={() => void navigator.clipboard.writeText(command)} aria-label={t("tools.copyCommand")} title={t("tools.copyCommand")}><Copy aria-hidden="true" /></button>
             </div>
           ) : null}
           {atom.detail === "diff" && operation.diffPreview ? <DiffPreview content={operation.diffPreview} /> : null}
@@ -79,8 +79,8 @@ function ActivityOperation({ operation, expanded, onToggle }) {
           {error ? <pre className="activityOperationOutput isError"><code>{error}</code></pre> : null}
           {Number.isInteger(operation.exitCode) || failed ? (
             <div className="activityOperationFooter">
-              {Number.isInteger(operation.exitCode) ? <span>Exit {operation.exitCode}</span> : null}
-              {failed ? <span>Failed</span> : null}
+              {Number.isInteger(operation.exitCode) ? <span>{t("tools.exit", { code: operation.exitCode })}</span> : null}
+              {failed ? <span>{t("tools.failed")}</span> : null}
             </div>
           ) : null}
         </div>
@@ -90,6 +90,7 @@ function ActivityOperation({ operation, expanded, onToggle }) {
 }
 
 function ActivityGroup({ group, expanded, onToggle, expandedOperations, onToggleOperation }) {
+  const { t } = useTranslation();
   const operations = group.activities.flatMap((activity) => {
     const common = {
       callId: activity.callId,
@@ -124,10 +125,10 @@ function ActivityGroup({ group, expanded, onToggle, expandedOperations, onToggle
         })}</div>
       </div> : null}
       {group.activities.some((activity) => activity.toolName === "agent") ? (
-        <div className="workspaceAgentTags" aria-label="代理会话">
+        <div className="workspaceAgentTags" aria-label={t("agentRunRow.agentSessions")}>
           {group.activities.filter((activity) => activity.toolName === "agent").map((activity) => (
             <span className={`workspaceAgentTag is-${activity.status}`} key={activity.activityId}>
-              <span className="workspaceAgentTagMark" aria-hidden="true" /><strong>代理</strong><span>{activityTarget(activity)}</span>
+              <span className="workspaceAgentTagMark" aria-hidden="true" /><strong>{t("agentRunRow.agent")}</strong><span>{activityTarget(activity)}</span>
             </span>
           ))}
         </div>
@@ -142,6 +143,7 @@ function formatMessageTime(createdAtMs) {
 }
 
 const LiveStatus = memo(function LiveStatus({ Icon, label, startedAtMs }) {
+  useTranslation();
   const [nowMs, setNowMs] = useState(() => Date.now());
   // biome-ignore lint/correctness/useExhaustiveDependencies: A new phase resets the elapsed clock immediately, before the next interval tick.
   useEffect(() => {
@@ -153,7 +155,7 @@ const LiveStatus = memo(function LiveStatus({ Icon, label, startedAtMs }) {
   return (
     <div className="workspaceLiveStatus">
       {Icon ? <Icon aria-hidden="true" /> : null}
-      <span className="workspaceLiveStatusText" aria-live="polite">{label}</span>
+      <span className="workspaceLiveStatusText statusShimmer" aria-live="polite">{label}</span>
       {elapsed ? <>
         <span className="workspaceLiveStatusDivider" aria-hidden="true">·</span>
         <time className="workspaceLiveStatusElapsed" aria-hidden="true">{elapsed}</time>
@@ -179,6 +181,7 @@ export const AgentRunRow = memo(function AgentRunRow({
   onSubmitEditingMessage,
   onRetryAgentRun,
 }) {
+  const { t } = useTranslation();
   const agentRun = useAgentRun(store, agentRunId);
   const hasAgentRun = agentRun !== null;
   const streamRenderRevision = store.getStreamRenderRevision(agentRunId);
@@ -189,11 +192,11 @@ export const AgentRunRow = memo(function AgentRunRow({
   const assetByInputRef = useMemo(() => new Map((assets || []).map((asset) => [asset.id, asset])), [assets]);
   const sections = useMemo(() => {
     try {
-      return buildAgentRunSections(agentRun?.messages || [], agentRun?.activities || [], agentRun?.reasoningBlocks || []);
+      return buildAgentRunSections(agentRun?.messages || [], agentRun?.activities || [], agentRun?.reasoningBlocks || [], (label) => t(`tools.${label}`));
     } catch {
       return null;
     }
-  }, [agentRun?.activities, agentRun?.messages, agentRun?.reasoningBlocks]);
+  }, [agentRun?.activities, agentRun?.messages, agentRun?.reasoningBlocks, t]);
   const references = useMemo(() => referenceCitations(agentRun?.citations || []), [agentRun?.citations]);
   useLayoutEffect(() => {
     if (!hasAgentRun) return undefined;
@@ -214,8 +217,8 @@ export const AgentRunRow = memo(function AgentRunRow({
     && ["active", "final"].includes(assistant.phase)
     && assistant.sequence > Math.max(agentRun.activities.at(-1)?.sequence ?? -1, userMessages.at(-1)?.sequence ?? -1);
   const livePresentation = agentRun.connection === "reconnecting"
-    ? { label: "Reconnecting" }
-    : !projectionFailed && runningActivity ? runningActivityPresentation(runningActivity) : { label: "Thinking" };
+    ? { label: t("tools.Reconnecting") }
+    : !projectionFailed && runningActivity ? runningActivityPresentation(runningActivity, (label) => t(`tools.${label}`)) : { label: t("tools.Thinking") };
   const LiveIcon = TOOL_ICONS[livePresentation.icon];
   const hasLiveReasoning = agentRun.reasoningBlocks.some((block) => block.status === "streaming");
   const showLiveStatus = active
@@ -255,11 +258,11 @@ export const AgentRunRow = memo(function AgentRunRow({
         ) : sealed ? (
           <div className={message.phase === "final" ? "workspaceTerminalAnswer" : "workspaceStageSummary"} aria-live={message.phase === "final" ? "polite" : undefined}>
             {answerMarkdown}
-            {message.phase === "final" && message.artifacts?.length ? <div className="workspaceArtifactInline" aria-label="生成的文件">{message.artifacts.map((artifact) => <span className="workspaceArtifactInlineRow" key={artifact.artifactRef}><span className="workspaceArtifactPlus" aria-hidden="true">+</span><a id={`artifact:${agentRun.id}:${artifact.artifactRef}`} href={artifact.downloadUrl} onClick={(event) => { event.preventDefault(); onShowArtifact?.(agentRun.id, artifact); }}>{artifact.filename}</a></span>)}</div> : null}
+            {message.phase === "final" && message.artifacts?.length ? <div className="workspaceArtifactInline" aria-label={t("agentRunRow.generatedFiles")}>{message.artifacts.map((artifact) => <span className="workspaceArtifactInlineRow" key={artifact.artifactRef}><span className="workspaceArtifactPlus" aria-hidden="true">+</span><a id={`artifact:${agentRun.id}:${artifact.artifactRef}`} href={artifact.downloadUrl} onClick={(event) => { event.preventDefault(); onShowArtifact?.(agentRun.id, artifact); }}>{artifact.filename}</a></span>)}</div> : null}
           </div>
         ) : <div className="workspaceAnswerText isStreaming">{answerMarkdown}</div> : null}
-        {messageVisible && sealed && message.phase === "final" ? <div className={`workspaceAssistantMessageMeta ${copiedMessageId === message.messageId ? "isCopied" : ""}`}><time>{formatMessageTime(message.createdAtMs)}</time><button type="button" onClick={() => void copyMessage(message)} aria-label="复制回答" title="复制回答">{copiedMessageId === message.messageId ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}</button></div> : null}
-        {items.length ? <div className="workspaceActivityGroups" aria-label="过程记录">{items.map((item) => {
+        {messageVisible && sealed && message.phase === "final" ? <div className={`workspaceAssistantMessageMeta ${copiedMessageId === message.messageId ? "isCopied" : ""}`}><time>{formatMessageTime(message.createdAtMs)}</time><button type="button" onClick={() => void copyMessage(message)} aria-label={t("agentRunRow.copyAnswer")} title={t("agentRunRow.copyAnswer")}>{copiedMessageId === message.messageId ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}</button></div> : null}
+        {items.length ? <div className="workspaceActivityGroups" aria-label={t("agentRunRow.activityLog")}>{items.map((item) => {
           if (item.kind === "reasoning") {
             const identity = `reasoning:${item.block.id}`;
             return <ReasoningBlock block={item.block} expanded={expandedActivities.has(identity)} onToggle={() => toggleDisclosure(identity)} key={identity} />;
@@ -276,16 +279,16 @@ export const AgentRunRow = memo(function AgentRunRow({
     <article className="workspaceAgentRun" data-agent-run-id={agentRun.id}>
       {userMessages.map((message) => (
         <div className={`workspaceUserMessageStack ${message.entryMotion === "conversation" ? "isConversationEntry" : ""}`} key={message.messageId}>
-          {message.attachments?.length ? <div className="workspaceMessageAttachments" aria-label="本条消息附件">{message.attachments.map((attachment) => {
+          {message.attachments?.length ? <div className="workspaceMessageAttachments" aria-label={t("agentRunRow.messageAttachments")}>{message.attachments.map((attachment) => {
             const asset = assetByInputRef.get(attachment.inputRef);
             return <AttachmentCard className="workspaceMessageAttachment" attachment={asset ? { ...asset, displayName: attachment.displayName } : attachment} unavailable={!asset} onPreview={asset ? () => onShowAttachment?.(asset) : undefined} key={attachment.inputRef} />;
           })}</div> : null}
           {editingMessageId === message.messageId ? (
             <div className="workspaceUserMessage isEditing">
-              <textarea value={editingPrompt} onChange={(event) => onEditingPromptChange?.(event.target.value)} aria-label="编辑消息" autoFocus />
+              <textarea value={editingPrompt} onChange={(event) => onEditingPromptChange?.(event.target.value)} aria-label={t("agentRunRow.editMessage")} autoFocus />
               <div className="workspaceUserEditActions">
-                <button type="button" onClick={onCancelEditingMessage} disabled={editingDisabled}>取消</button>
-                <button className="isPrimary" type="button" onClick={onSubmitEditingMessage} disabled={editingDisabled || !editingPrompt.trim()}>发送</button>
+                <button type="button" onClick={onCancelEditingMessage} disabled={editingDisabled}>{t("agentRunRow.cancel")}</button>
+                <button className="isPrimary" type="button" onClick={onSubmitEditingMessage} disabled={editingDisabled || !editingPrompt.trim()}>{t("agentRunRow.send")}</button>
               </div>
             </div>
           ) : (
@@ -293,8 +296,8 @@ export const AgentRunRow = memo(function AgentRunRow({
               <div className="workspaceUserMessage"><span>{message.text}</span></div>
               <div className={`workspaceUserMessageMeta ${copiedMessageId === message.messageId ? "isCopied" : ""}`}>
                 <time>{formatMessageTime(message.createdAtMs)}</time>
-                <button type="button" onClick={() => void copyMessage(message)} aria-label="复制" title="复制">{copiedMessageId === message.messageId ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}</button>
-                {editableMessageId === message.messageId ? <button type="button" onClick={() => onStartEditingMessage?.(message)} aria-label="编辑" title="编辑"><Pencil aria-hidden="true" /></button> : null}
+                <button type="button" onClick={() => void copyMessage(message)} aria-label={t("agentRunRow.copy")} title={t("agentRunRow.copy")}>{copiedMessageId === message.messageId ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}</button>
+                {editableMessageId === message.messageId ? <button type="button" onClick={() => onStartEditingMessage?.(message)} aria-label={t("agentRunRow.edit")} title={t("agentRunRow.edit")}><Pencil aria-hidden="true" /></button> : null}
               </div>
             </>
           )}
@@ -303,13 +306,13 @@ export const AgentRunRow = memo(function AgentRunRow({
       <div className="workspaceAnswer">
         {projectionFailed ? (
           <div className="workspaceProjectionFailure" role="alert">
-            <span>此轮内容暂时无法显示，其他会话功能仍可使用。</span>
-            <button type="button" onClick={() => onRetryAgentRun?.(agentRun.id)}>重新读取</button>
+            <span>{t("agentRunRow.thisRunIsTemporarilyUnavailableOtherConversationFeaturesAre")}</span>
+            <button type="button" onClick={() => onRetryAgentRun?.(agentRun.id)}>{t("agentRunRow.reload")}</button>
           </div>
         ) : <>
           {sections.map(renderSection)}
           {showLiveStatus ? <LiveStatus Icon={LiveIcon} label={livePresentation.label} startedAtMs={agentRun.phaseStartedAtMs ?? agentRun.startedAtMs} /> : null}
-          {references.length ? <section className="workspaceAnswerSection" aria-label="引用"><h3>引用</h3><div className="workspaceCitationList">{references.map((citation) => <button className="workspaceCitationChip" id={`citation:${agentRun.id}:${citation.citationId}`} key={citation.citationId} onClick={() => onShowCitation(agentRun.id, citation)}><FileText aria-hidden="true" /><span>{citation.displayName}</span><small>引用</small></button>)}</div></section> : null}
+          {references.length ? <section className="workspaceAnswerSection" aria-label={t("agentRunRow.references")}><h3>{t("agentRunRow.references")}</h3><div className="workspaceCitationList">{references.map((citation) => <button className="workspaceCitationChip" id={`citation:${agentRun.id}:${citation.citationId}`} key={citation.citationId} onClick={() => onShowCitation(agentRun.id, citation)}><FileText aria-hidden="true" /><span>{citation.displayName}</span><small>{t("agentRunRow.references")}</small></button>)}</div></section> : null}
         </>}
       </div>
     </article>

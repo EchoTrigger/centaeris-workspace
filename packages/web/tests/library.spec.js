@@ -25,10 +25,10 @@ test("does not persist an untouched note draft", async ({ page }) => {
 
   await page.goto("/w/ws_1/library/new");
   expect(notePosts).toBe(0);
-  await expect(page.getByRole("textbox", { name: "笔记标题", exact: true })).toBeEmpty();
-  await expect(page.getByRole("textbox", { name: "笔记正文", exact: true })).toBeEmpty();
-  await expect(page.getByRole("textbox", { name: "笔记标题", exact: true })).toHaveCSS("box-shadow", "none");
-  await page.getByRole("textbox", { name: "笔记正文", exact: true }).focus();
+  await expect(page.getByRole("textbox", { name: "Note title", exact: true })).toBeEmpty();
+  await expect(page.getByRole("textbox", { name: "Note content", exact: true })).toBeEmpty();
+  await expect(page.getByRole("textbox", { name: "Note title", exact: true })).toHaveCSS("box-shadow", "none");
+  await page.getByRole("textbox", { name: "Note content", exact: true }).focus();
   expect(await page.locator(".libraryNoteEditor").evaluate((element) => getComputedStyle(element, "::before").backgroundColor)).toBe("rgba(0, 0, 0, 0)");
   await page.goto("/w/ws_1/library");
   await expect(page).toHaveURL(/\/w\/ws_1\/library$/);
@@ -36,7 +36,7 @@ test("does not persist an untouched note draft", async ({ page }) => {
 
   await page.goto("/w/ws_1/library/new");
   const created = page.waitForResponse((response) => response.url().endsWith("/api/library/notes") && response.request().method() === "POST");
-  await page.getByRole("textbox", { name: "笔记标题", exact: true }).fill("需求");
+  await page.getByRole("textbox", { name: "Note title", exact: true }).fill("需求");
   await created;
   await expect(page).toHaveURL(/\/w\/ws_1\/library\/note_1$/);
   expect(notePosts).toBe(1);
@@ -65,16 +65,16 @@ test("keeps the flat note identity visible when the sidebar is closed", async ({
 
   await page.goto("/w/ws_1/library/note_1");
   const previewWidth = (await page.locator(".libraryPreviewMain").boundingBox())?.width;
-  await page.getByRole("button", { name: "隐藏左侧栏", exact: true }).click();
-  const showSidebar = page.getByRole("button", { name: "显示左侧栏", exact: true });
+  await page.getByRole("button", { name: "Hide sidebar", exact: true }).click();
+  const showSidebar = page.getByRole("button", { name: "Show sidebar", exact: true });
   await expect(showSidebar).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
   await expect(showSidebar).toHaveCSS("box-shadow", "none");
-  const address = page.getByLabel("笔记地址", { exact: true });
+  const address = page.getByLabel("Note path", { exact: true });
   await expect(address).toContainText("需求");
-  await expect(address).toContainText("私人");
+  await expect(address).toContainText("Private");
   await expect(address).toContainText("/");
-  await address.getByRole("button", { name: "重命名笔记" }).click();
-  await expect(address.getByRole("textbox", { name: "笔记标题" })).toHaveValue("需求");
+  await address.getByRole("button", { name: "Rename note" }).click();
+  await expect(address.getByRole("textbox", { name: "Note title" })).toHaveValue("需求");
   await expect(page.locator(".libraryPreviewHeader")).toHaveCSS("border-bottom-width", "0px");
   expect((await address.boundingBox())?.x).toBeGreaterThanOrEqual(52);
   await page.waitForTimeout(400);
@@ -82,9 +82,9 @@ test("keeps the flat note identity visible when the sidebar is closed", async ({
   expect((await page.locator(".libraryPreviewMain").boundingBox())?.width).toBeGreaterThan(previewWidth);
 
   await showSidebar.click();
-  await page.getByRole("complementary", { name: "会话导航", exact: true }).getByRole("link", { name: "第二份", exact: true }).click();
+  await page.getByRole("complementary", { name: "Conversation navigation", exact: true }).getByRole("link", { name: "第二份", exact: true }).click();
   await expect(page).toHaveURL(/\/w\/ws_1\/library\/note_2$/);
-  await expect(page.getByRole("textbox", { name: "笔记正文", exact: true })).toHaveValue("新的正文");
+  await expect(page.getByRole("textbox", { name: "Note content", exact: true })).toHaveValue("新的正文");
   expect(reads).toEqual({ object: 2, note: 2 });
 });
 
@@ -124,12 +124,12 @@ test("loads each library folder once and ignores selection-only rerenders", asyn
   await expect(page.getByRole("cell", { name: "计划.txt", exact: true })).toBeVisible();
   expect(reads).toEqual({ root: initialReads.root, child: 1, folder: 1 });
 
-  await page.getByRole("checkbox", { name: "选择 计划.txt", exact: true }).check();
-  await page.getByRole("checkbox", { name: "取消全选", exact: true }).click();
+  await page.getByRole("checkbox", { name: "Select 计划.txt", exact: true }).check();
+  await page.getByRole("checkbox", { name: "Deselect all", exact: true }).click();
   await page.waitForTimeout(100);
   expect(reads).toEqual({ root: initialReads.root, child: 1, folder: 1 });
 
-  await page.getByRole("navigation", { name: "当前文件夹", exact: true }).getByRole("button", { name: "资料库", exact: true }).click();
+  await page.getByRole("navigation", { name: "Current folder", exact: true }).getByRole("button", { name: "Library", exact: true }).click();
   await expect(page).toHaveURL(/\/w\/ws_1\/library$/);
   await expect(page.getByRole("cell", { name: "项目资料", exact: true })).toBeVisible();
   expect(reads).toEqual({ root: initialReads.root + 1, child: 1, folder: 1 });
@@ -158,23 +158,23 @@ test("library supports multi-select and select-all", async ({ page }) => {
   });
 
   await page.goto("/w/ws_1/library");
-  await page.getByRole("checkbox", { name: "选择 需求.md", exact: true }).check();
+  await page.getByRole("checkbox", { name: "Select 需求.md", exact: true }).check();
   await expect(page.locator(".libraryList")).toHaveClass(/hasSelection/);
-  await expect(page.getByRole("checkbox", { name: "全选当前列表", exact: true })).toBeVisible();
-  await page.getByRole("checkbox", { name: "选择 计划.md", exact: true }).check();
-  await expect(page.getByText("已选 2 个", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "开始聊天", exact: true })).toBeEnabled();
-  await expect(page.getByRole("button", { name: "下载", exact: true })).toBeEnabled();
-  await expect(page.getByRole("button", { name: "移动", exact: true })).toBeEnabled();
-  await expect(page.getByRole("button", { name: "移到垃圾桶", exact: true })).toBeEnabled();
-  await page.getByRole("checkbox", { name: "取消全选", exact: true }).click();
-  await expect(page.getByRole("checkbox", { name: "选择 需求.md", exact: true })).not.toBeChecked();
-  await expect(page.getByRole("checkbox", { name: "选择 计划.md", exact: true })).not.toBeChecked();
-  await page.getByRole("checkbox", { name: "选择 需求.md", exact: true }).check();
-  await page.getByRole("button", { name: "移到垃圾桶", exact: true }).click();
+  await expect(page.getByRole("checkbox", { name: "Select all listed items", exact: true })).toBeVisible();
+  await page.getByRole("checkbox", { name: "Select 计划.md", exact: true }).check();
+  await expect(page.getByText("2 items selected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Start chat", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Download", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Move", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Move to trash", exact: true })).toBeEnabled();
+  await page.getByRole("checkbox", { name: "Deselect all", exact: true }).click();
+  await expect(page.getByRole("checkbox", { name: "Select 需求.md", exact: true })).not.toBeChecked();
+  await expect(page.getByRole("checkbox", { name: "Select 计划.md", exact: true })).not.toBeChecked();
+  await page.getByRole("checkbox", { name: "Select 需求.md", exact: true }).check();
+  await page.getByRole("button", { name: "Move to trash", exact: true }).click();
   await expect(page.locator(".themeConfirmDialog")).toHaveCount(0);
   await expect.poll(() => deleteRequests).toEqual(["/api/library/file_1"]);
-  await expect(page.getByRole("checkbox", { name: "选择 需求.md", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("checkbox", { name: "Select 需求.md", exact: true })).toHaveCount(0);
 });
 
 test("library uploads one atomic batch with repeated files fields", async ({ page }) => {
@@ -203,24 +203,24 @@ test("library uploads one atomic batch with repeated files fields", async ({ pag
   });
 
   await page.goto("/w/ws_1/library");
-  await page.getByRole("button", { name: "新建", exact: true }).click();
-  await page.getByRole("menuitem", { name: "上传文件", exact: true }).click();
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Upload files", exact: true }).click();
   const dataTransfer = await page.evaluateHandle(() => {
     const transfer = new DataTransfer();
     transfer.items.add(new File(["first"], "第一份.txt", { type: "text/plain", lastModified: 1 }));
     transfer.items.add(new File(["second"], "第二份.md", { type: "text/markdown", lastModified: 2 }));
     return transfer;
   });
-  await expect(page.getByRole("button", { name: "上传 0 个文件", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Upload 0 files", exact: true })).toBeDisabled();
   await expect(page.locator(".libraryUploadQueueEmpty")).toHaveCount(0);
-  await expect(page.getByText("添加到我的资料", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: /拖入一个或多个文件/ }).dispatchEvent("drop", { dataTransfer });
+  await expect(page.getByText("Add to My materials", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /Drag one or more files here/ }).dispatchEvent("drop", { dataTransfer });
 
   await expect(page.getByText("第一份.txt", { exact: true })).toBeVisible();
   await expect(page.getByText("第二份.md", { exact: true })).toBeVisible();
   expect(uploadBody).toBe("");
-  await page.getByRole("button", { name: "上传 2 个文件", exact: true }).click();
-  await expect(page.getByRole("dialog", { name: "上传文件", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Upload 2 files", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Upload files", exact: true })).toHaveCount(0);
   expect(uploadBody.match(/name="files"/g)).toHaveLength(2);
   expect(uploadBody).toContain('filename="第一份.txt"');
   expect(uploadBody).toContain('filename="第二份.md"');
@@ -240,8 +240,8 @@ test("library rejects more than fifty files before sending a request", async ({ 
   });
 
   await page.goto("/w/ws_1/library");
-  await page.getByRole("button", { name: "新建", exact: true }).click();
-  await page.getByRole("menuitem", { name: "上传文件", exact: true }).click();
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Upload files", exact: true }).click();
   const dataTransfer = await page.evaluateHandle(() => {
     const transfer = new DataTransfer();
     for (let index = 0; index < 51; index += 1) {
@@ -249,9 +249,9 @@ test("library rejects more than fifty files before sending a request", async ({ 
     }
     return transfer;
   });
-  await page.getByRole("button", { name: /拖入一个或多个文件/ }).dispatchEvent("drop", { dataTransfer });
+  await page.getByRole("button", { name: /Drag one or more files here/ }).dispatchEvent("drop", { dataTransfer });
 
-  await expect(page.getByRole("alert")).toContainText("一次最多上传 50 个文件");
+  await expect(page.getByRole("alert")).toContainText("Upload up to 50 files at a time");
   expect(uploadRequests).toBe(0);
 });
 
@@ -270,14 +270,20 @@ test("library file picker queues one file at a time and cancel discards the queu
   });
 
   await page.goto("/w/ws_1/library");
-  await page.getByRole("button", { name: "新建", exact: true }).click();
-  await page.getByRole("menuitem", { name: "上传文件", exact: true }).click();
-  const picker = page.getByLabel("选择一个文件");
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Upload files", exact: true }).click();
+  const picker = page.getByLabel("Choose a file");
   await picker.setInputFiles({ name: "第一份.txt", mimeType: "text/plain", buffer: Buffer.from("first") });
   await picker.setInputFiles({ name: "第二份.md", mimeType: "text/markdown", buffer: Buffer.from("second") });
 
-  await expect(page.getByRole("button", { name: "上传 2 个文件", exact: true })).toBeEnabled();
-  await page.getByRole("button", { name: "取消", exact: true }).click();
-  await expect(page.getByRole("dialog", { name: "上传文件", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Upload 2 files", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Upload files", exact: true })).toHaveCount(0);
   expect(uploadRequests).toBe(0);
+});
+
+
+
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("centaeris:language:v1", "en"));
 });

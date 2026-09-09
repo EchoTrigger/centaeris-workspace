@@ -51,21 +51,21 @@ async function installFixture(page) {
 test("creates, renames, assigns, and deletes a custom group", async ({ page }) => {
   const requests = await installFixture(page);
   await page.goto("/w/ws_1/settings/groups");
-  await page.getByRole("button", { name: "新建用户组" }).click();
-  await page.getByLabel("新用户组名称").fill("Finance");
-  await page.getByRole("button", { name: "创建", exact: true }).click();
+  await page.getByRole("button", { name: "New group" }).click();
+  await page.getByLabel("New group name").fill("Finance");
+  await page.getByRole("button", { name: "Create", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Finance" })).toBeVisible();
   await expect(page.locator(".shWorkspaceSettingsHeader p")).toHaveCount(0);
-  await expect(page.locator(".shWorkspaceGroupDetail > header p")).toHaveText("0 位成员");
+  await expect(page.locator(".shWorkspaceGroupDetail > header p")).toHaveText("0 members");
 
-  await page.getByRole("button", { name: "重命名" }).click();
-  await page.getByLabel("用户组名称").fill("Finance team");
-  await page.getByRole("button", { name: "保存" }).click();
+  await page.getByRole("button", { name: "Rename" }).click();
+  await page.getByLabel("Group name").fill("Finance team");
+  await page.getByRole("button", { name: "Save" }).click();
   await page.getByText("owner@example.com").click();
   await expect.poll(() => requests.some((request) => request.method === "PUT" && request.path.endsWith("/membership_owner"))).toBe(true);
 
-  await page.getByRole("button", { name: "删除 Finance team" }).click();
-  await page.getByRole("dialog", { name: "删除用户组" }).getByRole("button", { name: "删除" }).click();
+  await page.getByRole("button", { name: "Delete Finance team" }).click();
+  await page.getByRole("dialog", { name: "Delete group" }).getByRole("button", { name: "Delete" }).click();
   await expect(page.getByRole("button", { name: /Finance team/ })).toHaveCount(0);
 });
 
@@ -73,8 +73,14 @@ test("keeps all-members dynamic and immutable", async ({ page }) => {
   await installFixture(page);
   await page.goto("/w/ws_1/settings/groups");
   await page.getByRole("button", { name: /全体成员/ }).click();
-  await expect(page.getByText("自动包含所有当前有效成员。", { exact: true })).toBeVisible();
-  await expect(page.getByLabel("用户组名称")).toHaveCount(0);
+  await expect(page.getByText("Automatically includes all currently active members.", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Group name")).toHaveCount(0);
   await expect(page.locator(".shWorkspaceGroupMembers input:checked")).toHaveCount(2);
   await expect(page.locator(".shWorkspaceGroupMembers input:enabled")).toHaveCount(0);
+});
+
+
+
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("centaeris:language:v1", "en"));
 });

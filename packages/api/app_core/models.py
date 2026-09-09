@@ -1850,11 +1850,26 @@ class MaterialOperation(models.Model):
         constraints = [models.UniqueConstraint(fields=["agent_run", "task"], name="unique_run_material_operation")]
 
 
+class MaterialResultSnapshot(models.Model):
+    """Immutable full tool result, retained with the source call and session."""
+    id = models.CharField(primary_key=True, max_length=96)
+    call = models.OneToOneField(SessionEvent, on_delete=models.CASCADE, related_name="materialResult")
+    payload = models.JSONField()
+    sha256 = models.CharField(max_length=71)
+    createdAt = models.DateTimeField(auto_now_add=True)
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValueError("MaterialResultSnapshot is immutable")
+        return super().save(*args, **kwargs)
+
+
 class MaterialEvidenceReceipt(models.Model):
     id = models.CharField(primary_key=True, max_length=96)
     call = models.OneToOneField(SessionEvent, on_delete=models.CASCADE, related_name="materialReceipt")
     authorizationDigest = models.CharField(max_length=71)
     responseText = models.TextField()
+    modelProjection = models.JSONField()
     evidence = models.JSONField()
     createdAt = models.DateTimeField(auto_now_add=True)
 

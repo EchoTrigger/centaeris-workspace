@@ -1,3 +1,5 @@
+
+import { useTranslation } from "../i18n";
 import { useEffect, useState } from "react";
 import { apiJson } from "../api";
 
@@ -8,6 +10,7 @@ function formatTokens(value) {
 }
 
 export function ContextUsagePicker({ sessionId, isRunning }) {
+  const { t } = useTranslation();
   const [contextUsage, setContextUsage] = useState(null);
 
   useEffect(() => {
@@ -40,24 +43,24 @@ export function ContextUsagePicker({ sessionId, isRunning }) {
   const usedPercentage = contextUsage?.usedPercentage || 0;
   const breakdown = contextUsage?.breakdown;
   const rows = breakdown ? [
-    ["Messages", breakdown.messageTokens, "messages"],
-    ["System tools", breakdown.systemToolTokens, "system-tools"],
-    ["MCP tools", breakdown.mcpToolTokens, "mcp-tools"],
-    ["System prompt", breakdown.systemPromptTokens, "system-prompt"],
-    ["Skills", breakdown.skillsTokens, "skills"],
-    ["Autocompact buffer", breakdown.autoCompactBufferTokens, "buffer"],
-    ["Free space", breakdown.freeSpaceTokens, "free"],
+    [t("context.Messages"), breakdown.messageTokens, "messages"],
+    [t("context.System tools"), breakdown.systemToolTokens, "system-tools"],
+    [t("context.MCP tools"), breakdown.mcpToolTokens, "mcp-tools"],
+    [t("context.System prompt"), breakdown.systemPromptTokens, "system-prompt"],
+    [t("context.Skills"), breakdown.skillsTokens, "skills"],
+    [t("context.Autocompact buffer"), breakdown.autoCompactBufferTokens, "buffer"],
+    [t("context.Free space"), breakdown.freeSpaceTokens, "free"],
   ] : [];
 
   return (
     <details className="workspaceContextUsage">
-      <summary aria-label="Context window" title="Context window">
+      <summary aria-label={t("context.Context window")} title={t("context.Context window")}>
         <span style={{ "--context-used": `${usedPercentage * 3.6}deg` }} />
       </summary>
       <div className="workspaceContextUsagePanel">
         <header>
-          <span>Context window</span>
-          <strong>{contextUsage ? `${formatTokens(usedTokens)} / ${formatTokens(maxContextTokens)} (${usedPercentage}%)` : "等待首次请求"}</strong>
+          <span>{t("context.Context window")}</span>
+          <strong>{contextUsage ? `${formatTokens(usedTokens)} / ${formatTokens(maxContextTokens)} (${usedPercentage}%)` : t("contextUsagePicker.waitingForTheFirstRequest")}</strong>
         </header>
         {breakdown ? (
           <>
@@ -78,7 +81,7 @@ export function ContextUsagePicker({ sessionId, isRunning }) {
             </div>
             {breakdown.mcpTools.length ? (
               <details className="workspaceContextMcpTools">
-                <summary>MCP tools <span>{formatTokens(breakdown.mcpToolTokens)} · {breakdown.mcpTools.length}</span></summary>
+                <summary>{t("context.MCP tools")}{" "}<span>{formatTokens(breakdown.mcpToolTokens)} · {breakdown.mcpTools.length}</span></summary>
                 <div>
                   {breakdown.mcpTools.map((tool) => (
                     <p key={`${tool.providerId}:${tool.name}`}>

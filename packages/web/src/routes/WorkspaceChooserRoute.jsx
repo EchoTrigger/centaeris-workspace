@@ -1,10 +1,14 @@
+import { t } from "../i18n";
+import { useTranslation } from "../i18n";
 import { useEffect, useState } from "react";
 import { Link, useLoaderData, useLocation, useNavigate } from "react-router";
 import { Building2 } from "lucide-react";
+import { OnboardingUtilities } from "../components/OnboardingUtilities";
 
-const WORKSPACE_ROLE_LABELS = { owner: "所有者", admin: "管理员", member: "成员" };
+const WORKSPACE_ROLE_LABELS = () => ({ owner: t("workspaceChooserRoute.owner"), admin: t("invitationActivationRoute.administrator"), member: t("invitationActivationRoute.member") });
 
 export default function WorkspaceChooserRoute() {
+  const { t } = useTranslation();
   const { workspaces } = useLoaderData();
   const location = useLocation();
   const navigate = useNavigate();
@@ -23,18 +27,19 @@ export default function WorkspaceChooserRoute() {
     <main className="shWorkspaceChooser">
       {notice ? <div className="shWorkspaceToast" role="status">{notice}</div> : null}
       <section>
-        <h1>选择工作区</h1>
-        {!workspaces.length ? <p>当前账号还没有可访问的工作区。</p> : null}
-        <nav aria-label="工作区">
+        <h1>{t("workspaceChooserRoute.chooseWorkspace")}</h1>
+        {!workspaces.length ? <p>{t("workspaceChooserRoute.yourAccountDoesNotHaveAccessToAnyWorkspaces")}</p> : null}
+        <nav aria-label={t("workspaceChooserRoute.workspace")}>
           {workspaces.map((workspace) => (
             <Link to={`/w/${encodeURIComponent(workspace.id)}/app`} key={workspace.id}>
               <span><Building2 aria-hidden="true" /></span>
               <strong>{workspace.name}</strong>
-              <small>{WORKSPACE_ROLE_LABELS[workspace.role]}</small>
+              <small>{WORKSPACE_ROLE_LABELS()[workspace.role]}</small>
             </Link>
           ))}
         </nav>
       </section>
+      <OnboardingUtilities />
     </main>
   );
 }

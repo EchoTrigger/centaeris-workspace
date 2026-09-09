@@ -1,3 +1,5 @@
+
+import { useTranslation } from "./i18n";
 import { useEffect, useState } from "react";
 import { Navigate, Outlet, createBrowserRouter, redirect, useLoaderData, useLocation, useRevalidator, useRouteLoaderData } from "react-router";
 import { ApiError, apiJson, hasAuthenticationRequiredHandler, isAuthenticationRequired, requireWorkspaces, setAuthenticationRequiredHandler, type WorkspaceSummary } from "./api";
@@ -59,6 +61,7 @@ function readWorkspacePreference(userId: string) {
 }
 
 function WorkspaceEntry() {
+  useTranslation();
   const { workspaces } = useLoaderData() as { workspaces: WorkspaceSummary[] };
   const { user } = useRouteLoaderData("authenticated") as AuthLoaderData;
   const location = useLocation();
@@ -78,6 +81,7 @@ function WorkspaceEntry() {
 }
 
 function WorkspaceLayout() {
+  useTranslation();
   const { user } = useRouteLoaderData("authenticated") as AuthLoaderData;
   const { workspace } = useLoaderData() as WorkspaceLoaderData;
 
@@ -93,6 +97,7 @@ function WorkspaceLayout() {
 }
 
 function RootLayout() {
+  useTranslation();
   const [sessionExpired, setSessionExpired] = useState(false);
   const auth = useRouteLoaderData("authenticated") as AuthLoaderData | undefined;
   const revalidator = useRevalidator();
@@ -121,16 +126,18 @@ function RootLayout() {
 }
 
 function RouteLoading() {
-  return <main className="routeLoading" aria-live="polite">正在加载工作区…</main>;
+  const { t } = useTranslation();
+  return <main className="routeLoading" aria-live="polite">{t("router.loadingWorkspace")}</main>;
 }
 
 function RouteError() {
+  const { t } = useTranslation();
   return <main className="routeError" role="alert">
-    <h1>页面暂时无法加载</h1>
-    <p>重新加载后仍有问题，可以返回工作区继续操作。</p>
+    <h1>{t("router.thisPageCouldNotBeLoaded")}</h1>
+    <p>{t("router.ifReloadingDoesNotHelpReturnToYourWorkspaces")}</p>
     <div className="routeErrorActions">
-      <button type="button" onClick={() => window.location.reload()}>重新加载</button>
-      <a href="/workspaces">返回工作区</a>
+      <button type="button" onClick={() => window.location.reload()}>{t("router.reloadPage")}</button>
+      <a href="/workspaces">{t("router.backToWorkspaces")}</a>
     </div>
   </main>;
 }
@@ -208,7 +215,7 @@ export function createRouter() {
               Component: WorkspaceEntry,
             },
             { path: "workspaces", loader: workspacesLoader, Component: WorkspaceEntry },
-            ...["preferences", "security"].map((section) => ({ path: `settings/${section}`, loader: accountSettingsLoader, Component: SettingsRoute })),
+            ...["general", "preferences", "security"].map((section) => ({ path: `settings/${section}`, loader: accountSettingsLoader, Component: SettingsRoute })),
             {
               id: "workspace",
               path: "w/:workspaceId",

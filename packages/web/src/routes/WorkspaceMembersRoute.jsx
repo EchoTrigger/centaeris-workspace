@@ -1,3 +1,6 @@
+import { i18n } from "../i18n";
+import { t } from "../i18n";
+import { useTranslation } from "../i18n";
 import { useCallback, useEffect, useState } from "react";
 import { Copy, MoreHorizontal, UserPlus } from "lucide-react";
 import { Link, Navigate, useNavigate, useRouteLoaderData } from "react-router";
@@ -9,27 +12,27 @@ import { redirectAfterWorkspaceNotFound } from "../workspaceAccess";
 
 const ADMIN_ROLES = new Set(["owner", "admin"]);
 
-const ERROR_MESSAGES = {
-  workspace_member_exists: "该账号已经是当前工作区成员。",
-  workspace_member_role_unchanged: "成员角色没有变化。",
-  workspace_member_self_operation_forbidden: "不能对自己的成员身份执行此操作。",
-  workspace_owner_transfer_required: "所有者只能通过转让所有权来变更。",
-  workspace_owner_reauthentication_failed: "当前密码不正确。",
-  workspace_invitation_not_pending: "邀请状态已经发生变化。",
-};
+const ERROR_MESSAGES = () => ({
+  workspace_member_exists: t("workspaceMembersRoute.thisAccountIsAlreadyAMemberOfThisWorkspace"),
+  workspace_member_role_unchanged: t("workspaceMembersRoute.theMemberSRoleHasNotChanged"),
+  workspace_member_self_operation_forbidden: t("workspaceMembersRoute.youCannotPerformThisActionOnYourOwnMembership"),
+  workspace_owner_transfer_required: t("workspaceMembersRoute.theOwnerCanOnlyBeChangedThroughAnOwnership"),
+  workspace_owner_reauthentication_failed: t("settingsRoute.theCurrentPasswordIsIncorrect"),
+  workspace_invitation_not_pending: t("workspaceMembersRoute.theInvitationStatusHasChanged"),
+});
 
 function errorText(error) {
   const message = error instanceof Error ? error.message : String(error);
-  return ERROR_MESSAGES[message] || message;
+  return ERROR_MESSAGES()[message] || message;
 }
 
 function roleLabel(role) {
-  return { owner: "所有者", admin: "管理员", member: "成员" }[role] || role;
+  return { owner: t("workspaceChooserRoute.owner"), admin: t("invitationActivationRoute.administrator"), member: t("invitationActivationRoute.member") }[role] || role;
 }
 
 function formatDate(value) {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat("zh-CN", {
+  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat(i18n.resolvedLanguage, {
     month: "numeric",
     day: "numeric",
     hour: "2-digit",
@@ -38,6 +41,7 @@ function formatDate(value) {
 }
 
 export default function WorkspaceMembersRoute({ embedded = false } = {}) {
+  const { t } = useTranslation();
   const { user } = useRouteLoaderData("authenticated");
   const { workspace } = useRouteLoaderData("workspace");
   const navigate = useNavigate();
@@ -76,12 +80,12 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
         await redirectForLostAccess();
         return;
       }
-      if (quiet) setNotice({ kind: "error", text: `重新读取失败：${errorText(error)}` });
+      if (quiet) setNotice({ kind: "error", text: t("workspaceMembersRoute.unableToReloadValue", { value1: errorText(error) }) });
       else setPageError(errorText(error));
     } finally {
       if (!quiet) setLoading(false);
     }
-  }, [redirectForLostAccess, workspace.id]);
+  }, [redirectForLostAccess, workspace.id, t]);
 
   useEffect(() => {
     if (canManageWorkspace) void load();
@@ -109,7 +113,7 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
     }
     if (error instanceof ApiError && [404, 409].includes(error.status)) {
       await load(true);
-      setNotice({ kind: "error", text: `状态已发生变化，已重新读取：${errorText(error)}` });
+      setNotice({ kind: "error", text: t("workspaceMembersRoute.theStatusChangedAndHasBeenReloadedValue", { value1: errorText(error) }) });
       return;
     }
     setNotice({ kind: "error", text: errorText(error) });
@@ -125,7 +129,7 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
       );
       const updated = result.member;
       setMembers((items) => items.map((item) => item.membershipId === updated.membershipId ? updated : item));
-      setNotice({ kind: "success", text: `${updated.email} 已设为${roleLabel(updated.role)}。` });
+      setNotice({ kind: "success", text: t("workspaceMembersRoute.valueIsNowValue", { value1: updated.email, value2: roleLabel(updated.role) }) });
     } catch (error) {
       await handleMutationError(error);
     } finally {
@@ -146,7 +150,7 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
       if (result.ok !== true) throw new Error("workspace_member_remove_result_invalid");
       setMembers((items) => items.filter((item) => item.membershipId !== target.membershipId));
       setRemoveTarget(null);
-      setNotice({ kind: "success", text: `${target.email} 已从工作区移除。` });
+      setNotice({ kind: "success", text: t("workspaceMembersRoute.valueWasRemovedFromTheWorkspace", { value1: target.email }) });
     } catch (error) {
       await handleMutationError(error);
     } finally {
@@ -177,7 +181,7 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
       }));
       setTransferTarget(null);
       setTransferPassword("");
-      setNotice({ kind: "success", text: `所有权已转让给 ${owner.email}。` });
+      setNotice({ kind: "success", text: t("workspaceMembersRoute.ownershipTransferredToValue", { value1: owner.email }) });
     } catch (error) {
       await handleMutationError(error);
     } finally {
@@ -217,7 +221,7 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
       if (result.ok !== true) throw new Error("workspace_invitation_revoke_result_invalid");
       setInvitations((items) => items.filter((item) => item.id !== target.id));
       setRevokeTarget(null);
-      setNotice({ kind: "success", text: `${target.email} 的邀请已撤销。` });
+      setNotice({ kind: "success", text: t("workspaceMembersRoute.theInvitationForValueWasRevoked", { value1: target.email }) });
     } catch (error) {
       await handleMutationError(error);
     } finally {
@@ -228,14 +232,14 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
   async function copyInviteUrl() {
     try {
       await navigator.clipboard.writeText(inviteDialog.inviteUrl);
-      setNotice({ kind: "success", text: "邀请链接已复制。" });
+      setNotice({ kind: "success", text: t("workspaceMembersRoute.invitationLinkCopied") });
     } catch (error) {
-      setNotice({ kind: "error", text: `无法复制邀请链接：${errorText(error)}` });
+      setNotice({ kind: "error", text: t("workspaceMembersRoute.unableToCopyInvitationLinkValue", { value1: errorText(error) }) });
     }
   }
 
   if (!canManageWorkspace) {
-    return <Navigate replace to={`${base}/app`} state={{ workspaceNotice: "你没有权限访问工作区设置。" }} />;
+    return <Navigate replace to={`${base}/app`} state={{ workspaceNotice: t("settingsRoute.youDoNotHaveAccessToWorkspaceSettings") }} />;
   }
 
   const actorRole = members?.find((member) => member.userId === String(user.id))?.role || workspace.role;
@@ -248,25 +252,24 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
     <div className={`shWorkspaceSettingsPage ${embedded ? "isEmbedded" : ""}`}>
       <header className="shWorkspaceSettingsHeader">
         <div>
-          <span>{workspace.name} · 工作区设置</span>
-          <h1>成员与权限</h1>
+          <span>{workspace.name}{" "}{t("workspaceGroupsRoute.workspaceSettings")}</span>
+          <h1>{t("settingsRoute.membersAndPermissions")}</h1>
         </div>
         <button className="shPrimaryButton" type="button" disabled={loading || Boolean(pageError)} onClick={() => setInviteDialog({ email: "", role: "member", inviteUrl: "" })}>
-          <UserPlus aria-hidden="true" />邀请成员
-        </button>
+          <UserPlus aria-hidden="true" />{t("workspaceMembersRoute.inviteMember")}</button>
       </header>
 
-      <nav className="shWorkspaceSettingsTabs" aria-label="权限设置">
-        <span className="isActive" aria-current="page">成员与邀请</span>
-        <Link to={`${base}/settings/groups`}>用户组</Link>
+      <nav className="shWorkspaceSettingsTabs" aria-label={t("workspaceGroupsRoute.permissionSettings")}>
+        <span className="isActive" aria-current="page">{t("workspaceGroupsRoute.membersAndInvitations")}</span>
+        <Link to={`${base}/settings/groups`}>{t("settingsRoute.groups")}</Link>
       </nav>
 
-      {loading ? <div className="shWorkspaceSettingsState" aria-live="polite">正在读取成员与邀请…</div> : null}
-      {!loading && pageError ? <div className="shWorkspaceSettingsState isError" role="alert">无法读取工作区设置：{pageError}<button type="button" onClick={() => void load()}>重新加载</button></div> : null}
+      {loading ? <div className="shWorkspaceSettingsState" aria-live="polite">{t("workspaceMembersRoute.loadingMembersAndInvitations")}</div> : null}
+      {!loading && pageError ? <div className="shWorkspaceSettingsState isError" role="alert">{t("workspaceMembersRoute.unableToLoadWorkspaceSettings")}{pageError}<button type="button" onClick={() => void load()}>{t("router.reloadPage")}</button></div> : null}
 
       {!loading && !pageError && members ? <>
         <section className="shWorkspaceSettingsSection">
-          <header><div><h2>成员</h2><p>{members.length} 位成员</p></div></header>
+          <header><div><h2>{t("invitationActivationRoute.member")}</h2><p>{t("members.count", { count: members.length })}</p></div></header>
           <div className="shWorkspaceMemberList">
             {members.map((member) => {
               const isCurrent = member.userId === String(user.id);
@@ -274,15 +277,15 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
               const memberBusy = busyKeys.has(`member:${member.membershipId}`);
               return <div className="shWorkspaceMemberRow" key={member.membershipId}>
                 <span className="shWorkspaceMemberAvatar" aria-hidden="true">{member.email.slice(0, 1).toUpperCase()}</span>
-                <span className="shWorkspaceMemberIdentity"><strong>{member.email}{isCurrent ? "（你）" : ""}</strong><small>加入于 {formatDate(member.createdAt)}</small></span>
-                {canMutate ? <select value={member.role} disabled={memberBusy} aria-label={`${member.email} 的角色`} onChange={(event) => void updateRole(member, event.target.value)}>
-                  <option value="admin">管理员</option><option value="member">成员</option>
+                <span className="shWorkspaceMemberIdentity"><strong>{member.email}{isCurrent ? t("workspaceMembersRoute.you") : ""}</strong><small>{t("workspaceMembersRoute.joined")}{" "}{formatDate(member.createdAt)}</small></span>
+                {canMutate ? <select value={member.role} disabled={memberBusy} aria-label={t("workspaceMembersRoute.roleForValue", { value1: member.email })} onChange={(event) => void updateRole(member, event.target.value)}>
+                  <option value="admin">{t("invitationActivationRoute.administrator")}</option><option value="member">{t("invitationActivationRoute.member")}</option>
                 </select> : <span className="shWorkspaceRoleLabel">{roleLabel(member.role)}</span>}
                 {canMutate && !memberBusy ? <details className="shWorkspaceRowMenu">
-                  <summary role="button" aria-label={`${member.email} 的成员操作`}><MoreHorizontal aria-hidden="true" /></summary>
+                  <summary role="button" aria-label={t("workspaceMembersRoute.memberActionsForValue", { value1: member.email })}><MoreHorizontal aria-hidden="true" /></summary>
                   <div>
-                    {actorRole === "owner" ? <button type="button" onClick={(event) => { event.currentTarget.closest("details").removeAttribute("open"); setTransferPassword(""); setTransferTarget(member); }}>转让所有权</button> : null}
-                    <button className="isDanger" type="button" onClick={(event) => { event.currentTarget.closest("details").removeAttribute("open"); setRemoveTarget(member); }}>移除成员</button>
+                    {actorRole === "owner" ? <button type="button" onClick={(event) => { event.currentTarget.closest("details").removeAttribute("open"); setTransferPassword(""); setTransferTarget(member); }}>{t("workspaceMembersRoute.transferOwnership")}</button> : null}
+                    <button className="isDanger" type="button" onClick={(event) => { event.currentTarget.closest("details").removeAttribute("open"); setRemoveTarget(member); }}>{t("workspaceMembersRoute.removeMember")}</button>
                   </div>
                 </details> : <span />}
               </div>;
@@ -291,18 +294,18 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
         </section>
 
         <section className="shWorkspaceSettingsSection">
-          <header><div><h2>待接受邀请</h2><p>邀请链接只在签发时展示；之后可以重新签发或撤销。</p></div></header>
+          <header><div><h2>{t("workspaceMembersRoute.pendingInvitations")}</h2><p>{t("workspaceMembersRoute.invitationLinksAreShownOnlyWhenIssuedYouCan")}</p></div></header>
           {invitations.length ? <div className="shWorkspaceInvitationList">
             {invitations.map((invitation) => <div className="shWorkspaceInvitationRow" key={invitation.id}>
-              <span className="shWorkspaceMemberIdentity"><strong>{invitation.email}</strong><small>创建于 {formatDate(invitation.createdAt)}</small></span>
+              <span className="shWorkspaceMemberIdentity"><strong>{invitation.email}</strong><small>{t("workspaceMembersRoute.created")}{" "}{formatDate(invitation.createdAt)}</small></span>
               <span>{roleLabel(invitation.role)}</span>
-              <small>{formatDate(invitation.expiresAt)} 过期</small>
+              <small>{formatDate(invitation.expiresAt)}{" "}{t("workspaceMembersRoute.expires")}</small>
               <span className="shWorkspaceInvitationActions">
-                <button type="button" onClick={() => setReissueTarget(invitation)}>重新签发</button>
-                <button type="button" onClick={() => setRevokeTarget(invitation)}>撤销</button>
+                <button type="button" onClick={() => setReissueTarget(invitation)}>{t("workspaceMembersRoute.reissue")}</button>
+                <button type="button" onClick={() => setRevokeTarget(invitation)}>{t("workspaceMembersRoute.revoke")}</button>
               </span>
             </div>)}
-          </div> : <div className="shWorkspaceSettingsEmpty">没有待接受的邀请。</div>}
+          </div> : <div className="shWorkspaceSettingsEmpty">{t("workspaceMembersRoute.noPendingInvitations")}</div>}
         </section>
       </> : null}
     </div>
@@ -310,33 +313,33 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
     {notice ? <div className={`shWorkspaceToast ${notice.kind === "error" ? "isError" : ""}`} role={notice.kind === "error" ? "alert" : "status"}>{notice.text}</div> : null}
 
     {inviteDialog ? <WorkspaceDialog
-      title={inviteDialog.inviteUrl ? "邀请链接已生成" : "邀请成员"}
-      description={inviteDialog.inviteUrl ? "该链接只在本次签发后展示。" : "生成一个 72 小时有效的邀请链接；系统不会代替你发送邮件。"}
+      title={inviteDialog.inviteUrl ? t("workspaceMembersRoute.invitationLinkCreated") : t("workspaceMembersRoute.inviteMember")}
+      description={inviteDialog.inviteUrl ? t("workspaceMembersRoute.thisLinkIsShownOnlyAfterThisIssuance") : t("workspaceMembersRoute.createAnInvitationLinkValidFor72HoursYou")}
       busy={inviteBusy}
       onClose={() => !inviteBusy && setInviteDialog(null)}
     >
       {inviteDialog.inviteUrl ? <div className="shWorkspaceInviteResult">
         <strong>{inviteDialog.email}</strong>
         <code>{inviteDialog.inviteUrl}</code>
-        <p>相同邮箱此前未接受的邀请已失效。</p>
-        <footer><button type="button" onClick={() => setInviteDialog(null)}>完成</button><button className="isPrimary" type="button" onClick={() => void copyInviteUrl()}><Copy aria-hidden="true" />复制链接</button></footer>
+        <p>{t("workspaceMembersRoute.previousUnacceptedInvitationsForThisEmailAreNowInvalid")}</p>
+        <footer><button type="button" onClick={() => setInviteDialog(null)}>{t("workspaceMembersRoute.done")}</button><button className="isPrimary" type="button" onClick={() => void copyInviteUrl()}><Copy aria-hidden="true" />{t("workspaceMembersRoute.copyLink")}</button></footer>
       </div> : <form onSubmit={(event) => { event.preventDefault(); void issueInvitation(inviteDialog.email, inviteDialog.role); }}>
-        <label>邮箱<input autoFocus type="email" required value={inviteDialog.email} onChange={(event) => setInviteDialog({ ...inviteDialog, email: event.target.value })} /></label>
-        <label>角色<select value={inviteDialog.role} onChange={(event) => setInviteDialog({ ...inviteDialog, role: event.target.value })}><option value="member">成员</option><option value="admin">管理员</option></select></label>
-        <footer><button type="button" disabled={inviteBusy} onClick={() => setInviteDialog(null)}>取消</button><button className="isPrimary" type="submit" disabled={inviteBusy || !inviteDialog.email.trim()}>{inviteBusy ? "正在生成…" : "生成邀请链接"}</button></footer>
+        <label>{t("loginForm.email")}<input autoFocus type="email" required value={inviteDialog.email} onChange={(event) => setInviteDialog({ ...inviteDialog, email: event.target.value })} /></label>
+        <label>{t("invitationActivationRoute.role")}<select value={inviteDialog.role} onChange={(event) => setInviteDialog({ ...inviteDialog, role: event.target.value })}><option value="member">{t("invitationActivationRoute.member")}</option><option value="admin">{t("invitationActivationRoute.administrator")}</option></select></label>
+        <footer><button type="button" disabled={inviteBusy} onClick={() => setInviteDialog(null)}>{t("agentRunRow.cancel")}</button><button className="isPrimary" type="submit" disabled={inviteBusy || !inviteDialog.email.trim()}>{inviteBusy ? t("workspaceMembersRoute.creating") : t("workspaceMembersRoute.createInvitationLink")}</button></footer>
       </form>}
     </WorkspaceDialog> : null}
 
-    {transferTarget ? <WorkspaceDialog title="转让工作区所有权" description={`确认将 ${workspace.name} 转让给 ${transferTarget.email}。完成后你将变为管理员。`} busy={transferBusy} onClose={() => { setTransferTarget(null); setTransferPassword(""); }}>
+    {transferTarget ? <WorkspaceDialog title={t("workspaceMembersRoute.transferWorkspaceOwnership")} description={t("workspaceMembersRoute.transferValueToValueYouWillBecomeAnAdministrator", { value1: workspace.name, value2: transferTarget.email })} busy={transferBusy} onClose={() => { setTransferTarget(null); setTransferPassword(""); }}>
       <form onSubmit={transferOwnership}>
-        <label>当前密码<input autoFocus type="password" autoComplete="current-password" required value={transferPassword} onChange={(event) => setTransferPassword(event.target.value)} /></label>
-        <footer><button type="button" disabled={transferBusy} onClick={() => { setTransferTarget(null); setTransferPassword(""); }}>取消</button><button className="isDanger" type="submit" disabled={transferBusy || !transferPassword}>{transferBusy ? "正在转让…" : "确认转让"}</button></footer>
+        <label>{t("settingsRoute.currentPassword")}<input autoFocus type="password" autoComplete="current-password" required value={transferPassword} onChange={(event) => setTransferPassword(event.target.value)} /></label>
+        <footer><button type="button" disabled={transferBusy} onClick={() => { setTransferTarget(null); setTransferPassword(""); }}>{t("agentRunRow.cancel")}</button><button className="isDanger" type="submit" disabled={transferBusy || !transferPassword}>{transferBusy ? t("workspaceMembersRoute.transferring") : t("workspaceMembersRoute.confirmTransfer")}</button></footer>
       </form>
     </WorkspaceDialog> : null}
 
-    <ConfirmDialog open={Boolean(removeTarget)} title="移除成员" message={removeTarget ? `确认移除 ${removeTarget.email}？其 membership 和自定义组关系会被删除，历史事实仍会保留。` : ""} confirmLabel="移除" busy={removeBusy} onCancel={() => setRemoveTarget(null)} onConfirm={() => void removeMember()} />
-    <ConfirmDialog open={Boolean(reissueTarget)} title="重新签发邀请" message={reissueTarget ? `为 ${reissueTarget.email} 签发新链接？旧链接会立即失效。` : ""} confirmLabel="重新签发" busy={inviteBusy} onCancel={() => setReissueTarget(null)} onConfirm={() => void issueInvitation(reissueTarget.email, reissueTarget.role)} />
-    <ConfirmDialog open={Boolean(revokeTarget)} title="撤销邀请" message={revokeTarget ? `确认撤销 ${revokeTarget.email} 的邀请？现有链接会立即失效。` : ""} confirmLabel="撤销" busy={revokeBusy} onCancel={() => setRevokeTarget(null)} onConfirm={() => void revokeInvitation()} />
+    <ConfirmDialog open={Boolean(removeTarget)} title={t("workspaceMembersRoute.removeMember")} message={removeTarget ? t("workspaceMembersRoute.removeValueTheirMembershipAndCustomGroupMembershipsWill", { value1: removeTarget.email }) : ""} confirmLabel={t("globalPluginSettings.remove")} busy={removeBusy} onCancel={() => setRemoveTarget(null)} onConfirm={() => void removeMember()} />
+    <ConfirmDialog open={Boolean(reissueTarget)} title={t("workspaceMembersRoute.reissueInvitation")} message={reissueTarget ? t("workspaceMembersRoute.issueANewLinkForValueTheOldLink", { value1: reissueTarget.email }) : ""} confirmLabel={t("workspaceMembersRoute.reissue")} busy={inviteBusy} onCancel={() => setReissueTarget(null)} onConfirm={() => void issueInvitation(reissueTarget.email, reissueTarget.role)} />
+    <ConfirmDialog open={Boolean(revokeTarget)} title={t("workspaceMembersRoute.revokeInvitation")} message={revokeTarget ? t("workspaceMembersRoute.revokeTheInvitationForValueTheExistingLinkWill", { value1: revokeTarget.email }) : ""} confirmLabel={t("workspaceMembersRoute.revoke")} busy={revokeBusy} onCancel={() => setRevokeTarget(null)} onConfirm={() => void revokeInvitation()} />
   </>;
   return embedded ? content : <ShellPage>{content}</ShellPage>;
 }

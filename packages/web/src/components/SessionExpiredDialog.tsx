@@ -1,3 +1,5 @@
+
+import { useTranslation } from "../i18n";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check } from "lucide-react";
@@ -12,6 +14,7 @@ type SessionExpiredDialogProps = {
 };
 
 export function SessionExpiredDialog({ open, user, onReauthenticated, onContinue }: SessionExpiredDialogProps) {
+  const { t } = useTranslation();
   const [restored, setRestored] = useState(false);
   const dialogRef = useModalDialog({ open, onClose: () => {} });
 
@@ -22,18 +25,18 @@ export function SessionExpiredDialog({ open, user, onReauthenticated, onContinue
   if (!open || !user) return null;
 
   return createPortal(<div className="sessionExpiredBackdrop" role="presentation">
-    <section className="sessionExpiredDialog" ref={dialogRef} role="dialog" aria-modal="true" aria-label={restored ? "登录已恢复" : "重新登录"} tabIndex={-1}>
+    <section className="sessionExpiredDialog" ref={dialogRef} role="dialog" aria-modal="true" aria-label={restored ? t("sessionExpiredDialog.youAreSignedInAgain") : t("sessionExpiredDialog.signInAgain")} tabIndex={-1}>
       {restored ? <div className="sessionExpiredRestored">
         <span aria-hidden="true"><Check /></span>
-        <h1>登录已恢复</h1>
-        <p>当前页面和未保存内容都已保留。刚才失败的操作没有自动重试。</p>
-        <button autoFocus className="primary" type="button" onClick={onContinue}>返回继续</button>
+        <h1>{t("sessionExpiredDialog.youAreSignedInAgain")}</h1>
+        <p>{t("sessionExpiredDialog.yourPageAndUnsavedChangesHaveBeenPreservedThe")}</p>
+        <button autoFocus className="primary" type="button" onClick={onContinue}>{t("sessionExpiredDialog.continue")}</button>
       </div> : <LoginForm
         initialEmail={user.email}
         expectedUserId={user.id}
-        heading="登录已过期"
-        description="重新登录后继续当前工作，未保存内容仍留在这里。"
-        submitLabel="重新登录"
+        heading={t("sessionExpiredDialog.sessionExpired")}
+        description={t("sessionExpiredDialog.signInAgainToContinueYourWorkYourUnsaved")}
+        submitLabel={t("sessionExpiredDialog.signInAgain")}
         onAuthenticated={async () => {
           await onReauthenticated();
           setRestored(true);

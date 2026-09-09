@@ -1,3 +1,5 @@
+
+import { useTranslation } from "../i18n";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { File, FileArchive, FileAudio, FileCode2, FileSpreadsheet, FileText, FileVideo, ImageOff, X } from "lucide-react";
@@ -17,6 +19,7 @@ function filePresentation(name, contentType) {
 }
 
 export function AttachmentCard({ attachment, imageUrl, onPreview, onRemove, unavailable = false, className = "" }) {
+  const { t } = useTranslation();
   const name = attachment.displayName;
   const image = attachmentIsImage(attachment);
   const source = image && !unavailable ? imageUrl ?? attachmentPreviewUrl(attachment) : "";
@@ -26,10 +29,10 @@ export function AttachmentCard({ attachment, imageUrl, onPreview, onRemove, unav
   const Content = onPreview && !unavailable ? "button" : "div";
   return (
     <div className={`attachmentCard ${className} ${image ? "isImage" : "isFile"} ${failed ? "isUnavailable" : ""}`}>
-      <Content className="attachmentCardContent" title={name} aria-label={onPreview && !unavailable ? `预览 ${name}` : name} {...(Content === "button" ? { type: "button", onClick: onPreview } : {})}>
-        {image ? source && !failed ? <img src={source} alt="" loading="lazy" decoding="async" onError={() => setFailedSource(source)} /> : <><ImageOff aria-hidden="true" /><small>{failed ? "图片不可用" : "图片"}</small></> : <><Icon aria-hidden="true" /><small>{failed ? "不可用" : label}</small><span className="attachmentCardName">{name}</span></>}
+      <Content className="attachmentCardContent" title={name} aria-label={onPreview && !unavailable ? t("attachmentCard.previewValue", { value1: name }) : name} {...(Content === "button" ? { type: "button", onClick: onPreview } : {})}>
+        {image ? source && !failed ? <img src={source} alt="" loading="lazy" decoding="async" onError={() => setFailedSource(source)} /> : <><ImageOff aria-hidden="true" /><small>{failed ? t("attachmentCard.imageUnavailable") : t("attachmentCard.image")}</small></> : <><Icon aria-hidden="true" /><small>{failed ? t("attachmentCard.unavailable") : label}</small><span className="attachmentCardName">{name}</span></>}
       </Content>
-      {onRemove ? <button className="attachmentCardRemove" type="button" onClick={onRemove} aria-label={`从本条消息移除 ${name}`} title={`移除 ${name}`}><X aria-hidden="true" /></button> : null}
+      {onRemove ? <button className="attachmentCardRemove" type="button" onClick={onRemove} aria-label={t("attachmentCard.removeValueFromThisMessage", { value1: name })} title={t("attachmentCard.removeValue", { value1: name })}><X aria-hidden="true" /></button> : null}
     </div>
   );
 }
@@ -42,6 +45,7 @@ export function localAttachmentKey(file) {
 }
 
 export function LocalAttachmentCard({ file, onRemove }) {
+  const { t } = useTranslation();
   const [imageUrl, setImageUrl] = useState("");
   const [previewOpen, setPreviewOpen] = useState(false);
   const dialogRef = useModalDialog({ open: previewOpen, onClose: () => setPreviewOpen(false) });
@@ -54,8 +58,8 @@ export function LocalAttachmentCard({ file, onRemove }) {
   return <>
     <AttachmentCard className="workspaceComposerAttachment" attachment={{ displayName: file.name, contentType: file.type }} imageUrl={imageUrl} onPreview={imageUrl ? () => setPreviewOpen(true) : undefined} onRemove={onRemove} />
     {previewOpen ? createPortal(<div className="attachmentPreviewBackdrop" role="presentation" onMouseDown={() => setPreviewOpen(false)}>
-      <section className="attachmentPreviewDialog" ref={dialogRef} role="dialog" aria-modal="true" aria-label={`预览 ${file.name}`} tabIndex={-1} onMouseDown={(event) => event.stopPropagation()}>
-        <header><strong>{file.name}</strong><button type="button" onClick={() => setPreviewOpen(false)} aria-label="关闭预览"><X aria-hidden="true" /></button></header>
+      <section className="attachmentPreviewDialog" ref={dialogRef} role="dialog" aria-modal="true" aria-label={t("attachmentCard.previewValue", { value1: file.name })} tabIndex={-1} onMouseDown={(event) => event.stopPropagation()}>
+        <header><strong>{file.name}</strong><button type="button" onClick={() => setPreviewOpen(false)} aria-label={t("attachmentCard.closePreview")}><X aria-hidden="true" /></button></header>
         <img src={imageUrl} alt={file.name} decoding="async" />
       </section>
     </div>, document.body) : null}
