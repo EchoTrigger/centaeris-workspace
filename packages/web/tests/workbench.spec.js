@@ -1,4 +1,5 @@
 const { test, expect } = require("@playwright/test");
+const { previewPdf } = require("./fixtures/preview-pdf");
 
 function historyPage(session, agentRuns, { nextCursor = null, hasMore = false } = {}) {
   return {
@@ -815,11 +816,11 @@ test("unlocks drafting after 202 and renders sealed Markdown while streaming", a
         committedStreamItem("sess_1", "agent_run_1", 5, "agent_run_completed", { doneReason: "finalized" }, "turn_1"),
       ]) });
     }
-    if (path === "/api/artifacts/trusted/download") {
-      const body = "预览正文内容";
+    if (path === "/api/office-preview/artifact/trusted") {
+      const body = previewPdf();
       return route.fulfill({
         status: 200,
-        contentType: "text/plain",
+        contentType: "application/pdf",
         headers: { "Content-Length": String(Buffer.byteLength(body)) },
         body,
       });
@@ -872,7 +873,7 @@ test("unlocks drafting after 202 and renders sealed Markdown while streaming", a
   await expect(currentRun.getByRole("link", { name: "伪造附件", exact: true })).toHaveCount(0);
   await currentRun.getByRole("link", { name: "报告.docx", exact: true }).click();
   await expect(page.getByRole("complementary", { name: "File preview", exact: true })).toBeVisible();
-  await expect(page.getByRole("complementary", { name: "File preview", exact: true })).toContainText("预览正文内容");
+  await expect(page.getByRole("complementary", { name: "File preview", exact: true }).getByRole("img", { name: "报告.docx, page 1", exact: true })).toBeVisible();
   await expect(composer).toHaveValue("下一条草稿");
   await expect(page.getByRole("button", { name: "Input", exact: true })).toBeEnabled();
 });

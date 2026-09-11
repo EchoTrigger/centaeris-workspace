@@ -317,6 +317,10 @@ svg { width: 16px; height: 16px; stroke-width: 1.9; }
 .libraryPreviewBody.libraryNotePreview { display: block; background: var(--surface-color); padding: 52px 40px 120px; }
 .libraryPreviewImage { display: block; max-width: min(920px, 100%); max-height: calc(100vh - 150px); border: 1px solid var(--border); box-shadow: 0 14px 42px rgba(21, 27, 34, .12); object-fit: contain; }
 .libraryPreviewFrame { width: min(920px, 100%); height: calc(100vh - 160px); min-height: 600px; border: 1px solid var(--border); background: var(--surface-color); box-shadow: 0 14px 42px rgba(21, 27, 34, .12); }
+.libraryOfficePreview { display: flex; flex-direction: column; height: 100dvh; min-height: 0; overflow: hidden; }
+.libraryOfficePreview .libraryPreviewHeader { flex: none; }
+.libraryOfficePreview .libraryPreviewBody { display: block; flex: 1; min-height: 0; padding: 0; }
+.libraryOfficePreview .libraryPreviewFrame { display: block; width: 100%; height: 100%; min-height: 0; border: 0; box-shadow: none; }
 .libraryNoteEditor { position: relative; width: min(860px, 100%); margin: 0 auto; }
 .libraryNoteEditor textarea { width: 100%; min-height: calc(100vh - 190px); resize: none; border: 0; border-radius: 0; outline: 0; background: transparent; color: var(--on-surface); padding: 0; font-family: inherit; font-size: 16px; line-height: 1.75; }
 .libraryNoteEditor textarea::placeholder { color: var(--process-text); }
@@ -539,6 +543,9 @@ button.workspaceActivityGroup:hover { color: var(--on-surface); }
 .attachmentPreviewDialog header svg { width: 16px; height: 16px; }
 .attachmentPreviewDialog > img { display: block; width: 100%; max-height: calc(100vh - 150px); object-fit: contain; }
 .attachmentPreviewDialog > iframe { width: 100%; height: min(760px, calc(100vh - 150px)); border: 0; }
+.documentTextPreview { padding: 24px; overflow: auto; min-width: 0; color: var(--text); }
+.documentTextPreview pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.attachmentPreviewDialog > .documentTextPreview { max-height: calc(100vh - 150px); }
 .attachmentPreviewUnavailable { display: grid; min-height: 220px; place-items: center; align-content: center; gap: 10px; color: var(--muted); }
 .attachmentPreviewUnavailable svg { width: 34px; height: 34px; color: var(--primary-color); }
 .attachmentPreviewUnavailable a { color: var(--primary-color); }
@@ -1027,3 +1034,14 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
   .login, .shWorkspaceChooser { grid-template-rows:1fr auto; gap:24px; min-height:100svh; padding-bottom:max(16px, env(safe-area-inset-bottom)); }
   .onboardingUtilities { position:static; justify-self:end; max-width:100%; }
 }
+
+.officePreview, .libraryOfficePreview .officePreview { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; width: 100%; height: 100%; background: var(--surface-variant); color: var(--text); }
+.officePreviewControls { display: flex; flex-wrap: wrap; flex: none; align-items: center; justify-content: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--surface-color); font-size: 13px; }
+.officePreviewControls button, .officePreviewReload { border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; background: var(--surface-color); color: inherit; cursor: pointer; }
+.officePreviewControls button:disabled { opacity: .45; cursor: default; }
+.officePreviewViewport { flex: 1; min-height: 0; min-width: 0; overflow: auto; scrollbar-gutter: stable; }
+.officePreviewViewport canvas { margin: 16px auto; background: white; box-shadow: 0 2px 12px rgba(0,0,0,.15); }
+.officePreviewState { padding: 32px 20px; text-align: center; }
+.officePreviewReload { flex: none; align-self: center; margin: 6px; font-size: 12px; }
+.attachmentPreviewDialog > .officePreview { height: min(760px, calc(100vh - 150px)); }
+.filePreviewBody > .officePreview { height: 100%; }

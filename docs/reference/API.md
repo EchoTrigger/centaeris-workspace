@@ -257,6 +257,24 @@ characters, and full `Authorization:` header lines are rejected. Saved credentia
 remain manageable if declarations fail. Saving credentials does not establish
 tool availability or bypass contract validation; execution remains strict v1.
 
+### Read-only Office preview
+
+`GET /api/office-preview/{ownerKind}/{objectId}?lang=zh-CN|en` provides an
+authenticated, read-only PDF preview for a DOCX, XLSX or PPTX
+`userLibraryObject`, `sourceObject` or `artifact`. If the exact content
+generation, SHA-256 digest and document processing specification have already
+produced a representation, the response streams it as `application/pdf`.
+Otherwise the endpoint atomically queues the existing LibreOffice-backed
+document processing task and returns a small `202` loading page that refreshes
+until the representation is ready.
+
+Every request repeats user and owner permission checks. A changed generation or
+digest selects a new immutable representation instead of reusing stale output.
+Responses are not cached; unsupported formats return 415, inaccessible objects
+404, and unavailable or invalid processing configuration returns 503. The
+endpoint does not expose a write or save route. Original files remain available
+through their existing authenticated download endpoints.
+
 ### Bounded material tool results
 
 `read_material` and `search_materials` preserve each completed request as an immutable, session-owned result snapshot before returning a bounded page. The model receives one structured result, without a duplicated text projection. English `message` text reports delivered line and UTF-8 byte ranges; byte-range ends are exclusive. `completeResultSaved` describes storage completeness, not model reading coverage.

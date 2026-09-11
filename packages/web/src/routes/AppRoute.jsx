@@ -5,6 +5,9 @@ import { Link, matchPath, useNavigate, useRouteLoaderData } from "react-router";
 import { apiResponse } from "../api";
 import { createCitationRefresher } from "../chat/citationSnapshot";
 import { WorkspaceContextPanel } from "../components/WorkspaceContextPanel";
+import { DocumentPreview } from "../components/DocumentPreview";
+import { officeFileType } from "../chat/officeFormats.mjs";
+import { officePreviewUrl } from "../chat/attachments.mjs";
 import { ContextUsagePicker } from "../components/ContextUsagePicker";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { useModalDialog } from "../components/useModalDialog";
@@ -1074,6 +1077,12 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       status: "loading",
     });
     try {
+      if (officeFileType(artifact.filename)) {
+        const id = artifact.artifactRef.replace(/^artifact:/, "");
+        setContextPanel({ mode: "filePreview", ...panelIdentity, status: "ready",
+          preview: { kind: "office", src: officePreviewUrl("artifact", id), objectUrl: "" }, objectUrl: "" });
+        return;
+      }
       const previewResponse = await apiResponse(artifact.downloadUrl);
       const contentType = (previewResponse.headers.get("Content-Type") || "").split(";", 1)[0].trim().toLowerCase();
       const contentLength = Number(previewResponse.headers.get("Content-Length") || "");
@@ -1432,8 +1441,8 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       {attachmentPreview ? (
         <div className="attachmentPreviewBackdrop" role="presentation" onMouseDown={() => setAttachmentPreview(null)}>
           <section className="attachmentPreviewDialog" ref={attachmentDialogRef} role="dialog" aria-modal="true" aria-label={t("attachmentCard.previewValue", { value1: attachmentPreview.displayName })} tabIndex={-1} onMouseDown={(event) => event.stopPropagation()}>
-            <header><strong>{attachmentPreview.displayName}</strong><button type="button" onClick={() => setAttachmentPreview(null)} aria-label={t("attachmentCard.closePreview")}><X aria-hidden="true" /></button></header>
-            {attachmentCanPreview(attachmentPreview) ? attachmentIsImage(attachmentPreview) ? <img src={attachmentPreviewUrl(attachmentPreview)} alt={attachmentPreview.displayName} /> : <iframe src={attachmentPreviewUrl(attachmentPreview)} title={attachmentPreview.displayName} /> : <div className="attachmentPreviewUnavailable"><ImageIcon aria-hidden="true" /><span>{t("appRoute.onlinePreviewIsUnavailableForThisMaterial")}</span><a href={attachmentDownloadUrl(attachmentPreview)}>{t("appRoute.downloadMaterial")}</a></div>}
+            <header><strong>{attachmentPreview.displayName}</strong><a href={attachmentDownloadUrl(attachmentPreview)}>{t("libraryObjectRoute.downloadFile")}</a><button type="button" onClick={() => setAttachmentPreview(null)} aria-label={t("attachmentCard.closePreview")}><X aria-hidden="true" /></button></header>
+            {attachmentCanPreview(attachmentPreview) ? attachmentIsImage(attachmentPreview) ? <img src={attachmentPreviewUrl(attachmentPreview)} alt={attachmentPreview.displayName} /> : <DocumentPreview src={attachmentPreviewUrl(attachmentPreview)} title={attachmentPreview.displayName} contentType={attachmentPreview.contentType || attachmentPreview.asset?.contentType || ""} /> : <div className="attachmentPreviewUnavailable"><ImageIcon aria-hidden="true" /><span>{t("appRoute.onlinePreviewIsUnavailableForThisMaterial")}</span><a href={attachmentDownloadUrl(attachmentPreview)}>{t("appRoute.downloadMaterial")}</a></div>}
           </section>
         </div>
       ) : null}

@@ -3,6 +3,7 @@ import { useTranslation } from "../i18n";
 import { Download, X } from "lucide-react";
 import { useRef } from "react";
 import { apiUrl } from "../api";
+import { DocumentPreview } from "./DocumentPreview";
 
 function CitationTextPreview({ content, locator }) {
   useTranslation();
@@ -87,6 +88,7 @@ function FilePreviewPanel({ panel, browserWidthPx, onBrowserWidthChange, onClose
           <div className="filePreviewBody">
             {panel.preview.kind === "text" ? <CitationTextPreview content={panel.preview.content} locator={panel.locator} /> : null}
             {panel.preview.kind === "pdf" ? <iframe src={panel.preview.src} title={panel.displayName} /> : null}
+            {panel.preview.kind === "office" ? <DocumentPreview src={panel.preview.src} title={panel.displayName} /> : null}
             {panel.preview.kind === "image" ? <img src={panel.preview.src} alt={panel.displayName} /> : null}
             {panel.preview.kind === "unsupported" ? (
               <div className="filePreviewState">{t("workspaceContextPanel.inlinePreviewIsUnavailableForThisFileTypeUse")}</div>

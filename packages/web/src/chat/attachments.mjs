@@ -1,4 +1,11 @@
 import { apiUrl } from "../api";
+import { i18n } from "../i18n";
+import { officeFileType } from "./officeFormats.mjs";
+
+export function officePreviewUrl(kind, id) {
+  const previewUrl = apiUrl(`/api/office-preview/${encodeURIComponent(kind)}/${encodeURIComponent(id)}?lang=${i18n.language === "en" ? "en" : "zh-CN"}`);
+  return previewUrl;
+}
 
 export function attachmentDownloadUrl(link) {
   if (link.assetKind === "userLibraryObject") return apiUrl(`/api/library/${link.asset.id}/download`);
@@ -8,6 +15,7 @@ export function attachmentDownloadUrl(link) {
 }
 
 export function attachmentPreviewUrl(link) {
+  if (officeFileType(link.displayName || link.asset?.displayName || "")) return officePreviewUrl(link.assetKind, link.asset.id);
   return link.assetKind === "userLibraryObject"
     ? apiUrl(`/api/library/${link.asset.id}/preview`)
     : attachmentDownloadUrl(link);
@@ -20,5 +28,6 @@ export function attachmentIsImage(link) {
 export function attachmentCanPreview(link) {
   const contentType = link.contentType || link.asset?.contentType || "";
   return attachmentIsImage(link)
+    || Boolean(officeFileType(link.displayName || link.asset?.displayName || ""))
     || (link.assetKind === "userLibraryObject" && (contentType === "application/pdf" || contentType.startsWith("text/")));
 }

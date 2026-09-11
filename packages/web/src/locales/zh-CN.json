@@ -764,5 +764,17 @@
   "virtualAgentRunList.conversationMessages": "会话消息",
   "appRoute.citationRefreshFailed": "无法刷新引用，请重新打开会话重试",
   "theme.switchLight": "切换为浅色主题",
-  "theme.switchDark": "切换为暗色主题"
+  "theme.switchDark": "切换为暗色主题",
+  "officePreview.loading": "正在生成预览…",
+  "officePreview.timeout": "预览等待超时。可重新加载查看进度，或下载原文件。",
+  "officePreview.error": "无法显示预览。可重新加载再试，或下载原文件。",
+  "officePreview.navigation": "预览分页",
+  "officePreview.previous": "上一页",
+  "officePreview.next": "下一页",
+  "officePreview.pageCount": "第 {{page}} / {{total}} 页",
+  "officePreview.pageLabel": "{{title}}，第 {{page}} 页",
+  "officePreview.reload": "重新加载预览",
+  "officePreview.zoomIn": "放大",
+  "officePreview.zoomOut": "缩小",
+  "officePreview.fitWidth": "适合宽度"
 }
