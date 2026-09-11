@@ -35,6 +35,15 @@ def compose_config(**overrides):
 
 
 class DeploymentContractTests(unittest.TestCase):
+    def test_long_running_foundation_services_restart_after_engine_recovery(self):
+        services = compose_config()["services"]
+        for service in ("postgres", "redis", "api"):
+            with self.subTest(service=service):
+                self.assertEqual(services[service].get("restart"), "unless-stopped")
+        for service in ("api-init", "document-processor", "workspace-general"):
+            with self.subTest(service=service):
+                self.assertEqual(services[service].get("restart"), "no")
+
     def test_platform_mcp_accepts_runtime_internal_host_without_wildcards(self):
         services = compose_config()["services"]
         host = urlsplit(services["runtime"]["environment"]["API_INTERNAL_URL"]).hostname

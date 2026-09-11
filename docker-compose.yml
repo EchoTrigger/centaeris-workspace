@@ -22,6 +22,7 @@ x-workspace-general-image: &workspace-general-image centaeris-workspace-general:
 
 services:
   postgres:
+    restart: unless-stopped
     image: postgres:18-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
@@ -65,6 +66,7 @@ services:
       retries: 20
 
   redis:
+    restart: unless-stopped
     image: redis:8-alpine@sha256:978f0e01593e65eed801f2402944efcd936d43b5027e4908a7897baf88ed6241
     command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "${REDIS_MAXMEMORY:-512mb}", "--maxmemory-policy", "allkeys-lru"]
     healthcheck:
@@ -248,6 +250,7 @@ services:
         target: *plugin-root
 
   api:
+    restart: unless-stopped
     image: centaeris-workspace-agent-api
     build: *api-build
     security_opt:
