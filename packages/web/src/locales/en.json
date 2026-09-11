@@ -764,5 +764,17 @@
   "virtualAgentRunList.conversationMessages": "Conversation messages",
   "appRoute.citationRefreshFailed": "Could not refresh citations. Reopen the conversation to retry.",
   "theme.switchLight": "Switch to light theme",
-  "theme.switchDark": "Switch to dark theme"
+  "theme.switchDark": "Switch to dark theme",
+  "officePreview.loading": "Generating preview…",
+  "officePreview.timeout": "Preview is taking too long. You can reload to check again, or download the original file.",
+  "officePreview.error": "Unable to display this preview. Reload to try again, or download the original file.",
+  "officePreview.navigation": "Preview pages",
+  "officePreview.previous": "Previous page",
+  "officePreview.next": "Next page",
+  "officePreview.pageCount": "Page {{page}} of {{total}}",
+  "officePreview.pageLabel": "{{title}}, page {{page}}",
+  "officePreview.reload": "Reload preview",
+  "officePreview.zoomIn": "Zoom in",
+  "officePreview.zoomOut": "Zoom out",
+  "officePreview.fitWidth": "Fit width"
 }

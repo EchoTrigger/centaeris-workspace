@@ -5,13 +5,16 @@ import { useLocation, useNavigate, useParams, useRouteLoaderData, useSearchParam
 import { ArrowLeft, Download, FileText, LoaderCircle, LockKeyhole, Trash2 } from "lucide-react";
 import { apiJson as api, apiUrl, jsonOptions } from "../api";
 import { ShellPage } from "../shell/ShellPage";
+import { DocumentPreview } from "../components/DocumentPreview";
+import { officeFileType } from "../chat/officeFormats.mjs";
+import { officePreviewUrl } from "../chat/attachments.mjs";
 
 function isImage(item) {
   return item.objectKind === "image" || item.contentType.startsWith("image/");
 }
 
 function canEmbed(item) {
-  return item.contentType === "application/pdf" || item.contentType.startsWith("text/");
+  return Boolean(officeFileType(item.displayName)) || item.contentType === "application/pdf" || item.contentType.startsWith("text/");
 }
 
 function splitNote(markdown, fallbackTitle) {
@@ -161,9 +164,10 @@ function LibraryPreviewPageContent() {
   }
 
   const isNote = item?.objectKind === "note";
+  const isOffice = Boolean(officeFileType(item?.displayName));
   const displayedTitle = isNote ? noteTitle || t("libraryObjectRoute.untitled") : item?.displayName;
 
-  return <div className="libraryPreviewMain">
+  return <div className={`libraryPreviewMain${isOffice ? " libraryOfficePreview" : ""}`}>
     <span className="srOnly" role="status" aria-live="polite">{saveStatus}</span>
     <header className="libraryPreviewHeader">
       {isNote ? <nav className="libraryNoteIdentity" aria-label={t("libraryObjectRoute.notePath")}>
@@ -189,7 +193,7 @@ function LibraryPreviewPageContent() {
       {item && !isNote && <div className="libraryPreviewActions"><a href={apiUrl(`/api/library/${item.id}/download`)} aria-label={t("workspaceContextPanel.download")}><Download aria-hidden="true" /></a><button type="button" disabled={deleting} onClick={() => void deleteItem()} aria-label={t("agentRoute.moveToTrash")}><Trash2 aria-hidden="true" /></button></div>}
     </header>
     <section className={`libraryPreviewBody ${item?.objectKind === "note" ? "libraryNotePreview" : ""}`}>
-      {loading ? <div className="libraryEmptyState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryObjectRoute.openingFile")}</div> : <>{error && <div className="errorBanner libraryError" role="alert">{error}<button type="button" onClick={load}>{t("libraryObjectRoute.retry")}</button></div>}{isNote ? <div className="libraryNoteEditor"><textarea value={markdown} onChange={(event) => updateNote(noteTitle, event.target.value)} aria-label={t("libraryObjectRoute.noteContent")} placeholder={t("libraryObjectRoute.startWritingOrTypeForCommands")} /></div> : error ? null : isImage(item) ? <img className="libraryPreviewImage" src={apiUrl(`/api/library/${item.id}/preview`)} alt={item.displayName} /> : canEmbed(item) ? <iframe className="libraryPreviewFrame" src={apiUrl(`/api/library/${item.id}/preview`)} title={item.displayName} /> : <div className="libraryPreviewUnsupported"><FileText aria-hidden="true" /><strong>{item.displayName}</strong><span>{t("libraryObjectRoute.onlinePreviewIsUnavailableForThisFileType")}</span><a href={apiUrl(`/api/library/${item.id}/download`)}><Download aria-hidden="true" />{t("libraryObjectRoute.downloadFile")}</a></div>}</>}
+      {loading ? <div className="libraryEmptyState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryObjectRoute.openingFile")}</div> : <>{error && <div className="errorBanner libraryError" role="alert">{error}<button type="button" onClick={load}>{t("libraryObjectRoute.retry")}</button></div>}{isNote ? <div className="libraryNoteEditor"><textarea value={markdown} onChange={(event) => updateNote(noteTitle, event.target.value)} aria-label={t("libraryObjectRoute.noteContent")} placeholder={t("libraryObjectRoute.startWritingOrTypeForCommands")} /></div> : error ? null : isImage(item) ? <img className="libraryPreviewImage" src={apiUrl(`/api/library/${item.id}/preview`)} alt={item.displayName} /> : canEmbed(item) ? <DocumentPreview className="libraryPreviewFrame" src={officeFileType(item.displayName) ? officePreviewUrl("userLibraryObject", item.id) : apiUrl(`/api/library/${item.id}/preview`)} title={item.displayName} contentType={item.contentType} /> : <div className="libraryPreviewUnsupported"><FileText aria-hidden="true" /><strong>{item.displayName}</strong><span>{t("libraryObjectRoute.onlinePreviewIsUnavailableForThisFileType")}</span><a href={apiUrl(`/api/library/${item.id}/download`)}><Download aria-hidden="true" />{t("libraryObjectRoute.downloadFile")}</a></div>}</>}
     </section>
   </div>;
 }

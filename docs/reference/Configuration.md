@@ -174,6 +174,15 @@ Password-reset mail is disabled unless `PASSWORD_RESET_ENABLED=1` and the
 separate mail-sender service has valid SMTP configuration. The API process does
 not silently send mail through an unconfigured backend.
 
+## Office preview
+
+DOCX, XLSX and PPTX previews use the existing document-processing worker and
+LibreOffice installed in the document-processor image. No separate Office
+viewer service or Office-specific environment variable is required. Keep the
+document processor specification active and run the material worker with access
+to the same object storage as the API. See
+[Office preview operations](../operations/OfficePreview.md).
+
 ## Production review
 
 Before deployment, set `DJANGO_DEBUG=0`, use explicit allowed hosts and web

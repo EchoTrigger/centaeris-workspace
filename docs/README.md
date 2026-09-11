@@ -22,6 +22,8 @@ boundaries, and release verification.
 - [Plugins](operations/Plugins.md): ZIP upload through uninstall.
 - [Document processing](operations/DocumentProcessing.md): required images,
   bounded streaming, and current measurement limits.
+- [Office preview](operations/OfficePreview.md): LibreOffice-derived read-only
+  DOCX, XLSX and PPTX viewing.
 
 ## Security and release
 

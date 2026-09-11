@@ -1,4 +1,5 @@
 from django.conf import settings
+from app_core.http.office_preview import router as office_preview_router
 from ninja import NinjaAPI
 
 from app_core.http.auth import router as auth_router
@@ -47,6 +48,7 @@ api.add_router("/api", model_management_router)
 api.add_router("/api", plugin_lifecycle_router)
 api.add_router("/api", artifacts_router)
 api.add_router("/api", downloads_router)
+api.add_router("/api", office_preview_router)
 api.add_router("/api", streaming_router)
 api.add_router("/api", trash_router)
 api.add_router("/internal", internal_router)

@@ -1,5 +1,10 @@
 # Third-party notices
 
+Office previews bundle Mozilla PDF.js (`pdfjs-dist` 6.3.289), licensed under
+Apache-2.0. Its license is distributed with the web application as
+[`Apache-2.0-PDFjs.txt`](packages/web/public/licenses/Apache-2.0-PDFjs.txt).
+Source: [mozilla/pdf.js](https://github.com/mozilla/pdf.js).
+
 This repository bundles the following fonts in `packages/web`. Vite copies the
 linked license files from `packages/web/public/licenses` into the deployed web
 artifact under `licenses/`.

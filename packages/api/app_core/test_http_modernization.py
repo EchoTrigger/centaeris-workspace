@@ -175,6 +175,7 @@ class NinjaContractTests(TestCase):
     def test_ordinary_public_json_operations_publish_success_schemas(self):
         schema = api.get_openapi_schema()
         raw_response_paths = {
+            "/api/office-preview/{owner_kind}/{object_id}",
             "/api/artifacts/{artifact_id}/download",
             "/api/source-objects/{source_object_id}/download",
             "/api/library/{library_object_id}/download",
