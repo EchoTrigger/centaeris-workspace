@@ -1824,6 +1824,7 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
                 return Err(error);
             }
         }
+        let output_limit = filesystem_response_limit(&request.operation)?;
         let body = serde_json::to_vec(&SandboxFileSystemRequest {
             path: request.model_path,
             operation: request.operation,
@@ -1836,7 +1837,7 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
                 "filesystem-once",
                 (!memory_path).then_some(AGENT_USER),
                 body.as_slice(),
-                HELPER_JSON_LIMIT,
+                output_limit,
             )
             .map_err(filesystem_unavailable)?;
         let mut result = serde_json::from_slice::<SandboxFileSystemResult>(output.as_slice())
@@ -2422,6 +2423,28 @@ struct ExecOutput {
     status: crate::docker_engine::ExecStatus,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+}
+
+fn filesystem_response_limit(
+    operation: &ExecutionFileSystemOperation,
+) -> Result<usize, ExecutionFileSystemError> {
+    match operation {
+        ExecutionFileSystemOperation::ReadFile { max_bytes } => {
+            // serde_json encodes Vec<u8> as decimal numbers: at most "255,"
+            // per input byte. Keep the normal budget for identity/error metadata.
+            // The helper still enforces Core's requested raw-file byte limit.
+            max_bytes
+                .checked_mul(4)
+                .and_then(|bytes| bytes.checked_add(HELPER_JSON_LIMIT))
+                .ok_or_else(|| {
+                    ExecutionFileSystemError::new(
+                        ExecutionFileSystemErrorKind::TooLarge,
+                        "filesystem response budget overflow",
+                    )
+                })
+        }
+        _ => Ok(HELPER_JSON_LIMIT),
+    }
 }
 
 fn exec_with_input(
@@ -3427,6 +3450,56 @@ mod tests {
             decode_frame::<SandboxArtifactMetadata>(frame.as_slice()).expect("decode");
         assert_eq!(decoded.filename, "report.txt");
         assert_eq!(bytes, b"abc");
+    }
+
+    #[test]
+    fn filesystem_read_response_preserves_large_binary_bytes() {
+        // A rendered page can be well below Core's file limit while its JSON
+        // byte array exceeds the ordinary helper metadata budget.
+        let bytes = vec![255; 400_000];
+        let expected = ExecutionFileSystemOutput::ReadFile(ExecutionFileReadOutput {
+            identity: ExecutionFileIdentity {
+                key: "rendered-page".into(),
+                display_path: "/mnt/data/page.png".into(),
+            },
+            file_hash: format!("sha256:{:x}", Sha256::digest(&bytes)),
+            bytes,
+        });
+        let encoded = serde_json::to_vec(&SandboxFileSystemResult::from(Ok(expected.clone())))
+            .expect("encoded response");
+        assert!(encoded.len() > HELPER_JSON_LIMIT);
+        let limit = filesystem_response_limit(&ExecutionFileSystemOperation::ReadFile {
+            max_bytes: 400_000,
+        })
+        .expect("response budget");
+        let captured = read_bounded(Cursor::new(&encoded), limit).expect("bounded read");
+        assert_eq!(
+            captured.bytes.len(),
+            encoded.len(),
+            "valid image response was truncated"
+        );
+        let decoded = serde_json::from_slice::<SandboxFileSystemResult>(&captured.bytes)
+            .expect("complete JSON")
+            .into_result()
+            .expect("file response");
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn filesystem_response_budget_rejects_overflow_and_keeps_metadata_bounded() {
+        assert_eq!(
+            filesystem_response_limit(&ExecutionFileSystemOperation::ReadFile {
+                max_bytes: usize::MAX,
+            })
+            .expect_err("overflow must fail")
+            .kind,
+            ExecutionFileSystemErrorKind::TooLarge,
+        );
+        assert_eq!(
+            filesystem_response_limit(&ExecutionFileSystemOperation::InspectMutationPath)
+                .expect("metadata budget"),
+            HELPER_JSON_LIMIT,
+        );
     }
 
     #[test]
