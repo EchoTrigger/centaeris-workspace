@@ -34,7 +34,7 @@ def project_committed_agent_run(
     """Materialize database and UI projections from Core-validated Session facts."""
     with transaction.atomic():
         locked_agent_run = (
-            AgentRun.objects.select_for_update()
+            AgentRun.objects.select_for_update(of=("self",), no_key=True)
             .select_related("workspace", "session")
             .get(id=agent_run.id)
         )
@@ -69,7 +69,9 @@ def rebuild_agent_run_citation_projection(
     through_sequence: int | None = None,
 ) -> list[SessionCitationProjection]:
     from .material_receipts import citation_projections
-    agent_run = AgentRun.objects.select_for_update().select_related("workspace", "session").get(pk=agent_run.pk)
+    # Serialize projection writers without locking joined Session/Workspace rows
+    # or blocking the runtime's deferred AgentRun foreign-key checks.
+    agent_run = AgentRun.objects.select_for_update(of=("self",), no_key=True).select_related("workspace", "session").get(pk=agent_run.pk)
     citations = {}
     for stored_event in _committed_events(agent_run):
         if through_sequence is not None and stored_event.sequence > through_sequence:
@@ -109,7 +111,7 @@ def rebuild_agent_run_citation_projection(
 @transaction.atomic
 def citation_snapshot(agent_run: AgentRun) -> dict:
     """Platform presentation snapshot; never creates Core Session events."""
-    agent_run = AgentRun.objects.select_for_update().get(pk=agent_run.pk)
+    agent_run = AgentRun.objects.select_for_update(of=("self",), no_key=True).get(pk=agent_run.pk)
     through = SessionEvent.objects.filter(agent_run=agent_run).order_by("-sequence").values_list("sequence", flat=True).first() or 0
     citations = rebuild_agent_run_citation_projection(agent_run, through)
     return {"schema": "workspace.citations.v1", "agentRunId": agent_run.id,
