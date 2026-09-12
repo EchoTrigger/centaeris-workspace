@@ -215,6 +215,8 @@ async def stored_file_response(
     except StoredObjectUnavailable:
         return JsonResponse({"error": "stored_object_not_available"}, status=409)
 
+    if not as_attachment and content_type.partition(";")[0].strip().lower() in {"text/plain", "text/markdown"} and "charset=" not in content_type.lower():
+        content_type += "; charset=utf-8"
     response = OwnedAsyncStreamingHttpResponse(
         stream,
         content_type=content_type or "application/octet-stream",

@@ -1660,6 +1660,9 @@ class DerivedRepresentation(models.Model):
     previewPdfKey = models.CharField(max_length=1000, blank=True, default="")
     previewPdfSizeBytes = models.PositiveBigIntegerField(default=0)
     previewPdfSha256 = models.CharField(max_length=71, blank=True, default="")
+    workbookPreviewKey = models.CharField(max_length=1000, blank=True, default="")
+    workbookPreviewSizeBytes = models.PositiveBigIntegerField(default=0)
+    workbookPreviewSha256 = models.CharField(max_length=71, blank=True, default="")
     manifest = models.JSONField()
     createdAt = models.DateTimeField(auto_now_add=True)
 

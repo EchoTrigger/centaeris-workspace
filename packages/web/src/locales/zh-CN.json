@@ -776,5 +776,14 @@
   "officePreview.reload": "重新加载预览",
   "officePreview.zoomIn": "放大",
   "officePreview.zoomOut": "缩小",
-  "officePreview.fitWidth": "适合宽度"
+  "officePreview.fitWidth": "适合宽度",
+  "codePreview.syntaxHighlightingUnavailable": "语法高亮加载失败，当前以纯文本显示。",
+  "codePreview.retry": "重试",
+  "spreadsheetPreview.loading": "正在生成表格视图…",
+  "spreadsheetPreview.timeout": "表格视图生成超时，可切换到打印视图或下载原文件。",
+  "spreadsheetPreview.error": "无法显示表格视图，可切换到打印视图或下载原文件。",
+  "spreadsheetPreview.viewMode": "工作簿视图",
+  "spreadsheetPreview.tableView": "表格视图",
+  "spreadsheetPreview.printView": "打印视图",
+  "spreadsheetPreview.sheets": "工作表"
 }

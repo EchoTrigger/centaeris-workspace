@@ -295,6 +295,7 @@ name = "centaeris-document-processor"
 version = "1.0.0"
 source = { editable = "packages/document_processor" }
 dependencies = [
+    { name = "openpyxl" },
     { name = "paddleocr" },
     { name = "pillow" },
     { name = "pypdfium2" },
@@ -310,6 +311,7 @@ gpu = [
 
 [package.metadata]
 requires-dist = [
+    { name = "openpyxl", specifier = "==3.1.5" },
     { name = "paddleocr", specifier = "==3.7.0" },
     { name = "paddlepaddle", marker = "extra == 'cpu'", specifier = "==3.3.1" },
     { name = "paddlepaddle-gpu", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'gpu'", url = "https://paddle-whl.bj.bcebos.com/stable/cu126/paddlepaddle-gpu/paddlepaddle_gpu-3.3.1-cp312-cp312-linux_x86_64.whl" },

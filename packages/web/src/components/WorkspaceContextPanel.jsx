@@ -4,27 +4,7 @@ import { Download, X } from "lucide-react";
 import { useRef } from "react";
 import { apiUrl } from "../api";
 import { DocumentPreview } from "./DocumentPreview";
-
-function CitationTextPreview({ content, locator }) {
-  useTranslation();
-  const lines = content.split(/\r?\n/);
-  if (!Number.isInteger(locator?.startLine) || !Number.isInteger(locator?.endLine)) {
-    return <pre>{content}</pre>;
-  }
-  const startIndex = Math.max(0, locator.startLine - 1);
-  const endIndex = Math.min(lines.length, locator.endLine);
-  if (startIndex >= endIndex) throw new Error("citation text locator is outside the preview content");
-  const before = lines.slice(0, startIndex).join("\n");
-  const evidence = lines.slice(startIndex, endIndex).join("\n");
-  const after = lines.slice(endIndex).join("\n");
-  return (
-    <pre>
-      {before ? `${before}\n` : ""}
-      <mark>{evidence}</mark>
-      {after ? `\n${after}` : ""}
-    </pre>
-  );
-}
+import { TextFilePreview } from "./TextFilePreview";
 
 function FilePreviewPanel({ panel, browserWidthPx, onBrowserWidthChange, onClose, onReturn }) {
   const { t } = useTranslation();
@@ -86,7 +66,7 @@ function FilePreviewPanel({ panel, browserWidthPx, onBrowserWidthChange, onClose
       {panel.status === "ready" ? (
         <div className="filePreviewLayout">
           <div className="filePreviewBody">
-            {panel.preview.kind === "text" ? <CitationTextPreview content={panel.preview.content} locator={panel.locator} /> : null}
+            {panel.preview.kind === "text" ? <TextFilePreview content={panel.preview.content} contentType={panel.preview.contentType} title={panel.displayName} locator={panel.locator} renderMarkdown={!panel.locator} /> : null}
             {panel.preview.kind === "pdf" ? <iframe src={panel.preview.src} title={panel.displayName} /> : null}
             {panel.preview.kind === "office" ? <DocumentPreview src={panel.preview.src} title={panel.displayName} /> : null}
             {panel.preview.kind === "image" ? <img src={panel.preview.src} alt={panel.displayName} /> : null}

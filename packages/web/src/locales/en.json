@@ -776,5 +776,14 @@
   "officePreview.reload": "Reload preview",
   "officePreview.zoomIn": "Zoom in",
   "officePreview.zoomOut": "Zoom out",
-  "officePreview.fitWidth": "Fit width"
+  "officePreview.fitWidth": "Fit width",
+  "codePreview.syntaxHighlightingUnavailable": "Syntax highlighting failed to load. Showing plain text.",
+  "codePreview.retry": "Retry",
+  "spreadsheetPreview.loading": "Generating table view…",
+  "spreadsheetPreview.timeout": "Table view is taking too long. Switch to print view or download the original file.",
+  "spreadsheetPreview.error": "Unable to display table view. Switch to print view or download the original file.",
+  "spreadsheetPreview.viewMode": "Workbook view",
+  "spreadsheetPreview.tableView": "Table view",
+  "spreadsheetPreview.printView": "Print view",
+  "spreadsheetPreview.sheets": "Worksheets"
 }

@@ -2274,12 +2274,18 @@ for (const citationMode of ["legacy", "platform"]) {
 test(`opens a human-readable ${citationMode} citation without exposing locator JSON`, async ({ page }) => {
   let previewFailure = false;
   let previewPdf = false;
+  let previewCode = false;
+  let previewRenderedMarkdown = false;
   await page.route("http://localhost:8000/api/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/citations/citation_1/preview") {
       if (previewFailure) return route.fulfill({ status: 415, json: { error: "citation_preview_unsupported" } });
       if (previewPdf) return route.fulfill({ contentType: "application/pdf", body: "%PDF-1.7\n%%EOF\n" });
-      return route.fulfill({ contentType: "text/markdown", body: "术前准备\n请核对患者病史。\n确认过敏史。\n完成签字。" });
+      if (previewCode) return route.fulfill({ contentType: "text/plain", body: "const first = 1;\nexport const highlighted = true;\n" });
+      return route.fulfill({
+        contentType: "text/markdown",
+        body: previewRenderedMarkdown ? "# 合规审查报告\n\n**结论：** 可以执行。" : "术前准备\n请核对患者病史。\n确认过敏史。\n完成签字。",
+      });
     }
     const responses = {
       "/api/me": { user: { id: "1", email: "member@example.com", isStaff: false } },
@@ -2313,9 +2319,9 @@ test(`opens a human-readable ${citationMode} citation without exposing locator J
         citation: {
           citationId: "citation_1",
           inputRef: "input_1",
-          displayName: previewPdf ? "单个任务时效性.xlsx" : "术前须知.md",
+          displayName: previewPdf ? "单个任务时效性.xlsx" : previewCode ? "preview.ts" : "术前须知.md",
           evidenceKind: "workspaceSource",
-          locator: previewPdf ? { pageStart: 1, pageEnd: 1 } : { startLine: 2, endLine: 4 },
+          locator: previewPdf ? { pageStart: 1, pageEnd: 1 } : previewCode ? { startLine: 2, endLine: 2 } : previewRenderedMarkdown ? undefined : { startLine: 2, endLine: 4 },
           sourceUrl: "/api/citations/citation_1",
           previewUrl: "/api/citations/citation_1/preview",
           downloadUrl: "/api/source-objects/source_1/download",
@@ -2337,6 +2343,22 @@ test(`opens a human-readable ${citationMode} citation without exposing locator J
   await expect(preview).not.toContainText("startLine");
   await preview.getByRole("button", { name: "Library", exact: true }).click();
   await expect(citationButton).toBeFocused();
+  previewRenderedMarkdown = true;
+  await citationButton.click();
+  preview = page.getByRole("complementary", { name: "File preview", exact: true });
+  await expect(preview.getByRole("heading", { name: "合规审查报告", exact: true })).toBeVisible();
+  await expect(preview.locator(".documentTextPreview")).toContainText("结论： 可以执行。");
+  await expect(preview.locator(".documentTextPreview")).toHaveCSS("border-top-width", "0px");
+  await preview.getByRole("button", { name: "Close preview", exact: true }).click();
+  previewRenderedMarkdown = false;
+  previewCode = true;
+  await citationButton.click();
+  preview = page.getByRole("complementary", { name: "File preview", exact: true });
+  await expect(preview.getByRole("navigation", { name: "File preview path" })).toContainText("preview.ts");
+  await expect(preview.locator(".cm-content")).toContainText("highlighted");
+  await expect(preview.locator(".codePreviewTargetLine")).toHaveCount(1);
+  await preview.getByRole("button", { name: "Close preview", exact: true }).click();
+  previewCode = false;
   await page.setViewportSize({ width: 390, height: 844 });
   await citationButton.click();
   preview = page.getByRole("complementary", { name: "File preview", exact: true });

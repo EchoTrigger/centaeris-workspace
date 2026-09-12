@@ -49,11 +49,15 @@ def unpack_outputs(chunks, root, maximum):
             for entry in archive:
                 if entry.name == "output" and entry.isdir():
                     continue
-                if (entry.name not in {"output/canonical.md", "output/manifest.json", "output/preview.pdf"}
+                if (entry.name not in {"output/canonical.md", "output/manifest.json", "output/preview.pdf", "output/workbook.json"}
                         or not entry.isfile() or entry.name in seen):
                     raise ValueError("material_archive_invalid")
                 seen.add(entry.name)
-                limit = 64 * 1024 * 1024 if entry.name.endswith("manifest.json") else maximum
+                limit = (
+                    64 * 1024 * 1024 if entry.name.endswith("manifest.json")
+                    else 16 * 1024 * 1024 if entry.name.endswith("workbook.json")
+                    else maximum
+                )
                 if entry.size < 0 or entry.size > limit:
                     raise ValueError("material_archive_too_large")
                 if not entry.name.endswith("manifest.json"):
@@ -241,7 +245,10 @@ class MaterialWorker:
         canonical = (root / "canonical.md").read_bytes()
         preview_path = root / "preview.pdf"
         preview = preview_path.read_bytes() if preview_path.exists() else b""
+        workbook_path = root / "workbook.json"
+        workbook = workbook_path.read_bytes() if workbook_path.exists() else b""
         manifest = json.loads((root / "manifest.json").read_bytes())
         output = ProcessingOutput(lease.representation_id, len(canonical), "sha256:" + hashlib.sha256(canonical).hexdigest(),
-            len(preview), "sha256:" + hashlib.sha256(preview).hexdigest() if preview else None, manifest)
-        commit_processing_output(lease, output, io.BytesIO(canonical + preview))
+            len(preview), "sha256:" + hashlib.sha256(preview).hexdigest() if preview else None, manifest,
+            len(workbook), "sha256:" + hashlib.sha256(workbook).hexdigest() if workbook else None)
+        commit_processing_output(lease, output, io.BytesIO(canonical + preview + workbook))
