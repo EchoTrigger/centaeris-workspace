@@ -630,12 +630,19 @@ class StoredSessionEventResponse(StrictSchema):
     event: SessionEventResponse
 
 
+class LiveReasoningResponse(StrictSchema):
+    block_id: str = Field(alias="blockId")
+    request_id: str = Field(alias="requestId")
+    text: str
+
+
 class LiveAssistantResponse(StrictSchema):
     message_id: str = Field(alias="messageId")
     turn_id: str = Field(alias="turnId")
     after_sequence: int = Field(alias="afterSequence", ge=0)
     revision: int = Field(gt=0)
     text: str
+    reasoning: LiveReasoningResponse | None = None
 
 
 class CitationSummaryResponse(StrictSchema):

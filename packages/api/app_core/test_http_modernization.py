@@ -404,6 +404,36 @@ class NinjaContractTests(TestCase):
         self.assertEqual(response.json(), {"error": "internal_error"})
         self.assertNotContains(response, "storageKey", status_code=500)
 
+    def test_history_response_preserves_active_reasoning_from_live_state(self):
+        from pathlib import Path
+
+        user = get_user_model().objects.create_user(username="reasoning-history@example.test")
+        workspace = Workspace.objects.create(name="Reasoning history", createdBy=user)
+        workspace.members.add(user)
+        session = create_session(workspace=workspace, owner=user)
+        model = ModelConfig.objects.create(displayName="Fixture", modelName="fixture")
+        run = AgentRun.objects.create(
+            workspace=workspace, session=session, user=user, modelConfig=model, prompt="fixture",
+        )
+        create_agent_run_authorization(run, image_digest=f"sha256:{'a' * 64}")
+        corpus = Path(__file__).resolve().parents[4] / "centaeris/packages/core/tests/fixtures/live_reasoning.json"
+        reasoning = json.loads(corpus.read_text(encoding="utf-8"))
+        state = agent_run_stream._live_state({
+            "messageId": f"message:{run.turn_id}:assistant", "turnId": run.turn_id,
+            "afterSequence": "0", "revision": "1", "reasoning": json.dumps(reasoning),
+        }, "")
+        self.client.force_login(user)
+        with patch("app_core.http.workspaces.load_live_text_state", return_value=state):
+            response = self.client.get(f"/api/sessions/{session.id}/history")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["agentRuns"][0]["live"], state)
+        with patch("app_core.http.workspaces.load_live_text_state", return_value={
+            **state, "reasoning": {**reasoning, "storageKey": "private-storage-key"},
+        }):
+            invalid = self.client.get(f"/api/sessions/{session.id}/history")
+        self.assertEqual(invalid.status_code, 500)
+        self.assertNotContains(invalid, "private-storage-key", status_code=500)
+
     def test_history_filters_superseded_live_and_preserves_equal_anchor(self):
         user = get_user_model().objects.create_user(
             username="history-overlay-barrier@example.test",
