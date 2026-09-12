@@ -55,6 +55,7 @@ class MaterialCommitContractTests(SimpleTestCase):
             canonicalTextKey=self.canonical_key, canonicalTextSizeBytes=len(self.content),
             canonicalTextSha256=sha256_bytes(self.content), previewPdfKey=self.preview_key,
             previewPdfSizeBytes=len(self.preview), previewPdfSha256=sha256_bytes(self.preview),
+            workbookPreviewKey="", workbookPreviewSizeBytes=0, workbookPreviewSha256="",
             manifest=self.metadata["manifest"],
         )
         patches = {

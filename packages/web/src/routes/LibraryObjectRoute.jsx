@@ -8,13 +8,20 @@ import { ShellPage } from "../shell/ShellPage";
 import { DocumentPreview } from "../components/DocumentPreview";
 import { officeFileType } from "../chat/officeFormats.mjs";
 import { officePreviewUrl } from "../chat/attachments.mjs";
+import { codePreviewCanRender } from "../chat/codePreviewFormats.mjs";
+import SpreadsheetPreview from "../components/SpreadsheetPreview";
 
 function isImage(item) {
   return item.objectKind === "image" || item.contentType.startsWith("image/");
 }
 
 function canEmbed(item) {
-  return Boolean(officeFileType(item.displayName)) || item.contentType === "application/pdf" || item.contentType.startsWith("text/");
+  return Boolean(officeFileType(item.displayName)) || item.contentType === "application/pdf" || item.contentType.startsWith("text/") || codePreviewCanRender(item.displayName, item.contentType);
+}
+
+function isMarkdownFile(item) {
+  const contentType = String(item?.contentType || "").split(";", 1)[0].trim().toLowerCase();
+  return contentType === "text/markdown" || /\.(md|markdown)$/i.test(item?.displayName || "");
 }
 
 function splitNote(markdown, fallbackTitle) {
@@ -165,9 +172,12 @@ function LibraryPreviewPageContent() {
 
   const isNote = item?.objectKind === "note";
   const isOffice = Boolean(officeFileType(item?.displayName));
+  const isSpreadsheet = /\.xlsx$/i.test(item?.displayName || "");
+  const isMarkdown = Boolean(item && !isNote && isMarkdownFile(item));
+  const isCode = Boolean(item && !isNote && !isOffice && !isMarkdown && codePreviewCanRender(item.displayName, item.contentType));
   const displayedTitle = isNote ? noteTitle || t("libraryObjectRoute.untitled") : item?.displayName;
 
-  return <div className={`libraryPreviewMain${isOffice ? " libraryOfficePreview" : ""}`}>
+  return <div className={`libraryPreviewMain${isOffice ? " libraryOfficePreview" : ""}${isSpreadsheet ? " librarySpreadsheetPreviewPage" : ""}${isCode ? " libraryCodePreviewPage" : ""}`}>
     <span className="srOnly" role="status" aria-live="polite">{saveStatus}</span>
     <header className="libraryPreviewHeader">
       {isNote ? <nav className="libraryNoteIdentity" aria-label={t("libraryObjectRoute.notePath")}>
@@ -192,8 +202,8 @@ function LibraryPreviewPageContent() {
       </nav> : <nav aria-label={t("libraryObjectRoute.libraryPath")}><button type="button" onClick={backToLibrary}><ArrowLeft aria-hidden="true" />{t("libraryObjectRoute.library")}</button>{item && <><span>/</span><strong>{displayedTitle}</strong></>}</nav>}
       {item && !isNote && <div className="libraryPreviewActions"><a href={apiUrl(`/api/library/${item.id}/download`)} aria-label={t("workspaceContextPanel.download")}><Download aria-hidden="true" /></a><button type="button" disabled={deleting} onClick={() => void deleteItem()} aria-label={t("agentRoute.moveToTrash")}><Trash2 aria-hidden="true" /></button></div>}
     </header>
-    <section className={`libraryPreviewBody ${item?.objectKind === "note" ? "libraryNotePreview" : ""}`}>
-      {loading ? <div className="libraryEmptyState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryObjectRoute.openingFile")}</div> : <>{error && <div className="errorBanner libraryError" role="alert">{error}<button type="button" onClick={load}>{t("libraryObjectRoute.retry")}</button></div>}{isNote ? <div className="libraryNoteEditor"><textarea value={markdown} onChange={(event) => updateNote(noteTitle, event.target.value)} aria-label={t("libraryObjectRoute.noteContent")} placeholder={t("libraryObjectRoute.startWritingOrTypeForCommands")} /></div> : error ? null : isImage(item) ? <img className="libraryPreviewImage" src={apiUrl(`/api/library/${item.id}/preview`)} alt={item.displayName} /> : canEmbed(item) ? <DocumentPreview className="libraryPreviewFrame" src={officeFileType(item.displayName) ? officePreviewUrl("userLibraryObject", item.id) : apiUrl(`/api/library/${item.id}/preview`)} title={item.displayName} contentType={item.contentType} /> : <div className="libraryPreviewUnsupported"><FileText aria-hidden="true" /><strong>{item.displayName}</strong><span>{t("libraryObjectRoute.onlinePreviewIsUnavailableForThisFileType")}</span><a href={apiUrl(`/api/library/${item.id}/download`)}><Download aria-hidden="true" />{t("libraryObjectRoute.downloadFile")}</a></div>}</>}
+    <section className={`libraryPreviewBody${isNote ? " libraryNotePreview" : ""}${isMarkdown ? " isMarkdown" : ""}${isCode ? " isCode" : ""}`}>
+      {loading ? <div className="libraryEmptyState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryObjectRoute.openingFile")}</div> : <>{error && <div className="errorBanner libraryError" role="alert">{error}<button type="button" onClick={load}>{t("libraryObjectRoute.retry")}</button></div>}{isNote ? <div className="libraryNoteEditor"><textarea value={markdown} onChange={(event) => updateNote(noteTitle, event.target.value)} aria-label={t("libraryObjectRoute.noteContent")} placeholder={t("libraryObjectRoute.startWritingOrTypeForCommands")} /></div> : error ? null : isImage(item) ? <img className="libraryPreviewImage" src={apiUrl(`/api/library/${item.id}/preview`)} alt={item.displayName} /> : isSpreadsheet ? <SpreadsheetPreview className="libraryPreviewFrame" src={apiUrl(`/api/spreadsheet-preview/userLibraryObject/${item.id}`)} printSrc={officePreviewUrl("userLibraryObject", item.id)} title={item.displayName} /> : canEmbed(item) ? <DocumentPreview className={isMarkdown ? "libraryMarkdownPreview" : isCode ? "libraryCodePreview" : "libraryPreviewFrame"} src={officeFileType(item.displayName) ? officePreviewUrl("userLibraryObject", item.id) : apiUrl(`/api/library/${item.id}/preview`)} title={item.displayName} contentType={item.contentType} /> : <div className="libraryPreviewUnsupported"><FileText aria-hidden="true" /><strong>{item.displayName}</strong><span>{t("libraryObjectRoute.onlinePreviewIsUnavailableForThisFileType")}</span><a href={apiUrl(`/api/library/${item.id}/download`)}><Download aria-hidden="true" />{t("libraryObjectRoute.downloadFile")}</a></div>}</>}
     </section>
   </div>;
 }

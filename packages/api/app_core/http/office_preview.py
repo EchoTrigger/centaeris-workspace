@@ -197,3 +197,54 @@ async def office_preview(request, owner_kind: str, object_id: str, lang: str = "
     )
     response["Cache-Control"] = "no-store"
     return response
+
+
+def _spreadsheet_selection(user_id, owner_kind, object_id, lang):
+    item = _owner(user_id, owner_kind, object_id)
+    if item is None:
+        return _error("spreadsheet_preview_not_found", 404)
+    if PurePosixPath(item.displayName).suffix.lower() != ".xlsx":
+        return _error("spreadsheet_preview_unsupported", 415)
+    selected = _preview_selection(user_id, owner_kind, object_id, lang)
+    if not isinstance(selected, tuple):
+        if getattr(selected, "status_code", None) == 202:
+            refresh_url = (
+                f"/api/spreadsheet-preview/{quote(owner_kind, safe='')}/"
+                f"{quote(object_id, safe='')}?lang={lang}"
+            )
+            return _loading(item.displayName, lang, refresh_url)
+        return selected
+    representation = DerivedRepresentation.objects.filter(previewPdfKey=selected[0]).first()
+    if representation is None or not representation.workbookPreviewKey or not representation.workbookPreviewSizeBytes:
+        return _error("spreadsheet_preview_result_missing", 503)
+    return (
+        representation.workbookPreviewKey,
+        str(PurePosixPath(item.displayName).with_suffix(".json").name),
+        representation.workbookPreviewSizeBytes,
+    )
+
+
+@router.get(
+    "/spreadsheet-preview/{owner_kind}/{object_id}",
+    auth=session_auth,
+    response=None,
+)
+async def spreadsheet_preview(request, owner_kind: str, object_id: str, lang: str = "zh-CN"):
+    selected = await sync_to_async(_spreadsheet_selection, thread_sensitive=True)(
+        request.user.id,
+        owner_kind,
+        object_id,
+        lang,
+    )
+    if not isinstance(selected, tuple):
+        return selected
+    storage_key, filename, content_length = selected
+    response = await stored_file_response(
+        storage_key,
+        "application/json",
+        filename,
+        as_attachment=False,
+        content_length=content_length,
+    )
+    response["Cache-Control"] = "no-store"
+    return response

@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import unicodedata
+from datetime import date, datetime, time as datetime_time
 from collections.abc import Iterator
 from contextlib import closing
 from functools import lru_cache
@@ -26,6 +27,10 @@ MAX_OUTPUT_BYTES = 256 * 1024 * 1024
 # Leave room for the existing 64 MiB commit metadata envelope.
 MAX_MANIFEST_BYTES = 64 * 1024 * 1024 - 64 * 1024
 MAX_PAGE_TEXT_BYTES = 4 * 1024 * 1024
+MAX_WORKBOOK_PREVIEW_BYTES = 16 * 1024 * 1024
+MAX_WORKBOOK_PREVIEW_CELLS = 250_000
+MAX_WORKBOOK_PREVIEW_GRID_CELLS = 100_000
+MAX_WORKBOOK_PREVIEW_SHEETS = 100
 MODEL_MANIFEST = Path(os.environ.get("CENTAERIS_MODEL_MANIFEST", "/opt/centaeris/models/manifest.json"))
 TEXT_SUFFIXES = {
     ".txt",
@@ -446,17 +451,163 @@ def convert_office(path: Path, root: Path) -> Path:
     return candidates[0]
 
 
+def _xlsx_color(color) -> str | None:
+    if color is None or color.type != "rgb" or not isinstance(color.rgb, str):
+        return None
+    value = color.rgb.upper()
+    if len(value) == 8:
+        value = value[2:]
+    return f"#{value}" if len(value) == 6 and all(character in "0123456789ABCDEF" for character in value) else None
+
+
+def _xlsx_border(side) -> dict | None:
+    if side is None or not side.style:
+        return None
+    return {"style": side.style, "color": _xlsx_color(side.color)}
+
+
+def _xlsx_style(cell) -> dict:
+    borders = {
+        name: value
+        for name in ("top", "right", "bottom", "left")
+        if (value := _xlsx_border(getattr(cell.border, name))) is not None
+    }
+    font_color = _xlsx_color(cell.font.color)
+    fill = _xlsx_color(cell.fill.fgColor) if cell.fill.fill_type == "solid" else None
+    return {
+        "font": {"bold": bool(cell.font.bold), "italic": bool(cell.font.italic), "color": font_color},
+        "fill": fill,
+        "horizontal": cell.alignment.horizontal,
+        "vertical": cell.alignment.vertical,
+        "wrapText": bool(cell.alignment.wrap_text),
+        "borders": borders,
+    }
+
+
+def _xlsx_cell_value(value) -> tuple[str, str]:
+    if value is None:
+        return "", "blank"
+    if isinstance(value, datetime):
+        if value.time() == datetime_time():
+            return value.date().isoformat(), "date"
+        return value.isoformat(timespec="seconds"), "date"
+    if isinstance(value, date):
+        return value.isoformat(), "date"
+    if isinstance(value, datetime_time):
+        return value.isoformat(timespec="seconds"), "date"
+    if isinstance(value, bool):
+        return ("TRUE" if value else "FALSE"), "boolean"
+    if isinstance(value, (int, float)):
+        return str(value), "number"
+    return str(value), "text"
+
+
+def workbook_preview(path: Path) -> dict | None:
+    """Return a bounded, inert workbook model; formulas are never evaluated."""
+    from openpyxl import load_workbook
+    from openpyxl.cell.cell import MergedCell
+
+    try:
+        workbook = load_workbook(path, read_only=False, data_only=False, keep_links=False)
+        cached = load_workbook(path, read_only=False, data_only=True, keep_links=False)
+    except Exception as error:
+        raise ProcessingError("spreadsheet workbook is invalid") from error
+    if len(workbook.worksheets) > MAX_WORKBOOK_PREVIEW_SHEETS:
+        workbook.close()
+        cached.close()
+        return None
+    styles, style_ids, sheets, cell_count = [], {}, [], 0
+    try:
+        for sheet_index, sheet in enumerate(workbook.worksheets):
+            cached_sheet = cached.worksheets[sheet_index]
+            max_row = max([sheet.max_row, *sheet.row_dimensions.keys()], default=1)
+            max_column = max(sheet.max_column, 1)
+            if sheet.column_dimensions:
+                max_column = max(max_column, *(dimension.max for dimension in sheet.column_dimensions.values()))
+            if max_row * max_column > MAX_WORKBOOK_PREVIEW_GRID_CELLS:
+                return None
+            rows = []
+            for row_index in range(1, max_row + 1):
+                dimension = sheet.row_dimensions.get(row_index)
+                row = []
+                for cell in sheet[row_index]:
+                    if isinstance(cell, MergedCell) or cell.value is None:
+                        continue
+                    cell_count += 1
+                    if cell_count > MAX_WORKBOOK_PREVIEW_CELLS:
+                        return None
+                    value, kind = _xlsx_cell_value(cell.value)
+                    formula = value if cell.data_type == "f" else None
+                    if formula is not None:
+                        cached_value = cached_sheet.cell(cell.row, cell.column).value
+                        value, kind = _xlsx_cell_value(cached_value if cached_value is not None else cell.value)
+                        kind = "formula"
+                    style = _xlsx_style(cell)
+                    style_key = json.dumps(style, sort_keys=True, separators=(",", ":"))
+                    if style_key not in style_ids:
+                        style_ids[style_key] = len(styles)
+                        styles.append(style)
+                    row.append({
+                        "column": cell.column,
+                        "displayValue": value,
+                        "kind": kind,
+                        "formula": formula,
+                        "numberFormat": cell.number_format,
+                        "styleId": style_ids[style_key],
+                    })
+                if row or dimension is not None:
+                    rows.append({
+                        "index": row_index,
+                        "heightPx": round(dimension.height * 96 / 72) if dimension and dimension.height else None,
+                        "hidden": bool(dimension.hidden) if dimension else False,
+                        "cells": row,
+                    })
+            columns = []
+            for dimension in sheet.column_dimensions.values():
+                for column_index in range(dimension.min, dimension.max + 1):
+                    columns.append({
+                        "index": column_index,
+                        "widthPx": round(float(dimension.width) * 7 + 5) if dimension.width else None,
+                        "hidden": bool(dimension.hidden),
+                    })
+            sheets.append({
+                "name": sheet.title,
+                "state": sheet.sheet_state,
+                "maxRow": max_row,
+                "maxColumn": max_column,
+                "frozenPane": str(sheet.freeze_panes) if sheet.freeze_panes else None,
+                "columns": columns,
+                "rows": rows,
+                "merges": [{
+                    "startRow": merged.min_row,
+                    "startColumn": merged.min_col,
+                    "endRow": merged.max_row,
+                    "endColumn": merged.max_col,
+                } for merged in sheet.merged_cells.ranges],
+            })
+        result = {"schema": "knowledge.workbook_preview.v1", "styles": styles, "sheets": sheets}
+        if len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > MAX_WORKBOOK_PREVIEW_BYTES:
+            return None
+        return result
+    finally:
+        workbook.close()
+        cached.close()
+
+
 def write_bounded(output, content: bytes, maximum: int) -> None:
     if output.tell() + len(content) > maximum:
         raise ProcessingError(f"{Path(output.name).name} exceeds the output byte limit")
     output.write(content)
 
 
-def write_outputs(display_name: str, pages: Iterator[dict], output: Path, preview: Path | None) -> int:
+def write_outputs(display_name: str, pages: Iterator[dict], output: Path, preview: Path | None, workbook: dict | None = None) -> int:
     preview_size = preview.stat().st_size if preview else 0
-    if preview_size > MAX_OUTPUT_BYTES:
+    workbook_bytes = json.dumps(workbook, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8") if workbook else b""
+    if len(workbook_bytes) > MAX_WORKBOOK_PREVIEW_BYTES:
+        raise ProcessingError("workbook.json exceeds the output byte limit")
+    if preview_size + len(workbook_bytes) > MAX_OUTPUT_BYTES:
         raise ProcessingError("preview.pdf exceeds the output byte limit")
-    canonical_limit = MAX_OUTPUT_BYTES - preview_size
+    canonical_limit = MAX_OUTPUT_BYTES - preview_size - len(workbook_bytes)
     encoder = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     # Stage every output until processing and all budgets succeed. Runtime only
     # commits after a successful process exit; failed pages never become ready.
@@ -501,7 +652,9 @@ def write_outputs(display_name: str, pages: Iterator[dict], output: Path, previe
             with preview.open("rb") as source, (root / "preview.pdf").open("wb") as target:
                 while chunk := source.read(64 * 1024):
                     write_bounded(target, chunk, MAX_OUTPUT_BYTES - canonical_size)
-        for name in ("canonical.md", "preview.pdf", "manifest.json"):
+        if workbook_bytes:
+            (root / "workbook.json").write_bytes(workbook_bytes)
+        for name in ("canonical.md", "preview.pdf", "workbook.json", "manifest.json"):
             if (root / name).is_file():
                 os.replace(root / name, output / name)
     return page_count
@@ -532,6 +685,7 @@ def process(request_path: Path) -> None:
     suffix = Path(display_name).suffix.lower()
     with tempfile.TemporaryDirectory(prefix="centaeris-process-") as directory:
         preview = None
+        workbook = None
         if suffix in TEXT_SUFFIXES:
             pages = process_text(source)
         elif suffix == ".pdf" or request["contentType"] == "application/pdf":
@@ -539,12 +693,14 @@ def process(request_path: Path) -> None:
         elif suffix in IMAGE_SUFFIXES or str(request["contentType"]).startswith("image/"):
             pages = process_image(source)
         elif suffix in OFFICE_SUFFIXES:
+            if suffix == ".xlsx":
+                workbook = workbook_preview(source)
             preview = convert_office(source, Path(directory))
             pages = process_pdf(preview)
         else:
             raise ProcessingError(f"unsupported document type: {suffix or 'none'}")
         with closing(pages):
-            page_count = write_outputs(display_name, pages, output, preview)
+            page_count = write_outputs(display_name, pages, output, preview, workbook)
     print(f"document processing completed: pageCount={page_count}; elapsedMs={round((time.monotonic() - started) * 1000)}", file=sys.stderr, flush=True)
 
 

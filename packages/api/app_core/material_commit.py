@@ -6,6 +6,8 @@ not authenticate transport credentials or implement MCP task scheduling.
 """
 
 from dataclasses import dataclass
+import json
+import re
 
 from django.db import transaction
 
@@ -28,16 +30,18 @@ class ProcessingOutput:
     preview_size_bytes: int
     preview_sha256: str | None
     manifest: dict
+    workbook_size_bytes: int = 0
+    workbook_sha256: str | None = None
 
 
 def validate_commit(commit: ProcessingOutput) -> None:
-    for name in ["canonical_size_bytes", "preview_size_bytes"]:
+    for name in ["canonical_size_bytes", "preview_size_bytes", "workbook_size_bytes"]:
         value = getattr(commit, name)
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise KnowledgeError("knowledge_commit_size_invalid", 400)
     if (
         commit.canonical_size_bytes <= 0
-        or commit.canonical_size_bytes + commit.preview_size_bytes > MAX_OUTPUT_BYTES
+        or commit.canonical_size_bytes + commit.preview_size_bytes + commit.workbook_size_bytes > MAX_OUTPUT_BYTES
     ):
         raise KnowledgeError("knowledge_commit_size_invalid", 400)
     require_sha256("canonicalSha256", commit.canonical_sha256)
@@ -45,6 +49,10 @@ def validate_commit(commit: ProcessingOutput) -> None:
         require_sha256("previewSha256", commit.preview_sha256)
     elif commit.preview_sha256 is not None:
         raise KnowledgeError("knowledge_commit_preview_identity_invalid", 400)
+    if commit.workbook_size_bytes:
+        require_sha256("workbookSha256", commit.workbook_sha256)
+    elif commit.workbook_sha256 is not None:
+        raise KnowledgeError("knowledge_commit_workbook_identity_invalid", 400)
 
 
 def commit_bound_material(bound, specification, spec_digest, commit, stream, *, published=None, storage_keys=None):
@@ -61,8 +69,9 @@ def commit_bound_material(bound, specification, spec_digest, commit, stream, *, 
     ).first()
     canonical_key = _canonical_key(bound.representation_id)
     preview_key = _preview_key(bound.representation_id) if commit.preview_size_bytes else ""
+    workbook_key = _workbook_key(bound.representation_id) if commit.workbook_size_bytes else ""
     if storage_keys is not None:
-        canonical_key, preview_key = storage_keys
+        canonical_key, preview_key, workbook_key = storage_keys
     created = []
     try:
         canonical_created = store_stream(
@@ -82,6 +91,15 @@ def commit_bound_material(bound, specification, spec_digest, commit, stream, *, 
             )
             if preview_created:
                 created.append(preview_key)
+        if workbook_key:
+            workbook_created = store_stream(
+                stream,
+                workbook_key,
+                commit.workbook_size_bytes,
+                commit.workbook_sha256,
+            )
+            if workbook_created:
+                created.append(workbook_key)
         if stream.read(1):
             raise KnowledgeError("knowledge_commit_body_has_trailing_bytes", 400)
         canonical = read_stored(
@@ -89,10 +107,17 @@ def commit_bound_material(bound, specification, spec_digest, commit, stream, *, 
             commit.canonical_size_bytes,
             commit.canonical_sha256,
         )
+        if workbook_key:
+            workbook = read_stored(
+                workbook_key,
+                commit.workbook_size_bytes,
+                commit.workbook_sha256,
+            )
+            _validate_workbook_preview(workbook)
         manifest = commit.manifest
         _validate_manifest(manifest, canonical)
         if existing is not None:
-            _require_existing_representation(existing, bound, commit, spec_digest, canonical_key, preview_key)
+            _require_existing_representation(existing, bound, commit, spec_digest, canonical_key, preview_key, workbook_key)
             if published is not None:
                 with transaction.atomic():
                     published()
@@ -118,6 +143,9 @@ def commit_bound_material(bound, specification, spec_digest, commit, stream, *, 
                 previewPdfKey=preview_key,
                 previewPdfSizeBytes=commit.preview_size_bytes,
                 previewPdfSha256=commit.preview_sha256 or "",
+                workbookPreviewKey=workbook_key,
+                workbookPreviewSizeBytes=commit.workbook_size_bytes,
+                workbookPreviewSha256=commit.workbook_sha256 or "",
                 manifest=manifest,
             )
             KnowledgeSegment.objects.bulk_create(
@@ -126,6 +154,8 @@ def commit_bound_material(bound, specification, spec_digest, commit, stream, *, 
             register_derived_resource(bound.owner, "storageObject", canonical_key)
             if preview_key:
                 register_derived_resource(bound.owner, "storageObject", preview_key)
+            if workbook_key:
+                register_derived_resource(bound.owner, "storageObject", workbook_key)
             if published is not None:
                 published()
         return _commit_response(representation)
@@ -254,6 +284,119 @@ def _validate_manifest(manifest: dict, canonical: bytes):
         previous_end_line = page["canonicalEndLine"]
 
 
+def _validate_workbook_preview(payload: bytes) -> None:
+    try:
+        workbook = json.loads(payload.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise KnowledgeError("knowledge_workbook_preview_invalid", 400) from error
+    if (
+        not isinstance(workbook, dict)
+        or set(workbook) != {"schema", "styles", "sheets"}
+        or workbook.get("schema") != "knowledge.workbook_preview.v1"
+        or not isinstance(workbook["styles"], list)
+        or not isinstance(workbook["sheets"], list)
+        or not workbook["sheets"]
+        or len(workbook["sheets"]) > 100
+    ):
+        raise KnowledgeError("knowledge_workbook_preview_invalid", 400)
+    if any(not _valid_workbook_style(style) for style in workbook["styles"]):
+        raise KnowledgeError("knowledge_workbook_preview_invalid", 400)
+    for sheet in workbook["sheets"]:
+        if (
+            not isinstance(sheet, dict)
+            or set(sheet) != {"name", "state", "maxRow", "maxColumn", "frozenPane", "columns", "rows", "merges"}
+            or not isinstance(sheet["name"], str)
+            or not sheet["name"]
+            or sheet["state"] not in {"visible", "hidden", "veryHidden"}
+            or not _positive_int(sheet["maxRow"], 1_048_576)
+            or not _positive_int(sheet["maxColumn"], 16_384)
+            or sheet["maxRow"] * sheet["maxColumn"] > 100_000
+            or sheet["frozenPane"] is not None and (
+                not isinstance(sheet["frozenPane"], str)
+                or re.fullmatch(r"[A-Z]{1,3}[1-9][0-9]{0,6}", sheet["frozenPane"]) is None
+            )
+            or not isinstance(sheet["columns"], list)
+            or not isinstance(sheet["rows"], list)
+            or not isinstance(sheet["merges"], list)
+            or any(not _valid_workbook_column(column, sheet["maxColumn"]) for column in sheet["columns"])
+            or any(not _valid_workbook_row(row, sheet["maxRow"], sheet["maxColumn"], len(workbook["styles"])) for row in sheet["rows"])
+            or any(not _valid_workbook_merge(merge, sheet["maxRow"], sheet["maxColumn"]) for merge in sheet["merges"])
+        ):
+            raise KnowledgeError("knowledge_workbook_preview_invalid", 400)
+
+
+def _valid_color(value) -> bool:
+    return value is None or isinstance(value, str) and re.fullmatch(r"#[0-9A-F]{6}", value) is not None
+
+
+def _valid_workbook_style(style) -> bool:
+    if not isinstance(style, dict) or set(style) != {"font", "fill", "horizontal", "vertical", "wrapText", "borders"}:
+        return False
+    font, borders = style["font"], style["borders"]
+    return (
+        isinstance(font, dict)
+        and set(font) == {"bold", "italic", "color"}
+        and isinstance(font["bold"], bool)
+        and isinstance(font["italic"], bool)
+        and _valid_color(font["color"])
+        and _valid_color(style["fill"])
+        and (style["horizontal"] is None or style["horizontal"] in {"left", "center", "right", "general", "fill", "justify", "centerContinuous", "distributed"})
+        and (style["vertical"] is None or style["vertical"] in {"top", "center", "bottom", "justify", "distributed"})
+        and isinstance(style["wrapText"], bool)
+        and isinstance(borders, dict)
+        and set(borders) <= {"top", "right", "bottom", "left"}
+        and all(isinstance(border, dict) and set(border) == {"style", "color"} and isinstance(border["style"], str) and _valid_color(border["color"]) for border in borders.values())
+    )
+
+
+def _valid_workbook_column(column, maximum) -> bool:
+    return (
+        isinstance(column, dict)
+        and set(column) == {"index", "widthPx", "hidden"}
+        and _positive_int(column["index"], maximum)
+        and (column["widthPx"] is None or _positive_int(column["widthPx"], 10_000))
+        and isinstance(column["hidden"], bool)
+    )
+
+
+def _valid_workbook_row(row, maximum_row, maximum_column, style_count) -> bool:
+    if (
+        not isinstance(row, dict)
+        or set(row) != {"index", "heightPx", "hidden", "cells"}
+        or not _positive_int(row["index"], maximum_row)
+        or row["heightPx"] is not None and not _positive_int(row["heightPx"], 10_000)
+        or not isinstance(row["hidden"], bool)
+        or not isinstance(row["cells"], list)
+    ):
+        return False
+    return all(
+        isinstance(cell, dict)
+        and set(cell) == {"column", "displayValue", "kind", "formula", "numberFormat", "styleId"}
+        and _positive_int(cell["column"], maximum_column)
+        and isinstance(cell["displayValue"], str)
+        and len(cell["displayValue"].encode("utf-8")) <= 4 * 1024 * 1024
+        and cell["kind"] in {"text", "number", "date", "boolean", "formula", "blank"}
+        and (cell["formula"] is None or isinstance(cell["formula"], str))
+        and isinstance(cell["numberFormat"], str)
+        and isinstance(cell["styleId"], int) and not isinstance(cell["styleId"], bool)
+        and 0 <= cell["styleId"] < style_count
+        for cell in row["cells"]
+    )
+
+
+def _valid_workbook_merge(merge, maximum_row, maximum_column) -> bool:
+    return (
+        isinstance(merge, dict)
+        and set(merge) == {"startRow", "startColumn", "endRow", "endColumn"}
+        and _positive_int(merge["startRow"], maximum_row)
+        and _positive_int(merge["endRow"], maximum_row)
+        and _positive_int(merge["startColumn"], maximum_column)
+        and _positive_int(merge["endColumn"], maximum_column)
+        and merge["startRow"] <= merge["endRow"]
+        and merge["startColumn"] <= merge["endColumn"]
+    )
+
+
 def _positive_int(value, maximum: int) -> bool:
     return (
         isinstance(value, int)
@@ -287,7 +430,7 @@ def _valid_page_text_span(span) -> bool:
     )
 
 
-def _require_existing_representation(existing, bound, commit, spec_digest, canonical_key, preview_key):
+def _require_existing_representation(existing, bound, commit, spec_digest, canonical_key, preview_key, workbook_key):
     require_representation_input(existing, bound)
     if (
         existing.processingSpecification_id != spec_digest
@@ -297,6 +440,9 @@ def _require_existing_representation(existing, bound, commit, spec_digest, canon
         or existing.previewPdfKey != preview_key
         or existing.previewPdfSizeBytes != commit.preview_size_bytes
         or existing.previewPdfSha256 != (commit.preview_sha256 or "")
+        or existing.workbookPreviewKey != workbook_key
+        or existing.workbookPreviewSizeBytes != commit.workbook_size_bytes
+        or existing.workbookPreviewSha256 != (commit.workbook_sha256 or "")
         or existing.manifest != commit.manifest
     ):
         raise KnowledgeError("knowledge_representation_identity_conflict")
@@ -316,3 +462,7 @@ def _canonical_key(representation_id: str) -> str:
 
 def _preview_key(representation_id: str) -> str:
     return f"knowledge/{representation_id.removeprefix('representation:sha256:')}/preview.pdf"
+
+
+def _workbook_key(representation_id: str) -> str:
+    return f"knowledge/{representation_id.removeprefix('representation:sha256:')}/workbook.json"

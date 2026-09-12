@@ -1,7 +1,8 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { useTranslation } from "../i18n";
-import { MarkdownContent } from "../chat/MarkdownContent";
+import { codePreviewCanRender } from "../chat/codePreviewFormats.mjs";
 import { officeFileType } from "../chat/officeFormats.mjs";
+import { TextFilePreview } from "./TextFilePreview";
 
 const OfficePreview = lazy(() => import("./OfficePreview"));
 
@@ -9,7 +10,7 @@ export function DocumentPreview({ src, title, contentType = "", className = "" }
   const { t } = useTranslation();
   const [state, setState] = useState({ src: "", text: "", error: false });
   const office = Boolean(officeFileType(title));
-  const text = !office && contentType.startsWith("text/");
+  const text = !office && (contentType.startsWith("text/") || codePreviewCanRender(title, contentType));
   useEffect(() => {
     if (!text) return;
     const abort = new AbortController();
@@ -26,6 +27,5 @@ export function DocumentPreview({ src, title, contentType = "", className = "" }
   if (!text) return <iframe className={className} src={src} title={title} />;
   if (state.src !== src) return <div role="status">{t("workspaceContextPanel.loadingReferenceFile")}</div>;
   if (state.error) return <div role="alert">{t("appRoute.unableToLoadThisFile")}</div>;
-  return <div className={`documentTextPreview ${className}`}>{contentType.split(";", 1)[0] === "text/markdown"
-    ? <MarkdownContent text={state.text} /> : <pre>{state.text}</pre>}</div>;
+  return <TextFilePreview className={className} content={state.text} contentType={contentType} title={title} renderMarkdown />;
 }

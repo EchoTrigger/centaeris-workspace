@@ -1,4 +1,6 @@
+import json
 import logging
+from pathlib import Path
 
 from asgiref.sync import sync_to_async
 from django.http import JsonResponse
@@ -33,6 +35,46 @@ CITATION_PREVIEW_CONTENT_TYPES = {
     "text/markdown",
     "text/plain",
 }
+
+def _load_code_preview_catalog() -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    path = Path(__file__).resolve().parents[3] / "code_preview_languages.json"
+    catalog = json.loads(path.read_text(encoding="utf-8"))
+    if set(catalog) != {"schema", "languages"} or catalog["schema"] != "centaeris.code_preview_languages.v1":
+        raise RuntimeError("invalid code preview language catalog")
+    extensions: set[str] = set()
+    exact_names: set[str] = set()
+    content_types: set[str] = set()
+    language_ids: set[str] = set()
+    for language in catalog["languages"]:
+        if set(language) != {"id", "extensions", "exactNames", "contentTypes"}:
+            raise RuntimeError("invalid code preview language entry")
+        language_id = language["id"]
+        values = [language_id, *language["extensions"], *language["exactNames"], *language["contentTypes"]]
+        if not all(isinstance(value, str) and value and value == value.lower() for value in values):
+            raise RuntimeError("code preview language values must be non-empty lowercase strings")
+        if language_id in language_ids:
+            raise RuntimeError("duplicate code preview language id")
+        language_ids.add(language_id)
+        extensions.update(language["extensions"])
+        exact_names.update(language["exactNames"])
+        content_types.update(language["contentTypes"])
+    return frozenset(extensions), frozenset(exact_names), frozenset(content_types)
+
+
+CODE_PREVIEW_EXTENSIONS, CODE_PREVIEW_EXACT_NAMES, CODE_PREVIEW_CONTENT_TYPES = _load_code_preview_catalog()
+
+
+def _is_code_preview(filename: str, content_type: str) -> bool:
+    normalized_name = filename.strip().replace("\\", "/").rsplit("/", 1)[-1].lower()
+    extension = normalized_name.rsplit(".", 1)[-1] if "." in normalized_name else ""
+    normalized_content_type = content_type.partition(";")[0].strip().lower()
+    return (
+        normalized_name in CODE_PREVIEW_EXACT_NAMES
+        or extension in CODE_PREVIEW_EXTENSIONS
+        or normalized_content_type in CODE_PREVIEW_CONTENT_TYPES
+    )
+
+
 @router.get(
     "/artifacts/{artifact_id}/download",
     auth=session_auth,
@@ -172,9 +214,12 @@ def _select_library_object(user_id: int, library_object_id: str, *, preview: boo
         item = UserLibraryObject.objects.get(**filters)
     except UserLibraryObject.DoesNotExist:
         return JsonResponse({"error": "library_object_not_found"}, status=404)
+    content_type = item.contentType
+    if preview and _is_code_preview(item.displayName, content_type):
+        content_type = "text/plain"
     return (
         item.storageKey,
-        item.contentType,
+        content_type,
         item.displayName,
         not preview,
         item.sizeBytes,
@@ -298,6 +343,8 @@ def _select_citation_preview(user_id: int, citation_id: str):
     content_type = item.contentType.partition(";")[0].strip().lower()
     if content_type in CITATION_PREVIEW_CONTENT_TYPES:
         return item.storageKey, content_type, item.displayName, False, item.sizeBytes
+    if _is_code_preview(item.displayName, content_type):
+        return item.storageKey, "text/plain", item.displayName, False, item.sizeBytes
     return JsonResponse({"error": "citation_preview_unsupported"}, status=415)
 
 

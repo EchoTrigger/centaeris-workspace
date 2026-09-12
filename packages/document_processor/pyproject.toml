@@ -4,6 +4,7 @@ version = "1.0.0"
 license = "AGPL-3.0-only"
 requires-python = "==3.12.10"
 dependencies = [
+  "openpyxl==3.1.5",
   "paddleocr==3.7.0",
   "pillow==12.3.0",
   "pypdfium2==5.12.1",

@@ -70,7 +70,7 @@ class OfficePreviewTests(TestCase):
     def representation(self, item=None, kind="userLibraryObject"):
         return representation_id(self.identity(item, kind), self.spec_digest)
 
-    def publish_preview(self, item=None, kind="userLibraryObject"):
+    def publish_preview(self, item=None, kind="userLibraryObject", workbook=False):
         item = item or self.item
         return DerivedRepresentation.objects.create(
             representationId=self.representation(item, kind),
@@ -86,8 +86,27 @@ class OfficePreviewTests(TestCase):
             previewPdfKey="knowledge/report/preview.pdf",
             previewPdfSizeBytes=8,
             previewPdfSha256="sha256:" + "f" * 64,
+            workbookPreviewKey="knowledge/report/workbook.json" if workbook else "",
+            workbookPreviewSizeBytes=10 if workbook else 0,
+            workbookPreviewSha256="sha256:" + "1" * 64 if workbook else "",
             manifest={"schema": "knowledge.derived_manifest.v1", "pages": [], "pageCount": 1},
         )
+
+    def test_xlsx_table_preview_streams_the_inert_workbook_model(self):
+        self.item.displayName = "预算.xlsx"
+        self.item.contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        self.item.save(update_fields=["displayName", "contentType"])
+        self.publish_preview(workbook=True)
+
+        async def chunks():
+            yield b'{"schema":1}'
+
+        with patch.object(storage_stream, "open_storage_stream", new=AsyncMock(return_value=chunks())):
+            response = self.client.get(f"/api/spreadsheet-preview/userLibraryObject/{self.item.pk}")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response["Content-Type"], "application/json")
+            self.assertEqual(response["Content-Length"], "10")
+            self.assertTrue(response["Content-Disposition"].startswith("inline;"))
 
     @patch("app_core.material_task_source.default_storage.exists", return_value=True)
     def test_missing_preview_enqueues_exact_file_version_and_returns_local_loading_page(self, _exists):

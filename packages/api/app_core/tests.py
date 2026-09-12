@@ -5469,6 +5469,43 @@ class WorkspaceAssetAcceptanceTests(TestCase):
             {"error": "citation_preview_unsupported"},
         )
 
+    def test_citation_preview_streams_octet_stream_source_code_as_plain_text(self):
+        content = b"export const preview = true;\n"
+        self.allowedObject.displayPath = "src/preview.ts"
+        self.allowedObject.displayName = "preview.ts"
+        self.allowedObject.contentType = "application/octet-stream"
+        self.prepare_allowed_source_input(content)
+        agent_run = AgentRun.objects.create(
+            workspace=self.workspace,
+            session=self.session,
+            user=self.member,
+            modelConfig=self.model,
+            prompt="preview source code",
+        )
+        citation = SessionCitationProjection.objects.create(
+            citationId="citation:preview-source-code",
+            workspace=self.workspace,
+            session=self.session,
+            agent_run=agent_run,
+            sequence=1,
+            inputRef="opaque-source-code",
+            ownerRef=self.allowedObject.id,
+            ownerKind="sourceObject",
+            displayName=self.allowedObject.displayName,
+            evidenceKind="workspaceSource",
+            ownerSha256=self.allowedObject.sha256,
+            sourceToolCallId="call-preview-source-code",
+            locator={"startLine": 1, "endLine": 1},
+        )
+        self.client.force_login(self.member)
+
+        preview = self.client.get(f"/api/citations/{citation.citationId}/preview")
+
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview["Content-Type"], "text/plain; charset=utf-8")
+        self.assertNotIn("attachment", preview["Content-Disposition"].lower())
+        self.assertEqual(streaming_response_bytes(preview), content)
+
     def test_citation_preview_supports_the_bound_user_library_object(self):
         content = b"Personal evidence"
         storageKey, sizeBytes, sha256 = self.store_bytes(
@@ -5952,6 +5989,31 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         preview = self.client.get(f"/api/library/{item['id']}/preview")
         self.assertEqual(preview.status_code, 200)
         self.assertNotIn("attachment", preview["Content-Disposition"].lower())
+
+    def test_user_library_source_code_preview_is_safe_inline_text(self):
+        self.client.force_login(self.member)
+        content = b"export const preview = true;\n"
+        uploaded = self.client.post(
+            "/api/library",
+            data={
+                "files": [
+                    SimpleUploadedFile(
+                        "preview.tsx",
+                        content,
+                        content_type="application/octet-stream",
+                    )
+                ]
+            },
+        )
+        self.assertEqual(uploaded.status_code, 201)
+        item = uploaded.json()["objects"][0]
+
+        preview = self.client.get(f"/api/library/{item['id']}/preview")
+
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview["Content-Type"], "text/plain; charset=utf-8")
+        self.assertNotIn("attachment", preview["Content-Disposition"].lower())
+        self.assertEqual(streaming_response_bytes(preview), content)
 
     def test_library_folders_and_notes_preserve_acyclic_lifecycle(self):
         self.client.force_login(self.member)

@@ -4,6 +4,7 @@ import os
 import tempfile
 import tracemalloc
 import unittest
+from datetime import date
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
@@ -118,6 +119,58 @@ class DocumentProcessorTests(unittest.TestCase):
         self.assertTrue(
             processor.native_text_is_usable("A complete policy sentence with useful text.")
         )
+
+    def test_xlsx_preview_preserves_workbook_structure_and_safe_styles(self):
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "budget.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "预算"
+            sheet.freeze_panes = "B2"
+            sheet.merge_cells("A1:C1")
+            sheet["A1"] = "差旅预算"
+            sheet["A1"].font = Font(bold=True, color="FFFFFFFF")
+            sheet["A1"].fill = PatternFill("solid", fgColor="FF1F4E78")
+            sheet["A1"].alignment = Alignment(horizontal="center", wrap_text=True)
+            sheet["A1"].border = Border(bottom=Side(style="thin", color="FF000000"))
+            sheet["A2"], sheet["B2"], sheet["C2"] = "日期", "项目", "金额"
+            sheet["A3"], sheet["B3"], sheet["C3"] = date(2026, 9, 11), "住宿", 680
+            sheet["A3"].number_format = "yyyy-mm-dd"
+            sheet["C3"].number_format = '¥#,##0.00'
+            sheet.column_dimensions["B"].width = 24
+            sheet.row_dimensions[1].height = 28
+            sheet.column_dimensions["C"].hidden = True
+            sheet.row_dimensions[4].hidden = True
+            workbook.create_sheet("明细")["A1"] = "第二张表"
+            workbook.save(path)
+
+            preview = processor.workbook_preview(path)
+
+        self.assertEqual(preview["schema"], "knowledge.workbook_preview.v1")
+        self.assertEqual([sheet["name"] for sheet in preview["sheets"]], ["预算", "明细"])
+        budget = preview["sheets"][0]
+        self.assertEqual(budget["frozenPane"], "B2")
+        self.assertEqual(budget["merges"], [{"startRow": 1, "startColumn": 1, "endRow": 1, "endColumn": 3}])
+        self.assertEqual(budget["columns"], [
+            {"index": 2, "widthPx": 173, "hidden": False},
+            {"index": 3, "widthPx": 96, "hidden": True},
+        ])
+        self.assertEqual(budget["rows"][0]["heightPx"], 37)
+        self.assertTrue(budget["rows"][3]["hidden"])
+        cells = {(row["index"], cell["column"]): cell for row in budget["rows"] for cell in row["cells"]}
+        self.assertEqual(cells[(3, 1)]["displayValue"], "2026-09-11")
+        self.assertEqual(cells[(3, 1)]["kind"], "date")
+        self.assertEqual(cells[(3, 3)]["displayValue"], "680")
+        self.assertEqual(cells[(3, 3)]["numberFormat"], '¥#,##0.00')
+        title_style = preview["styles"][cells[(1, 1)]["styleId"]]
+        self.assertEqual(title_style["font"], {"bold": True, "italic": False, "color": "#FFFFFF"})
+        self.assertEqual(title_style["fill"], "#1F4E78")
+        self.assertEqual(title_style["horizontal"], "center")
+        self.assertTrue(title_style["wrapText"])
+        self.assertEqual(title_style["borders"]["bottom"], {"style": "thin", "color": "#000000"})
 
     def test_text_processing_writes_atomic_canonical_page_manifest(self):
         with tempfile.TemporaryDirectory() as directory:

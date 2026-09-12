@@ -8,6 +8,7 @@ import { WorkspaceContextPanel } from "../components/WorkspaceContextPanel";
 import { DocumentPreview } from "../components/DocumentPreview";
 import { officeFileType } from "../chat/officeFormats.mjs";
 import { officePreviewUrl } from "../chat/attachments.mjs";
+import { codePreviewCanRender } from "../chat/codePreviewFormats.mjs";
 import { ContextUsagePicker } from "../components/ContextUsagePicker";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { useModalDialog } from "../components/useModalDialog";
@@ -1009,8 +1010,8 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       const previewResponse = await apiResponse(detail.previewUrl);
       const contentType = (previewResponse.headers.get("Content-Type") || "").split(";", 1)[0].trim().toLowerCase();
       let preview;
-      if (contentType === "text/plain" || contentType === "text/markdown") {
-        preview = { kind: "text", content: await previewResponse.text(), objectUrl: "" };
+      if (contentType === "text/plain" || contentType === "text/markdown" || codePreviewCanRender(detail.displayName, contentType)) {
+        preview = { kind: "text", content: await previewResponse.text(), contentType, objectUrl: "" };
       } else if (contentType === "application/pdf") {
         const objectUrl = URL.createObjectURL(await previewResponse.blob());
         const pageNumber = Number.isInteger(detail.locator?.page)
@@ -1088,9 +1089,10 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       const contentLength = Number(previewResponse.headers.get("Content-Length") || "");
       let preview;
       const previewable = !Number.isNaN(contentLength) && contentLength > 0 && contentLength <= ARTIFACT_PREVIEW_MAX_BYTES;
-      if (previewable && ARTIFACT_PREVIEW_CONTENT_TYPES.has(contentType)) {
-        if (contentType === "text/plain" || contentType === "text/markdown") {
-          preview = { kind: "text", content: await previewResponse.text(), objectUrl: "" };
+      const codePreviewable = codePreviewCanRender(artifact.filename, contentType);
+      if (previewable && (ARTIFACT_PREVIEW_CONTENT_TYPES.has(contentType) || codePreviewable)) {
+        if (contentType === "text/plain" || contentType === "text/markdown" || codePreviewable) {
+          preview = { kind: "text", content: await previewResponse.text(), contentType, objectUrl: "" };
         } else if (contentType === "application/pdf") {
           const objectUrl = URL.createObjectURL(await previewResponse.blob());
           preview = { kind: "pdf", objectUrl, src: objectUrl };
