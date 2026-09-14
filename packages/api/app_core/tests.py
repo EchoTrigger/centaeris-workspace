@@ -1,4 +1,3 @@
-import base64
 import hashlib
 import io
 import json
@@ -102,7 +101,7 @@ from .deferred_input import resolve_deferred_input
 from .agent_run_authorization_factory import (
     create_agent_run_authorization as create_agent_run_authorization_with_image,
 )
-from .runtime_client import build_agent_run_start
+from .runtime_client import TranscriptRuntimeError, build_agent_run_start
 from .session_event import (
     project_committed_agent_run,
     rebuild_agent_run_citation_projection,
@@ -457,9 +456,12 @@ class ApiVerticalSliceTests(TransactionTestCase):
         append_started(agent_run)
         self.client.force_login(user)
 
-        history = self.client.get(f"/api/sessions/{session.id}/history")
-        self.assertEqual(history.status_code, 200, history.content)
-        cursor = history.json()["agentRuns"][0]["streamCursor"]
+        active = self.client.get(
+            f"/api/sessions/{session.id}/transcript/active-agent-run",
+            {"sourceHighWater": "2"},
+        )
+        self.assertEqual(active.status_code, 200, active.content)
+        cursor = active.json()["agentRun"]["streamCursor"]
         self.assertEqual(
             agent_run_stream.parse_last_event_cursor(cursor, agent_run.id), 2
         )
@@ -508,7 +510,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
             400,
         )
 
-    def test_model_request_storage_refs_never_reach_history_or_sse(self):
+    def test_model_request_storage_refs_never_reach_sse(self):
         user = User.objects.create_user(
             username="model-request-ref@example.com", password="password"
         )
@@ -563,18 +565,12 @@ class ApiVerticalSliceTests(TransactionTestCase):
         project_committed_agent_run(agent_run, "completed")
         self.client.force_login(user)
 
-        history = self.client.get(f"/api/sessions/{session.id}/history")
         stream_response = self.client.get(
             f"/api/sessions/{session.id}/agent-runs/{agent_run.id}/events"
         )
         stream = streaming_response_bytes(stream_response).decode("utf-8")
-        encoded_history = json.dumps(history.json())
 
-        self.assertEqual(history.status_code, 200, history.content)
         self.assertEqual(stream_response.status_code, 200)
-        self.assertNotIn("request-secret", encoded_history)
-        self.assertNotIn("manifestDigest", encoded_history)
-        self.assertNotIn("contentDigest", encoded_history)
         self.assertNotIn("request-secret", stream)
         self.assertNotIn("manifestDigest", stream)
         self.assertNotIn("contentDigest", stream)
@@ -694,12 +690,10 @@ class ApiVerticalSliceTests(TransactionTestCase):
         self.assertEqual(agent_run.agent_instructions, "Keep the answer grounded.")
         self.assertEqual(agent_run.transitionReason, "agent_run_lifecycle_schedule_pending")
         self.assertTrue(AgentRunAuthorization.objects.filter(agent_run=agent_run).exists())
-        history = self.client.get(f"/api/sessions/{session.id}/history")
-        self.assertEqual(history.status_code, 200, history.content)
-        self.assertEqual(history.json()["agentRuns"][0]["events"], [])
+        self.assertFalse(SessionEvent.objects.filter(agent_run=agent_run).exists())
 
 
-    def test_history_projects_committed_core_terminal_before_worker_transition(self):
+    def test_active_transcript_run_projects_committed_terminal_before_worker_transition(self):
         user = User.objects.create_user(
             username="terminal-window@example.com", password="password"
         )
@@ -720,19 +714,26 @@ class ApiVerticalSliceTests(TransactionTestCase):
         append_completed(agent_run, "done")
         self.client.force_login(user)
 
-        history = self.client.get(f"/api/sessions/{session.id}/history")
+        active = self.client.get(
+            f"/api/sessions/{session.id}/transcript/active-agent-run",
+            {"sourceHighWater": "4"},
+        )
+        events = self.client.get(
+            f"/api/sessions/{session.id}/agent-runs/{agent_run.id}/events"
+        )
 
-        self.assertEqual(history.status_code, 200, history.content)
-        history_run = history.json()["agentRuns"][0]
-        self.assertEqual(history_run["status"], "completed")
-        self.assertEqual(
-            [stored["event"]["type"] for stored in history_run["events"]],
-            ["agent_run_started", "user_message", "assistant_message", "agent_run_completed"],
-        )
-        self.assertEqual(
-            set(history_run),
-            {"id", "status", "model", "createdAt", "startedAt", "completedAt", "events", "live", "streamCursor", "citations", "citationSequence"},
-        )
+        self.assertEqual(active.status_code, 200, active.content)
+        self.assertIsNone(active.json()["agentRun"])
+        agent_run.refresh_from_db()
+        self.assertEqual(agent_run.status, "completed")
+        stream = streaming_response_bytes(events).decode("utf-8")
+        for event_type in (
+            "agent_run_started",
+            "user_message",
+            "assistant_message",
+            "agent_run_completed",
+        ):
+            self.assertIn(f'"type":"{event_type}"', stream)
 
     def test_agent_run_lifecycle_reconciler_terminates_failed_job_without_deleting_session(self):
         user = User.objects.create_user(
@@ -1927,7 +1928,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
             [],
         )
         self.assertEqual(
-            self.client.get(f"/api/sessions/{activeSession.id}/history").status_code,
+            self.client.get(f"/api/sessions/{activeSession.id}/transcript").status_code,
             404,
         )
         repeated = self.client.delete(f"/api/sessions/{activeSession.id}")
@@ -2886,115 +2887,310 @@ class ApiVerticalSliceTests(TransactionTestCase):
 
 
 
-    def test_session_history_uses_stable_bounded_cursor_pages(self):
+    def test_deleted_unpurged_session_metadata_remains_readable(self):
         user = User.objects.create_user(
-            username="history-page@example.com", password="password"
+            username="deleted-session-reader@example.com", password="password"
         )
-        workspace = Workspace.objects.create(name="History Page", createdBy=user)
+        workspace = Workspace.objects.create(name="Deleted session", createdBy=user)
         workspace.members.add(user)
-        model = ModelConfig.objects.create(displayName="History Page")
         session = create_session(workspace=workspace, owner=user)
-        for index in range(3):
-            agent_run = AgentRun.objects.create(
-                workspace=workspace,
-                session=session,
-                user=user,
-                modelConfig=model,
-                prompt=f"prompt-{index}",
-            )
-            create_agent_run_authorization(agent_run)
-            append_started(agent_run)
-            append_completed(agent_run, f"answer-{index}")
-
-        session.agent_runs.update(createdAt=timezone.now())
-        expected_ids = list(
-            session.agent_runs.order_by("createdAt", "id").values_list("id", flat=True)
-        )
+        session.status = "deleted"
+        session.deletedAt = timezone.now()
+        session.save(update_fields=["status", "deletedAt", "updatedAt"])
         self.client.force_login(user)
-        newest = self.client.get(f"/api/sessions/{session.id}/history", {"limit": "2"})
-        self.assertEqual(newest.status_code, 200, newest.content)
-        newest_body = newest.json()
-        self.assertEqual(newest_body["schema"], "session.history.page.v1")
-        self.assertTrue(newest_body["hasMore"])
-        self.assertIsInstance(newest_body["nextCursor"], str)
-        self.assertEqual(len(newest_body["agentRuns"]), 2)
 
-        older = self.client.get(
-            f"/api/sessions/{session.id}/history",
-            {"limit": "2", "before": newest_body["nextCursor"]},
+        response = self.client.get(f"/api/sessions/{session.id}")
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()["session"]["id"], session.id)
+        self.assertEqual(response.json()["session"]["status"], "deleted")
+
+
+    def test_transcript_page_freezes_source_high_water_and_reauthorizes_older_pages(self):
+        owner = User.objects.create_user(username="transcript-owner@example.com", password="password")
+        stranger = User.objects.create_user(username="transcript-stranger@example.com", password="password")
+        workspace = Workspace.objects.create(name="Transcript", createdBy=owner)
+        workspace.members.add(owner)
+        model = ModelConfig.objects.create(displayName="Transcript")
+        session = create_session(workspace=workspace, owner=owner)
+        run = AgentRun.objects.create(
+            workspace=workspace, session=session, user=owner, modelConfig=model, prompt="hello"
         )
+        append_started(run)
+        page = {
+            "schema": "transcript.page.v1",
+            "sessionId": session.id,
+            "projectionVersion": "transcript.projection.v1",
+            "projectionGeneration": "generation-1",
+            "sourceHighWater": "2",
+            "blocks": [],
+            "olderCursor": "bound-cursor",
+            "hasOlder": True,
+            "resumeCursors": [
+                {"streamId": "workspace-transcript.v1", "cursor": "2"}
+            ],
+        }
+        self.client.force_login(owner)
+        with patch("app_core.http.workspaces.request_transcript_page", return_value=page) as request_page:
+            response = self.client.get(f"/api/sessions/{session.id}/transcript")
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json(), page)
+        self.assertEqual(
+            request_page.call_args.args[0],
+            {
+                "schema": "runtime.transcript.page.read.v1",
+                "sessionId": session.id,
+                "projectionVersion": "transcript.projection.v1",
+                "projectionGeneration": None,
+                "sourceHighWater": "2",
+                "olderCursor": None,
+            },
+        )
+
+        with patch("app_core.http.workspaces.request_transcript_page", return_value=page) as request_page:
+            frozen_tail = self.client.get(
+                f"/api/sessions/{session.id}/transcript",
+                {"projectionGeneration": "generation-1", "sourceHighWater": "2"},
+            )
+        self.assertEqual(frozen_tail.status_code, 200, frozen_tail.content)
+        self.assertIsNone(request_page.call_args.args[0]["olderCursor"])
+        self.assertEqual(request_page.call_args.args[0]["sourceHighWater"], "2")
+
+        with patch("app_core.http.workspaces.request_transcript_page", return_value=page) as request_page:
+            older = self.client.get(
+                f"/api/sessions/{session.id}/transcript",
+                {
+                    "projectionGeneration": "generation-1",
+                    "sourceHighWater": "2",
+                    "olderCursor": "bound-cursor",
+                },
+            )
         self.assertEqual(older.status_code, 200, older.content)
-        older_body = older.json()
-        self.assertFalse(older_body["hasMore"])
-        self.assertIsNone(older_body["nextCursor"])
-        actual_ids = [agent_run["id"] for agent_run in older_body["agentRuns"] + newest_body["agentRuns"]]
-        self.assertEqual(actual_ids, expected_ids)
+        self.assertEqual(request_page.call_args.args[0]["sourceHighWater"], "2")
+        self.assertEqual(request_page.call_args.args[0]["olderCursor"], "bound-cursor")
 
-        invalid_cursor = self.client.get(
-            f"/api/sessions/{session.id}/history",
-            {"before": "banana"},
+        not_ready_payload = {
+            "error": "transcript_projection_not_ready",
+            "projectionGeneration": "generation-1",
+            "sourceHighWater": "2",
+            "projectedHighWater": "1",
+        }
+        with patch(
+            "app_core.http.workspaces.request_transcript_page",
+            side_effect=TranscriptRuntimeError(not_ready_payload),
+        ):
+            not_ready = self.client.get(
+                f"/api/sessions/{session.id}/transcript",
+                {
+                    "projectionGeneration": "generation-1",
+                    "sourceHighWater": "2",
+                },
+            )
+        self.assertEqual(not_ready.status_code, 409, not_ready.content)
+        self.assertEqual(not_ready.json(), not_ready_payload)
+        self.assertEqual(not_ready.headers["Cache-Control"], "no-store")
+
+        workspace.members.remove(owner)
+        with patch("app_core.http.workspaces.request_transcript_page") as revoked_runtime:
+            revoked = self.client.get(
+                f"/api/sessions/{session.id}/transcript",
+                {
+                    "projectionGeneration": "generation-1",
+                    "sourceHighWater": "2",
+                    "olderCursor": "bound-cursor",
+                },
+            )
+        self.assertEqual(revoked.status_code, 404)
+        revoked_runtime.assert_not_called()
+
+        self.client.force_login(stranger)
+        with patch("app_core.http.workspaces.request_transcript_page") as denied_runtime:
+            denied = self.client.get(f"/api/sessions/{session.id}/transcript")
+        self.assertEqual(denied.status_code, 404)
+        denied_runtime.assert_not_called()
+
+    def test_transcript_content_reads_bounded_utf8_ranges_and_reauthorizes(self):
+        owner = User.objects.create_user(username="content-owner@example.com", password="password")
+        workspace = Workspace.objects.create(name="Content", createdBy=owner)
+        workspace.members.add(owner)
+        model = ModelConfig.objects.create(displayName="Content")
+        session = create_session(workspace=workspace, owner=owner)
+        run = AgentRun.objects.create(
+            workspace=workspace, session=session, user=owner, modelConfig=model, prompt="hello"
         )
-        invalid_limit = self.client.get(
-            f"/api/sessions/{session.id}/history",
-            {"limit": "101"},
-        )
-        unknown_query = self.client.get(
-            f"/api/sessions/{session.id}/history",
-            {"banana": "1"},
-        )
-        duplicate_limit = self.client.get(
-            f"/api/sessions/{session.id}/history?limit=1&limit=2"
-        )
-        duplicate_before = self.client.get(
-            f"/api/sessions/{session.id}/history?before=banana&before=banana"
-        )
-        non_canonical_limit = self.client.get(
-            f"/api/sessions/{session.id}/history",
-            {"limit": "040"},
-        )
-        naive_cursor_payload = json.dumps(
-            {"createdAt": "2026-07-28T12:00:00", "id": expected_ids[0]},
-            separators=(",", ":"),
-            sort_keys=True,
+        append_started(run)
+        output = ("x" * (64 * 1024 - 2) + "世").encode("utf-8")
+        prefix = b"log:"
+        path = ".agent-tool-results/result.log"
+        file_bytes = prefix + output
+        manifest = {
+            "schema": "workspace.snapshot.v1",
+            "files": [{
+                "path": path,
+                "sizeBytes": len(file_bytes),
+                "sha256": f"sha256:{hashlib.sha256(file_bytes).hexdigest()}",
+                "executable": False,
+            }],
+        }
+        manifest_bytes = json.dumps(
+            manifest, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")
-        naive_cursor = (
-            base64.urlsafe_b64encode(naive_cursor_payload).decode("ascii").rstrip("=")
+        snapshot = len(manifest_bytes).to_bytes(4, "big") + manifest_bytes + file_bytes
+        storage_key = f"tests/transcript-content/{session.id}.snapshot"
+        default_storage.save(storage_key, ContentFile(snapshot))
+        session.workspaceStorageKey = storage_key
+        session.workspaceSnapshotSha256 = f"sha256:{hashlib.sha256(snapshot).hexdigest()}"
+        session.workspaceSnapshotSizeBytes = len(snapshot)
+        session.workspaceExpandedSizeBytes = len(file_bytes)
+        session.workspaceFileCount = 1
+        session.workspaceGeneration = 1
+        session.workspaceLastAdvancedAgentRun = run
+        session.save(update_fields=[
+            "workspaceStorageKey", "workspaceSnapshotSha256", "workspaceSnapshotSizeBytes",
+            "workspaceExpandedSizeBytes", "workspaceFileCount", "workspaceGeneration",
+            "workspaceLastAdvancedAgentRun", "updatedAt",
+        ])
+        append_session_records(run, [
+            session_record(run, 3, "tool_call", {
+                "callId": "call-range", "toolName": "shell", "providerId": "builtin",
+                "normalizedInput": {}, "toolContractDigest": "sha256:" + "a" * 64,
+                "displayTarget": "range",
+            }),
+            session_record(run, 4, "tool_result", {
+                "callId": "call-range", "toolName": "shell", "resultState": "successWithOutput",
+                "modelContent": "preview", "outputComplete": True,
+                "fullOutputPath": path, "outputStartByte": len(prefix),
+                "outputByteLength": len(output), "summary": "output", "operations": [],
+                "modelInputImages": [], "latencyMs": 1,
+            }),
+        ])
+        query = {
+            "projectionGeneration": "generation-1",
+            "refId": "tool-output:call-range",
+            "revision": "2",
+            "byteLength": str(len(output)),
+            "offset": "0",
+        }
+        self.client.force_login(owner)
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET LOCAL enable_seqscan = off")
+                cursor.execute(
+                    """
+                    EXPLAIN SELECT payload FROM app_core_sessionevent
+                    WHERE session_id = %s
+                      AND payload ->> 'type' = 'tool_result'
+                      AND payload #>> '{payload,callId}' = %s
+                    LIMIT 2
+                    """,
+                    [session.id, "call-range"],
+                )
+                plan = "\n".join(row[0] for row in cursor.fetchall())
+            self.assertIn("session_event_tool_result_lookup", plan)
+            first = self.client.get(f"/api/sessions/{session.id}/transcript/content", query)
+            self.assertEqual(first.status_code, 200, first.content)
+            self.assertEqual(first.json()["endOffset"], str(64 * 1024 - 2))
+            self.assertTrue(first.json()["hasMore"])
+            second = self.client.get(
+                f"/api/sessions/{session.id}/transcript/content",
+                {**query, "offset": first.json()["endOffset"]},
+            )
+            self.assertEqual(second.status_code, 200, second.content)
+            self.assertEqual(second.json()["content"], "世")
+            self.assertFalse(second.json()["hasMore"])
+            workspace.members.remove(owner)
+            denied = self.client.get(f"/api/sessions/{session.id}/transcript/content", query)
+            self.assertEqual(denied.status_code, 404)
+        finally:
+            default_storage.delete(storage_key)
+
+    def test_transcript_patch_read_freezes_through_waterline_and_reauthorizes(self):
+        owner = User.objects.create_user(username="patch-owner@example.com", password="password")
+        workspace = Workspace.objects.create(name="Patches", createdBy=owner)
+        workspace.members.add(owner)
+        model = ModelConfig.objects.create(displayName="Patches")
+        session = create_session(workspace=workspace, owner=owner)
+        run = AgentRun.objects.create(
+            workspace=workspace, session=session, user=owner, modelConfig=model, prompt="hello"
         )
-        naive_timestamp = self.client.get(
-            f"/api/sessions/{session.id}/history",
-            {"before": naive_cursor},
-        )
-        for response in [
-            invalid_cursor,
-            invalid_limit,
-            unknown_query,
-            duplicate_limit,
-            duplicate_before,
-            non_canonical_limit,
-            naive_timestamp,
-        ]:
-            self.assertEqual(response.status_code, 400, response.content)
+        append_started(run)
+        append_completed(run)
+        payload = {
+            "schema": "transcript.patch.page.v1",
+            "sessionId": session.id,
+            "projectionVersion": "transcript.projection.v1",
+            "projectionGeneration": "generation-1",
+            "throughSourceHighWater": "4",
+            "patches": [],
+            "nextSourceHighWater": "4",
+            "hasMore": False,
+        }
+        self.client.force_login(owner)
+        with patch("app_core.http.workspaces.request_transcript_patches", return_value=payload) as request_patches:
+            response = self.client.get(
+                f"/api/sessions/{session.id}/transcript/patches",
+                {
+                    "projectionGeneration": "generation-1",
+                    "afterSourceHighWater": "2",
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json(), payload)
         self.assertEqual(
-            invalid_cursor.json(), {"error": "session_history_cursor_invalid"}
+            request_patches.call_args.args[0],
+            {
+                "schema": "runtime.transcript.patch.read.v1",
+                "sessionId": session.id,
+                "projectionVersion": "transcript.projection.v1",
+                "projectionGeneration": "generation-1",
+                "afterSourceHighWater": "2",
+                "throughSourceHighWater": "4",
+            },
         )
+
+    def test_transcript_active_run_uses_the_frozen_session_waterline_without_loading_history(self):
+        owner = User.objects.create_user(username="active-transcript@example.com", password="password")
+        workspace = Workspace.objects.create(name="Active transcript", createdBy=owner)
+        workspace.members.add(owner)
+        model = ModelConfig.objects.create(displayName="Active transcript")
+        session = create_session(workspace=workspace, owner=owner)
+        run = AgentRun.objects.create(
+            workspace=workspace,
+            session=session,
+            user=owner,
+            modelConfig=model,
+            prompt="hello",
+            status="running",
+        )
+        append_started(run)
+        self.client.force_login(owner)
+
+        response = self.client.get(
+            f"/api/sessions/{session.id}/transcript/active-agent-run",
+            {"sourceHighWater": "2"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual(
-            invalid_limit.json(), {"error": "session_history_limit_invalid"}
+            response.json(),
+            {
+                "schema": "workspace.transcript.active_agent_run.v1",
+                "sessionId": session.id,
+                "agentRun": {
+                    "agentRunId": run.id,
+                    "status": "running",
+                    "streamCursor": agent_run_stream.encode_stream_cursor(run.id, 2),
+                },
+            },
         )
-        self.assertEqual(
-            unknown_query.json(), {"error": "session_history_query_invalid"}
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+
+        workspace.members.remove(owner)
+        revoked = self.client.get(
+            f"/api/sessions/{session.id}/transcript/active-agent-run",
+            {"sourceHighWater": "2"},
         )
-        self.assertEqual(
-            duplicate_limit.json(), {"error": "session_history_query_invalid"}
-        )
-        self.assertEqual(
-            duplicate_before.json(), {"error": "session_history_query_invalid"}
-        )
-        self.assertEqual(
-            non_canonical_limit.json(), {"error": "session_history_limit_invalid"}
-        )
-        self.assertEqual(
-            naive_timestamp.json(), {"error": "session_history_cursor_invalid"}
-        )
+        self.assertEqual(revoked.status_code, 404)
 
 
     def test_artifact_publisher_streams_bytes_and_is_publication_idempotent(self):
@@ -6478,13 +6674,10 @@ class WorkspaceAssetAcceptanceTests(TestCase):
             ],
         )
         append_completed(agent_run)
-        history = self.client.get(f"/api/sessions/{session.id}/history")
-        self.assertEqual(history.status_code, 200, history.content)
-        user_event = next(
-            item["event"]
-            for item in history.json()["agentRuns"][0]["events"]
-            if item["event"]["type"] == "user_message"
-        )
+        user_event = SessionEvent.objects.get(
+            agent_run=agent_run,
+            payload__type="user_message",
+        ).payload
         self.assertEqual(
             user_event["payload"]["attachments"],
             [

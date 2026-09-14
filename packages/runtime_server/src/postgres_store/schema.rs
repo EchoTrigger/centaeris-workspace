@@ -2,9 +2,9 @@ use std::collections::BTreeSet;
 
 use postgres::Client;
 
-const STORE_SCHEMA_VERSION: i64 = 1;
+const STORE_SCHEMA_VERSION: i64 = 2;
 
-const RUNTIME_TABLES: &[&str] = &[
+pub(super) const RUNTIME_TABLES: &[&str] = &[
     "execution_job_tenants",
     "checkpoints",
     "dead_letters",
@@ -20,6 +20,13 @@ const RUNTIME_TABLES: &[&str] = &[
     "runtime_turn_supplement_queues",
     "schema_migrations",
     "session_runtime_snapshots",
+    "transcript_block_identities",
+    "transcript_block_versions",
+    "transcript_projection_current_recoveries",
+    "transcript_projection_commits",
+    "transcript_projection_current_generations",
+    "transcript_projection_heads",
+    "transcript_resume_cursors",
 ];
 
 const RUNTIME_INDEXES: &[&str] = &[
@@ -40,6 +47,9 @@ const RUNTIME_INDEXES: &[&str] = &[
     "idx_runtime_jobs_status_run_at",
     "idx_runtime_job_outbox_pending",
     "idx_session_runtime_snapshots_updated",
+    "idx_transcript_block_identities_page",
+    "idx_transcript_block_versions_latest",
+    "idx_transcript_resume_cursors_latest",
 ];
 
 const TABLE_SHAPES: &[(&str, &str)] = &[
@@ -102,6 +112,34 @@ const TABLE_SHAPES: &[(&str, &str)] = &[
     (
         "model_observation_manifests",
         "session_id:text:NO,manifest_digest:text:NO,parent_digest:text:YES,manifest_json:text:NO,manifest_bytes:bigint:NO,first_seen_at_ms:bigint:NO",
+    ),
+    (
+        "transcript_projection_heads",
+        "session_id:text:NO,projection_version:text:NO,projection_generation:text:NO,source_high_water:bigint:NO,invalidation_reason:text:YES",
+    ),
+    (
+        "transcript_projection_current_generations",
+        "session_id:text:NO,projection_version:text:NO,projection_generation:text:NO,source_high_water:bigint:NO",
+    ),
+    (
+        "transcript_block_identities",
+        "session_id:text:NO,projection_version:text:NO,projection_generation:text:NO,block_id:text:NO,order_source_sequence:bigint:NO,order_ordinal:bigint:NO",
+    ),
+    (
+        "transcript_block_versions",
+        "session_id:text:NO,projection_version:text:NO,projection_generation:text:NO,block_id:text:NO,applied_source_sequence:bigint:NO,block_revision:bigint:NO,block_json:text:NO",
+    ),
+    (
+        "transcript_resume_cursors",
+        "session_id:text:NO,projection_version:text:NO,projection_generation:text:NO,stream_id:text:NO,source_high_water:bigint:NO,cursor:text:NO",
+    ),
+    (
+        "transcript_projection_current_recoveries",
+        "session_id:text:NO,projection_version:text:NO,projection_generation:text:NO,source_high_water:bigint:NO,checkpoint_json:text:NO,frontier_json:text:NO",
+    ),
+    (
+        "transcript_projection_commits",
+        "commit_id:text:NO,session_id:text:NO,projection_version:text:NO,projection_generation:text:NO,expected_source_high_water:bigint:NO,source_high_water:bigint:NO,commit_json:text:NO",
     ),
 ];
 
@@ -174,6 +212,18 @@ const INDEX_SHAPES: &[(&str, &str)] = &[
         "idx_external_context_links_object",
         "(object_id, linked_at_ms DESC, session_id)",
     ),
+    (
+        "idx_transcript_block_identities_page",
+        "(session_id, projection_version, projection_generation, order_source_sequence DESC, order_ordinal DESC)",
+    ),
+    (
+        "idx_transcript_block_versions_latest",
+        "(session_id, projection_version, projection_generation, block_id, applied_source_sequence DESC)",
+    ),
+    (
+        "idx_transcript_resume_cursors_latest",
+        "(session_id, projection_version, projection_generation, stream_id, source_high_water DESC)",
+    ),
 ];
 
 pub(super) fn ensure_schema(client: &mut Client) -> Result<(), String> {
@@ -186,6 +236,8 @@ pub(super) fn ensure_schema(client: &mut Client) -> Result<(), String> {
         .get::<_, bool>(0);
     if !exists {
         create_schema(client)?;
+    } else {
+        migrate_schema(client)?;
     }
     validate_schema_version(client)?;
     validate_schema(client)
@@ -201,10 +253,10 @@ fn validate_schema_version(client: &mut Client) -> Result<(), String> {
         .into_iter()
         .map(|row| row.get::<_, i64>(0))
         .collect::<Vec<_>>();
-    if versions != vec![STORE_SCHEMA_VERSION] {
+    let expected = (1..=STORE_SCHEMA_VERSION).collect::<Vec<_>>();
+    if versions != expected {
         return Err(format!(
-            "Postgres runtime schema version mismatch: expected [{}], got {versions:?}",
-            STORE_SCHEMA_VERSION
+            "Postgres runtime schema version mismatch: expected {expected:?}, got {versions:?}"
         ));
     }
     Ok(())
@@ -216,11 +268,15 @@ fn create_schema(client: &mut Client) -> Result<(), String> {
         .map_err(|error| format!("begin runtime schema creation failed: {error}"))?;
     tx.batch_execute(RUNTIME_DDL)
         .map_err(|error| format!("create Postgres runtime schema failed: {error:?}"))?;
-    tx.execute(
-        "INSERT INTO runtime.schema_migrations(version, applied_at_ms) VALUES($1, $2)",
-        &[&STORE_SCHEMA_VERSION, &now_ms()?],
-    )
-    .map_err(|error| format!("record Postgres runtime schema version failed: {error}"))?;
+    tx.batch_execute(TRANSCRIPT_DDL)
+        .map_err(|error| format!("create Postgres transcript schema failed: {error:?}"))?;
+    for version in 1..=STORE_SCHEMA_VERSION {
+        tx.execute(
+            "INSERT INTO runtime.schema_migrations(version, applied_at_ms) VALUES($1, $2)",
+            &[&version, &now_ms()?],
+        )
+        .map_err(|error| format!("record Postgres runtime schema version failed: {error}"))?;
+    }
     tx.commit()
         .map_err(|error| format!("commit runtime schema creation failed: {error}"))
 }
@@ -235,7 +291,8 @@ fn validate_schema(client: &mut Client) -> Result<(), String> {
         .into_iter()
         .map(|row| row.get::<_, i64>(0))
         .collect::<Vec<_>>();
-    if versions != vec![STORE_SCHEMA_VERSION] {
+    let expected_versions = (1..=STORE_SCHEMA_VERSION).collect::<Vec<_>>();
+    if versions != expected_versions {
         return Err(format!(
             "Postgres runtime schema version mismatch: {versions:?}"
         ));
@@ -332,6 +389,33 @@ fn validate_schema(client: &mut Client) -> Result<(), String> {
     Ok(())
 }
 
+fn migrate_schema(client: &mut Client) -> Result<(), String> {
+    let versions = client
+        .query(
+            "SELECT version FROM runtime.schema_migrations ORDER BY version",
+            &[],
+        )
+        .map_err(|error| format!("query Postgres runtime migration state failed: {error}"))?
+        .into_iter()
+        .map(|row| row.get::<_, i64>(0))
+        .collect::<Vec<_>>();
+    if versions == vec![1] {
+        let mut tx = client
+            .transaction()
+            .map_err(|error| format!("begin Postgres transcript migration failed: {error}"))?;
+        tx.batch_execute(TRANSCRIPT_DDL)
+            .map_err(|error| format!("migrate Postgres transcript schema failed: {error}"))?;
+        tx.execute(
+            "INSERT INTO runtime.schema_migrations(version, applied_at_ms) VALUES(2,$1)",
+            &[&now_ms()?],
+        )
+        .map_err(|error| format!("record Postgres transcript migration failed: {error}"))?;
+        tx.commit()
+            .map_err(|error| format!("commit Postgres transcript migration failed: {error}"))?;
+    }
+    Ok(())
+}
+
 fn object_names(client: &mut Client, table_type: &str) -> Result<BTreeSet<String>, String> {
     client
         .query(
@@ -404,15 +488,32 @@ CREATE INDEX idx_external_context_links_session_linked ON runtime.external_conte
 CREATE INDEX idx_external_context_links_object ON runtime.external_context_links(object_id, linked_at_ms DESC, session_id ASC);
 "#;
 
+const TRANSCRIPT_DDL: &str = r#"
+CREATE TABLE runtime.transcript_projection_heads(session_id text NOT NULL,projection_version text NOT NULL,projection_generation text NOT NULL,source_high_water bigint NOT NULL CHECK(source_high_water>=0),invalidation_reason text,PRIMARY KEY(session_id,projection_version,projection_generation));
+CREATE TABLE runtime.transcript_projection_current_generations(session_id text NOT NULL,projection_version text NOT NULL,projection_generation text NOT NULL,source_high_water bigint NOT NULL CHECK(source_high_water>=0),PRIMARY KEY(session_id,projection_version),FOREIGN KEY(session_id,projection_version,projection_generation) REFERENCES runtime.transcript_projection_heads(session_id,projection_version,projection_generation) ON DELETE CASCADE);
+CREATE TABLE runtime.transcript_block_identities(session_id text NOT NULL,projection_version text NOT NULL,projection_generation text NOT NULL,block_id text NOT NULL,order_source_sequence bigint NOT NULL CHECK(order_source_sequence>0),order_ordinal bigint NOT NULL CHECK(order_ordinal>=0),PRIMARY KEY(session_id,projection_version,projection_generation,block_id),UNIQUE(session_id,projection_version,projection_generation,order_source_sequence,order_ordinal),FOREIGN KEY(session_id,projection_version,projection_generation) REFERENCES runtime.transcript_projection_heads(session_id,projection_version,projection_generation) ON DELETE CASCADE);
+CREATE TABLE runtime.transcript_block_versions(session_id text NOT NULL,projection_version text NOT NULL,projection_generation text NOT NULL,block_id text NOT NULL,applied_source_sequence bigint NOT NULL CHECK(applied_source_sequence>0),block_revision bigint NOT NULL CHECK(block_revision>0),block_json text NOT NULL,PRIMARY KEY(session_id,projection_version,projection_generation,block_id,applied_source_sequence),FOREIGN KEY(session_id,projection_version,projection_generation,block_id) REFERENCES runtime.transcript_block_identities(session_id,projection_version,projection_generation,block_id) ON DELETE CASCADE);
+CREATE TABLE runtime.transcript_resume_cursors(session_id text NOT NULL,projection_version text NOT NULL,projection_generation text NOT NULL,stream_id text NOT NULL,source_high_water bigint NOT NULL CHECK(source_high_water>0),cursor text NOT NULL,PRIMARY KEY(session_id,projection_version,projection_generation,stream_id,source_high_water),FOREIGN KEY(session_id,projection_version,projection_generation) REFERENCES runtime.transcript_projection_heads(session_id,projection_version,projection_generation) ON DELETE CASCADE);
+CREATE TABLE runtime.transcript_projection_current_recoveries(session_id text NOT NULL,projection_version text NOT NULL,projection_generation text NOT NULL,source_high_water bigint NOT NULL CHECK(source_high_water>0),checkpoint_json text NOT NULL,frontier_json text NOT NULL,PRIMARY KEY(session_id,projection_version,projection_generation),FOREIGN KEY(session_id,projection_version,projection_generation) REFERENCES runtime.transcript_projection_heads(session_id,projection_version,projection_generation) ON DELETE CASCADE);
+CREATE TABLE runtime.transcript_projection_commits(commit_id text PRIMARY KEY,session_id text NOT NULL,projection_version text NOT NULL,projection_generation text NOT NULL,expected_source_high_water bigint NOT NULL CHECK(expected_source_high_water>=0),source_high_water bigint NOT NULL CHECK(source_high_water>expected_source_high_water),commit_json text NOT NULL,UNIQUE(session_id,projection_version,projection_generation,source_high_water),FOREIGN KEY(session_id,projection_version,projection_generation) REFERENCES runtime.transcript_projection_heads(session_id,projection_version,projection_generation) ON DELETE CASCADE);
+CREATE INDEX idx_transcript_block_identities_page ON runtime.transcript_block_identities(session_id,projection_version,projection_generation,order_source_sequence DESC,order_ordinal DESC);
+CREATE INDEX idx_transcript_block_versions_latest ON runtime.transcript_block_versions(session_id,projection_version,projection_generation,block_id,applied_source_sequence DESC);
+CREATE INDEX idx_transcript_resume_cursors_latest ON runtime.transcript_resume_cursors(session_id,projection_version,projection_generation,stream_id,source_high_water DESC);
+"#;
+
 #[cfg(test)]
 mod tests {
-    use super::{INDEX_SHAPES, RUNTIME_DDL, RUNTIME_INDEXES, STORE_SCHEMA_VERSION};
+    use super::{
+        INDEX_SHAPES, RUNTIME_DDL, RUNTIME_INDEXES, RUNTIME_TABLES, STORE_SCHEMA_VERSION,
+        TRANSCRIPT_DDL,
+    };
     use std::collections::BTreeSet;
 
     #[test]
     fn runtime_index_ddl_and_validation_contracts_match() {
-        let declared: Vec<_> = RUNTIME_DDL
-            .lines()
+        let declared: Vec<_> = [RUNTIME_DDL, TRANSCRIPT_DDL]
+            .into_iter()
+            .flat_map(str::lines)
             .filter_map(|line| line.trim().strip_prefix("CREATE INDEX "))
             .map(|line| line.split_once(" ON ").expect("index DDL has table"))
             .collect();
@@ -443,7 +544,31 @@ mod tests {
     }
 
     #[test]
-    fn clean_slate_store_schema_starts_at_one() {
-        assert_eq!(STORE_SCHEMA_VERSION, 1);
+    fn transcript_read_model_advances_store_schema_to_two() {
+        assert_eq!(STORE_SCHEMA_VERSION, 2);
+        for table in [
+            "transcript_projection_heads",
+            "transcript_projection_current_generations",
+            "transcript_block_identities",
+            "transcript_block_versions",
+            "transcript_resume_cursors",
+            "transcript_projection_current_recoveries",
+            "transcript_projection_commits",
+        ] {
+            assert!(
+                RUNTIME_TABLES.contains(&table),
+                "missing transcript table {table}"
+            );
+        }
+        for index in [
+            "idx_transcript_block_identities_page",
+            "idx_transcript_block_versions_latest",
+            "idx_transcript_resume_cursors_latest",
+        ] {
+            assert!(
+                RUNTIME_INDEXES.contains(&index),
+                "missing transcript index {index}"
+            );
+        }
     }
 }

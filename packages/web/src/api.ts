@@ -1,11 +1,17 @@
 import type { RuntimeConfig } from "./config";
 
 export class ApiError extends Error {
+  readonly status: number;
+  readonly payload: unknown;
+
   constructor(
     message: string,
-    readonly status: number,
+    status: number,
+    payload: unknown = null,
   ) {
     super(message);
+    this.status = status;
+    this.payload = payload;
   }
 }
 
@@ -79,7 +85,7 @@ export async function apiResponse(path: string, options: RequestInit = {}) {
     const message = body && typeof body === "object" && "error" in body && typeof body.error === "string"
       ? body.error
       : `request_failed:${response.status}`;
-    const error = new ApiError(message, response.status);
+    const error = new ApiError(message, response.status, body);
     if (isAuthenticationRequired(error)) authenticationRequiredHandler?.();
     throw error;
   }

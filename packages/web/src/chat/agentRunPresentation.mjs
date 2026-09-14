@@ -117,12 +117,31 @@ export function groupActivities(activities, translate = identity) {
   }];
 }
 
-export function buildAgentRunSections(messages, activities, reasoningBlocks = [], translate = identity) {
+export function createAgentRunPresentationWork() {
+  return {
+    messageVisits: 0,
+    activityVisits: 0,
+    reasoningVisits: 0,
+    sortComparisons: 0,
+    displayEntryVisits: 0,
+    processItemVisits: 0,
+  };
+}
+
+export function buildAgentRunSections(messages, activities, reasoningBlocks = [], translate = identity, work) {
+  if (work) {
+    work.messageVisits += messages.length;
+    work.activityVisits += activities.length;
+    work.reasoningVisits += reasoningBlocks.length;
+  }
   const displayEntries = [
     ...messages.filter((item) => item.role === "assistant").map((message) => ({ kind: "assistant", sequence: message.sequence, message })),
     ...activities.map((activity) => ({ kind: "tool", sequence: activity.sequence, activity })),
     ...reasoningBlocks.map((block) => ({ kind: "reasoning", sequence: block.sequence, block })),
-  ].sort((left, right) => left.sequence - right.sequence);
+  ].sort((left, right) => {
+    if (work) work.sortComparisons += 1;
+    return left.sequence - right.sequence;
+  });
   const processItems = [];
   let pendingActivities = [];
   const flushActivities = () => {
@@ -132,6 +151,7 @@ export function buildAgentRunSections(messages, activities, reasoningBlocks = []
     pendingActivities = [];
   };
   for (const entry of displayEntries) {
+    if (work) work.displayEntryVisits += 1;
     if (entry.kind === "tool") {
       pendingActivities.push(entry.activity);
       continue;
@@ -150,6 +170,7 @@ export function buildAgentRunSections(messages, activities, reasoningBlocks = []
     current = null;
   };
   for (const item of processItems) {
+    if (work) work.processItemVisits += 1;
     if (item.kind === "assistant") {
       flushSection();
       current = {

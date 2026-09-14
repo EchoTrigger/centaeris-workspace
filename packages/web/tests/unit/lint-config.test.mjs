@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const biomeEntry = resolve(repoRoot, "node_modules/@biomejs/biome/bin/biome");
 const ciScriptPath = resolve(repoRoot, "scripts/ci.ps1");
+const webPackagePath = resolve(repoRoot, "packages/web/package.json");
 
 function runFixture(source) {
   const fixturePath = resolve(repoRoot, "packages/web/src/.lint-contract-test.tsx");
@@ -49,9 +50,14 @@ test("unused imports and variables block the gate", () => {
   assert.match(output, /lint\/correctness\/noUnusedVariables/);
 });
 
-test("local CI runs the repository lint gate", () => {
+test("local CI runs lint, typecheck, and a production Web build", () => {
   const ciScript = readFileSync(ciScriptPath, "utf8");
-  assert.match(ciScript, /Run "Web lint" \{ npm run lint \}/);
+  assert.match(
+    ciScript,
+    /Run "Web production validation" \{ npm run build --workspace packages\/web \}/,
+  );
+  const webPackage = JSON.parse(readFileSync(webPackagePath, "utf8"));
+  assert.equal(webPackage.scripts.build, "npm run lint && npm run typecheck && vite build");
 });
 
 test("conditional React hooks block the gate", () => {

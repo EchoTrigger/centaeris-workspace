@@ -435,3 +435,396 @@ def _request_workspace_projection(
     ):
         raise RuntimeError("workspace_runtime_projection_response_invalid")
     return result
+
+
+class TranscriptRuntimeError(RuntimeError):
+    def __init__(self, payload: dict):
+        super().__init__(payload.get("error", "transcript_runtime_request_failed"))
+        self.payload = payload
+
+
+TRANSCRIPT_PAGE_MAX_BLOCKS = 128
+TRANSCRIPT_PAGE_MAX_INLINE_BYTES = 64 * 1024
+TRANSCRIPT_PAGE_MAX_SERIALIZED_BYTES = 4 * TRANSCRIPT_PAGE_MAX_INLINE_BYTES
+TRANSCRIPT_PATCH_PAGE_MAX_PATCHES = TRANSCRIPT_PAGE_MAX_BLOCKS
+TRANSCRIPT_PATCH_MAX_CHANGES = TRANSCRIPT_PAGE_MAX_BLOCKS
+TRANSCRIPT_PATCH_MAX_SERIALIZED_BYTES = TRANSCRIPT_PAGE_MAX_SERIALIZED_BYTES
+TRANSCRIPT_PATCH_PAGE_MAX_SERIALIZED_BYTES = 2 * TRANSCRIPT_PATCH_MAX_SERIALIZED_BYTES
+WORKSPACE_TRANSCRIPT_STREAM_ID = "workspace-transcript.v1"
+
+
+def request_transcript_page(body: dict) -> dict:
+    result = _request_transcript_read("/internal/transcript/page", body)
+    expected = {
+        "schema",
+        "sessionId",
+        "projectionVersion",
+        "projectionGeneration",
+        "sourceHighWater",
+        "blocks",
+        "olderCursor",
+        "hasOlder",
+        "resumeCursors",
+    }
+    if (
+        set(result) != expected
+        or result.get("schema") != "transcript.page.v1"
+        or result.get("sessionId") != body.get("sessionId")
+        or result.get("projectionVersion") != body.get("projectionVersion")
+        or (
+            body.get("projectionGeneration") is not None
+            and result.get("projectionGeneration") != body.get("projectionGeneration")
+        )
+        or not isinstance(result.get("projectionGeneration"), str)
+        or result.get("sourceHighWater") != body.get("sourceHighWater")
+        or not isinstance(result.get("blocks"), list)
+        or not isinstance(result.get("resumeCursors"), list)
+        or type(result.get("hasOlder")) is not bool
+        or (
+            result.get("olderCursor") is not None
+            and not isinstance(result.get("olderCursor"), str)
+        )
+        or not _valid_transcript_page_content(result)
+    ):
+        raise RuntimeError("transcript_page_response_invalid")
+    return result
+
+
+def request_transcript_patches(body: dict) -> dict:
+    result = _request_transcript_read("/internal/transcript/patches", body)
+    expected = {
+        "schema",
+        "sessionId",
+        "projectionVersion",
+        "projectionGeneration",
+        "throughSourceHighWater",
+        "patches",
+        "nextSourceHighWater",
+        "hasMore",
+    }
+    if (
+        set(result) != expected
+        or result.get("schema") != "transcript.patch.page.v1"
+        or result.get("sessionId") != body.get("sessionId")
+        or result.get("projectionVersion") != body.get("projectionVersion")
+        or result.get("projectionGeneration") != body.get("projectionGeneration")
+        or result.get("throughSourceHighWater") != body.get("throughSourceHighWater")
+        or not isinstance(result.get("patches"), list)
+        or not isinstance(result.get("nextSourceHighWater"), str)
+        or type(result.get("hasMore")) is not bool
+        or not _valid_transcript_patch_content(result, body)
+    ):
+        raise RuntimeError("transcript_patch_response_invalid")
+    return result
+
+
+def _request_transcript_read(path: str, body: dict) -> dict:
+    request = urllib.request.Request(
+        f"{settings.RUNTIME_URL.rstrip('/')}{path}",
+        data=json.dumps(body, separators=(",", ":")).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "X-Internal-Token": settings.INTERNAL_API_TOKEN,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(
+            request, timeout=settings.RUNTIME_START_TIMEOUT_SECONDS
+        ) as response:
+            result = json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        try:
+            payload = json.loads(error.read())
+        except json.JSONDecodeError:
+            payload = None
+        finally:
+            error.close()
+        if error.code == 409 and isinstance(payload, dict):
+            conflict = _validate_transcript_conflict(payload, body)
+            if conflict is not None:
+                raise TranscriptRuntimeError(conflict) from error
+        raise RuntimeError("transcript_runtime_request_failed") from error
+    except (urllib.error.URLError, json.JSONDecodeError) as error:
+        raise RuntimeError("transcript_runtime_request_failed") from error
+    if not isinstance(result, dict):
+        raise RuntimeError("transcript_runtime_response_invalid")
+    return result
+
+
+def _validate_transcript_conflict(payload: dict, request_body: dict) -> dict | None:
+    if payload == {"error": "transcript_view_invalidated"}:
+        return payload
+    if set(payload) != {
+        "error",
+        "projectionGeneration",
+        "sourceHighWater",
+        "projectedHighWater",
+    } or payload.get("error") != "transcript_projection_not_ready":
+        return None
+    generation = payload.get("projectionGeneration")
+    requested_generation = request_body.get("projectionGeneration")
+    source_high_water = payload.get("sourceHighWater")
+    projected_high_water = payload.get("projectedHighWater")
+    if (
+        not isinstance(generation, str)
+        or not generation
+        or (
+            requested_generation is not None
+            and generation != requested_generation
+        )
+        or source_high_water
+        not in {
+            request_body.get("sourceHighWater"),
+            request_body.get("throughSourceHighWater"),
+        }
+        or not _canonical_decimal_u64(source_high_water)
+        or not _canonical_decimal_u64(projected_high_water)
+        or int(projected_high_water) >= int(source_high_water)
+    ):
+        return None
+    return payload
+
+
+def _canonical_decimal_u64(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and value.isascii()
+        and value.isdigit()
+        and (value == "0" or not value.startswith("0"))
+        and len(value) <= 20
+        and int(value) <= 18_446_744_073_709_551_615
+    )
+
+
+def _valid_transcript_page_content(page: dict) -> bool:
+    if (
+        len(json.dumps(page, separators=(",", ":")).encode())
+        > TRANSCRIPT_PAGE_MAX_SERIALIZED_BYTES
+    ):
+        return False
+    high_water = page.get("sourceHighWater")
+    if not _canonical_decimal_u64(high_water):
+        return False
+    blocks = page.get("blocks")
+    if len(blocks) > TRANSCRIPT_PAGE_MAX_BLOCKS or not all(
+        _valid_transcript_block(block) for block in blocks
+    ):
+        return False
+    orders = [_transcript_block_order(block) for block in blocks]
+    if any(order is None or order[0] > int(high_water) for order in orders):
+        return False
+    if any(left >= right for left, right in zip(orders, orders[1:])):
+        return False
+    if len({block["blockId"] for block in blocks}) != len(blocks):
+        return False
+    if (
+        sum(_transcript_inline_bytes(block) for block in blocks)
+        > TRANSCRIPT_PAGE_MAX_INLINE_BYTES
+    ):
+        return False
+    if page.get("hasOlder") != (page.get("olderCursor") is not None):
+        return False
+    cursors = page.get("resumeCursors")
+    if high_water == "0":
+        return cursors == []
+    return (
+        len(cursors) == 1
+        and set(cursors[0]) == {"streamId", "cursor"}
+        and cursors[0].get("streamId") == WORKSPACE_TRANSCRIPT_STREAM_ID
+        and _canonical_decimal_u64(cursors[0].get("cursor"))
+        and int(cursors[0]["cursor"]) <= int(high_water)
+    )
+
+
+def _valid_transcript_patch_content(page: dict, request: dict) -> bool:
+    if (
+        len(json.dumps(page, separators=(",", ":")).encode())
+        > TRANSCRIPT_PATCH_PAGE_MAX_SERIALIZED_BYTES
+    ):
+        return False
+    through = page.get("throughSourceHighWater")
+    next_water = page.get("nextSourceHighWater")
+    after = request.get("afterSourceHighWater")
+    if (
+        not _canonical_decimal_u64(through)
+        or not _canonical_decimal_u64(next_water)
+        or not _canonical_decimal_u64(after)
+        or int(next_water) < int(after)
+    ):
+        return False
+    patches = page.get("patches")
+    if len(patches) > TRANSCRIPT_PATCH_PAGE_MAX_PATCHES:
+        return False
+    previous = int(after)
+    for patch in patches:
+        if not _valid_transcript_patch(patch, page):
+            return False
+        water = int(patch["sourceHighWater"])
+        if water <= previous:
+            return False
+        previous = water
+    if patches and next_water != patches[-1]["sourceHighWater"]:
+        return False
+    if not patches and (next_water != through or after != through):
+        return False
+    return (int(next_water) < int(through)) == page.get("hasMore")
+
+
+def _valid_transcript_patch(patch: object, page: dict) -> bool:
+    if not isinstance(patch, dict) or set(patch) != {
+        "schema",
+        "sessionId",
+        "projectionVersion",
+        "projectionGeneration",
+        "sourceHighWater",
+        "streamId",
+        "appliedCursor",
+        "upserts",
+        "removals",
+    }:
+        return False
+    if (
+        patch.get("schema") != "transcript.patch.v1"
+        or patch.get("sessionId") != page.get("sessionId")
+        or patch.get("projectionVersion") != page.get("projectionVersion")
+        or patch.get("projectionGeneration") != page.get("projectionGeneration")
+        or patch.get("streamId") != WORKSPACE_TRANSCRIPT_STREAM_ID
+        or patch.get("appliedCursor") != patch.get("sourceHighWater")
+        or not _canonical_decimal_u64(patch.get("sourceHighWater"))
+        or int(patch["sourceHighWater"]) > int(page["throughSourceHighWater"])
+        or not isinstance(patch.get("upserts"), list)
+        or not isinstance(patch.get("removals"), list)
+        or len(patch["upserts"]) + len(patch["removals"])
+        > TRANSCRIPT_PATCH_MAX_CHANGES
+        or not all(_valid_transcript_block(block) for block in patch["upserts"])
+        or not all(
+            isinstance(removal, dict)
+            and set(removal) == {"blockId", "blockRevision"}
+            and isinstance(removal.get("blockId"), str)
+            and bool(removal["blockId"].strip())
+            and _canonical_decimal_u64(removal.get("blockRevision"))
+            for removal in patch["removals"]
+        )
+    ):
+        return False
+    return (
+        len(json.dumps(patch, separators=(",", ":")).encode())
+        <= TRANSCRIPT_PATCH_MAX_SERIALIZED_BYTES
+    )
+
+
+def _valid_transcript_block(block: object) -> bool:
+    if not isinstance(block, dict) or set(block) != {
+        "blockId",
+        "blockRevision",
+        "orderKey",
+        "body",
+    }:
+        return False
+    if (
+        not isinstance(block.get("blockId"), str)
+        or not block["blockId"].strip()
+        or not _canonical_decimal_u64(block.get("blockRevision"))
+        or _transcript_block_order(block) is None
+    ):
+        return False
+    body = block.get("body")
+    if not isinstance(body, dict):
+        return False
+    kind = body.get("kind")
+    fields = {
+        "userText": {"kind", "content"},
+        "assistantText": {"kind", "content", "status"},
+        "reasoning": {"kind", "requestId", "content", "status"},
+        "tool": {
+            "kind",
+            "callId",
+            "toolName",
+            "status",
+            "summary",
+            "summaryRef",
+            "outputRef",
+        },
+        "notice": {"kind", "noticeType", "content", "status"},
+    }
+    if kind not in fields or set(body) != fields[kind]:
+        return False
+    if "status" in body and body["status"] not in {
+        "queued",
+        "running",
+        "completed",
+        "failed",
+        "interrupted",
+    }:
+        return False
+    if kind == "tool":
+        summary = body["summary"]
+        summary_ref = body["summaryRef"]
+        return (
+            all(
+                isinstance(body.get(field), str) and body[field].strip()
+                for field in ("callId", "toolName")
+            )
+            and (
+                (
+                    isinstance(summary, str)
+                    and len(summary.encode()) <= TRANSCRIPT_PAGE_MAX_INLINE_BYTES
+                    and summary_ref is None
+                )
+                or (summary is None and _valid_transcript_content_ref(summary_ref))
+            )
+            and (body["outputRef"] is None or _valid_transcript_content_ref(body["outputRef"]))
+        )
+    if kind == "reasoning" and (
+        not isinstance(body.get("requestId"), str) or not body["requestId"].strip()
+    ):
+        return False
+    if kind == "notice" and (
+        not isinstance(body.get("noticeType"), str) or not body["noticeType"].strip()
+    ):
+        return False
+    return _valid_transcript_content(body.get("content"))
+
+
+def _transcript_block_order(block: dict) -> tuple[int, int] | None:
+    order = block.get("orderKey")
+    if (
+        not isinstance(order, dict)
+        or set(order) != {"sourceSequence", "ordinal"}
+        or not _canonical_decimal_u64(order.get("sourceSequence"))
+        or type(order.get("ordinal")) is not int
+        or not 0 <= order["ordinal"] <= 4_294_967_295
+    ):
+        return None
+    return int(order["sourceSequence"]), order["ordinal"]
+
+
+def _valid_transcript_content(content: object) -> bool:
+    if not isinstance(content, dict) or set(content) != {"inlineContent", "sourceRef"}:
+        return False
+    inline = content.get("inlineContent")
+    reference = content.get("sourceRef")
+    return (
+        isinstance(inline, str)
+        and reference is None
+        and len(inline.encode()) <= TRANSCRIPT_PAGE_MAX_INLINE_BYTES
+    ) or (inline is None and _valid_transcript_content_ref(reference))
+
+
+def _valid_transcript_content_ref(reference: object) -> bool:
+    return (
+        isinstance(reference, dict)
+        and set(reference) == {"refId", "revision", "byteLength"}
+        and isinstance(reference.get("refId"), str)
+        and bool(reference["refId"].strip())
+        and _canonical_decimal_u64(reference.get("revision"))
+        and _canonical_decimal_u64(reference.get("byteLength"))
+    )
+
+
+def _transcript_inline_bytes(block: dict) -> int:
+    body = block["body"]
+    if body["kind"] == "tool":
+        return len((body["summary"] or "").encode())
+    return len((body["content"].get("inlineContent") or "").encode())

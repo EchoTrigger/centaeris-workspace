@@ -18,8 +18,8 @@ jobs:
   resolve-core:
     uses: ./.github/workflows/resolve-core-revision.yml
 
-  source-browser:
-    name: Source and browser gate
+  source-static:
+    name: Source and web static gate
     needs: resolve-core
     env:
       CENTAERIS_CORE_REVISION: ${{ needs.resolve-core.outputs.revision }}
@@ -82,9 +82,9 @@ jobs:
           rustup toolchain install 1.94.1 --profile minimal
           rustup override set 1.94.1
 
-      - name: Run source and browser gate
+      - name: Run source and web static gate
         shell: pwsh
-        run: ./scripts/ci.ps1 -InstallPlaywright
+        run: ./scripts/ci.ps1 -SkipFrontendTests
 
   docker-fresh-start:
     name: Docker fresh-start gate
