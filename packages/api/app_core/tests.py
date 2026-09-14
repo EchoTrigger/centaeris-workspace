@@ -3104,6 +3104,25 @@ class ApiVerticalSliceTests(TransactionTestCase):
         finally:
             default_storage.delete(storage_key)
 
+    def test_transcript_text_range_delegates_to_core_after_membership_check(self):
+        owner = User.objects.create_user(username="text-reader@example.com", password="password")
+        workspace = Workspace.objects.create(name="Text", createdBy=owner)
+        workspace.members.add(owner)
+        session = create_session(workspace=workspace, owner=owner)
+        self.client.force_login(owner)
+        query = {"projectionGeneration": "generation-1", "refId": "session-event:answer:modelMarkdown",
+                 "revision": "1", "byteLength": "70000", "offset": "0"}
+        with patch("app_core.http.workspaces.request_transcript_content", return_value={"content": "正文"}) as read:
+            response = self.client.get(f"/api/sessions/{session.id}/transcript/content", query)
+            self.assertEqual(response.status_code, 200, response.content)
+            self.assertEqual(read.call_args.args[0]["sessionId"], session.id)
+            self.assertEqual(read.call_args.args[0]["refId"], query["refId"])
+        workspace.members.remove(owner)
+        with patch("app_core.http.workspaces.request_transcript_content") as read:
+            response = self.client.get(f"/api/sessions/{session.id}/transcript/content", query)
+            self.assertEqual(response.status_code, 404)
+            read.assert_not_called()
+
     def test_transcript_patch_read_freezes_through_waterline_and_reauthorizes(self):
         owner = User.objects.create_user(username="patch-owner@example.com", password="password")
         workspace = Workspace.objects.create(name="Patches", createdBy=owner)

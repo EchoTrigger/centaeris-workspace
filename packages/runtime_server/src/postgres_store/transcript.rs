@@ -42,6 +42,26 @@ pub struct TranscriptCatchUpProgress {
 }
 
 impl PostgresRuntimeStore {
+    pub fn read_transcript_event_content(
+        &self,
+        request: &centaeris_core::session::transcript::TranscriptContentRangeReadRequestV1,
+    ) -> Result<centaeris_core::session::transcript::TranscriptContentRangeV1, String> {
+        request.validate()?;
+        let (event_id, _) = request.event_reference()?;
+        self.with_client(|client| {
+            // Bind the source lookup to the currently published generation in one query.
+            let row = client.query_opt(
+                "SELECT e.payload::text FROM public.app_core_sessionevent e JOIN runtime.transcript_projection_current_generations g ON g.session_id=e.session_id JOIN runtime.transcript_projection_heads h ON h.session_id=g.session_id AND h.projection_version=g.projection_version AND h.projection_generation=g.projection_generation WHERE e.session_id=$1 AND e.\"eventId\"=$2 AND g.projection_generation=$3 AND g.projection_version=$4 AND e.sequence<=h.source_high_water AND h.invalidation_reason IS NULL",
+                &[&request.session_id, &event_id, &request.projection_generation, &request.projection_version],
+            ).map_err(|error| format!("read transcript source failed: {error}"))?
+                .ok_or_else(|| "transcript content source or generation is unavailable".to_string())?;
+            let value = serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(0))
+                .map_err(|error| format!("decode transcript source failed: {error}"))?;
+            let record = parse_wire_record(&value).map_err(|error| error.to_string())?;
+            centaeris_core::session::transcript::transcript_event_content_range(request, &record.event)
+        })
+    }
+
     pub fn load_or_initialize_current_transcript_generation(
         &self,
         session_id: &str,
@@ -419,7 +439,7 @@ impl PostgresTranscriptRebuildSource<'_> {
             let rows = self.store.with_client(|client| {
                 client
                     .query(
-                        "SELECT sequence::bigint,agent_run_id,payload::text FROM public.app_core_sessionevent WHERE session_id=$1 AND sequence>$2 AND sequence<=$3 ORDER BY sequence LIMIT $4",
+                        "SELECT sequence::bigint,agent_run_id,payload::text FROM public.app_core_sessionevent WHERE session_id=$1 AND sequence>$2::bigint AND sequence<=$3::bigint ORDER BY sequence LIMIT $4",
                         &[&request.session_id, &after, &target, &(TRANSCRIPT_PROJECTION_SLICE_MAX_EVENTS as i64)],
                     )
                     .map_err(|error| format!("scan transcript rebuild source failed: {error}"))?
@@ -1098,7 +1118,7 @@ WITH candidates AS (
          octet_length(payload::text)::bigint AS payload_bytes,
          row_number() OVER (ORDER BY sequence) AS row_number
   FROM public.app_core_sessionevent
-  WHERE session_id=$1 AND sequence>$2 AND sequence<=$3
+  WHERE session_id=$1 AND sequence>$2::bigint AND sequence<=$3::bigint
   ORDER BY sequence
   LIMIT $4
 ), bounded AS (
@@ -1107,7 +1127,7 @@ WITH candidates AS (
 )
 SELECT sequence,agent_run_id,payload,payload_bytes
 FROM bounded
-WHERE cumulative_bytes<=$5 OR row_number=1
+WHERE cumulative_bytes<=$5::bigint OR row_number=1
 ORDER BY sequence
 "#;
 
