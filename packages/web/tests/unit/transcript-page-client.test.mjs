@@ -169,6 +169,74 @@ test("stale epochs cannot mutate a newly opened Session view", () => {
   assert.deepEqual(store.getListSnapshot().blockIds, ["current"]);
 });
 
+test("releasing loaded history keeps the tail and committed additions reloadable", () => {
+  const store = createTranscriptViewStore();
+  const epoch = store.openTail(page({
+    blocks: [block("assistant:tail", 1, 10)],
+    olderCursor: "older-1",
+  }));
+  store.prependPage(page({
+    blocks: [
+      block("user:old", 1, 1, "userText"),
+      block("assistant:old-unmodified", 1, 2),
+    ],
+    olderCursor: null,
+  }), epoch);
+  store.applyPatchPage(patchPage({
+    patches: [{
+      sourceHighWater: "11",
+      upserts: [
+        block("user:old", 2, 1, "userText"),
+        block("assistant:new", 1, 11),
+      ],
+    }],
+    through: "11",
+  }), epoch);
+  const bytesBeforeRelease = store.managedContentBytes();
+
+  store.releaseLoadedHistory();
+
+  assert.deepEqual(
+    store.getListSnapshot().blockIds,
+    ["user:old", "assistant:tail", "assistant:new"],
+  );
+  assert.equal(store.getListSnapshot().olderCursor, "older-1");
+  assert.equal(store.getListSnapshot().hasOlder, true);
+  assert.ok(store.managedContentBytes() > 0);
+  assert.ok(store.managedContentBytes() < bytesBeforeRelease);
+});
+
+test("tool content transport binds the range response to its reference", async () => {
+  const paths = [];
+  const transport = createWorkspaceTranscriptTransport({
+    request: async (path) => {
+      paths.push(path);
+      return new Response(JSON.stringify({
+        schema: "transcript.content.range.v1",
+        sessionId,
+        projectionVersion,
+        projectionGeneration,
+        refId: "tool-output:call-1",
+        revision: "2",
+        byteLength: "70000",
+        startOffset: "0",
+        endOffset: "3",
+        content: "世",
+        hasMore: true,
+      }));
+    },
+  });
+  const result = await transport.loadContentRange({
+    sessionId,
+    projectionGeneration,
+    reference: { refId: "tool-output:call-1", revision: "2", byteLength: "70000" },
+  }, "0", new AbortController().signal);
+  assert.equal(result.content, "世");
+  assert.deepEqual(paths, [
+    `/api/sessions/${sessionId}/transcript/content?projectionGeneration=generation-1&refId=tool-output%3Acall-1&revision=2&byteLength=70000&offset=0`,
+  ]);
+});
+
 test("tail projection retries freeze the first reported waterline and generation", async () => {
   const paths = [];
   const waits = [];

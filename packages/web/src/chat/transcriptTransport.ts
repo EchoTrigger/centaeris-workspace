@@ -5,6 +5,11 @@ import {
   type TranscriptPage,
   type TranscriptPatchPage,
 } from "./transcriptViewStore.ts";
+import {
+  validateTranscriptContentRange,
+  type TranscriptContentRef,
+  type TranscriptContentRange,
+} from "./transcriptContract.ts";
 
 const PROJECTION_RETRY_DELAY_MS = 50;
 
@@ -198,5 +203,27 @@ export function createWorkspaceTranscriptTransport({
     return validateActiveAgentRun(await json(path, signal), identity.sessionId);
   }
 
-  return { loadTail, loadOlder, loadPatches, loadActiveAgentRun };
+  async function loadContentRange(
+    identity: Readonly<{
+      sessionId: string;
+      projectionGeneration: string;
+      reference: TranscriptContentRef;
+    }>,
+    offset: string,
+    signal: AbortSignal,
+  ): Promise<TranscriptContentRange> {
+    const path = pathWithQuery(
+      `/api/sessions/${encodeURIComponent(identity.sessionId)}/transcript/content`,
+      [
+        ["projectionGeneration", identity.projectionGeneration],
+        ["refId", identity.reference.refId],
+        ["revision", identity.reference.revision],
+        ["byteLength", identity.reference.byteLength],
+        ["offset", offset],
+      ],
+    );
+    return validateTranscriptContentRange(await json(path, signal), { ...identity, offset });
+  }
+
+  return { loadTail, loadOlder, loadPatches, loadActiveAgentRun, loadContentRange };
 }

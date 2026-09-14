@@ -14,6 +14,11 @@ import { createTranscriptViewStore } from "../chat/transcriptViewStore";
 import { createWorkspaceTranscriptTransport } from "../chat/transcriptTransport";
 import { WorkspaceTranscriptController } from "../chat/workspaceTranscriptController";
 import { TranscriptBlockList } from "../chat/TranscriptBlockList";
+import {
+  clearTranscriptContentRangeCache,
+  subscribeTranscriptContentRangeCache,
+  transcriptContentRangeCacheBytes,
+} from "../chat/transcriptContentRanges";
 import { WorkspaceComposer } from "../chat/WorkspaceComposer";
 import {
   attachmentCanPreview,
@@ -42,6 +47,7 @@ import {
 } from "lucide-react";
 
 const CLOSED_CONTEXT_PANEL = Object.freeze({ mode: "closed" });
+const TRANSCRIPT_MEMORY_WARNING_BYTES = 32 * 1024 * 1024;
 
 const ARTIFACT_PREVIEW_MAX_BYTES = 1024 * 1024;
 const ARTIFACT_PREVIEW_CONTENT_TYPES = new Set([
@@ -152,6 +158,17 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     transcriptStore.getListSnapshot,
     transcriptStore.getListSnapshot,
   );
+  const transcriptBlockBytes = useSyncExternalStore(
+    transcriptStore.subscribeManagedContent,
+    transcriptStore.managedContentBytes,
+    transcriptStore.managedContentBytes,
+  );
+  const transcriptReferencedContentBytes = useSyncExternalStore(
+    subscribeTranscriptContentRangeCache,
+    transcriptContentRangeCacheBytes,
+    transcriptContentRangeCacheBytes,
+  );
+  const transcriptManagedBytes = transcriptBlockBytes + transcriptReferencedContentBytes;
   const currentModel = useMemo(() => models.find((model) => model.id === modelId), [models, modelId]);
   const modelGroups = useMemo(() => {
     const groups = new Map();
@@ -196,6 +213,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   }, []);
   const clearConversationProjection = useCallback(() => {
     transcriptStore.clear();
+    clearTranscriptContentRangeCache();
     updateActiveTranscriptRun(null);
     olderHistoryRequestRef.current?.controller.abort();
     olderHistoryRequestRef.current = null;
@@ -773,6 +791,14 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     }
   }
 
+  function releaseLoadedTranscriptHistory() {
+    olderHistoryRequestRef.current?.controller.abort();
+    olderHistoryRequestRef.current = null;
+    setLoadingOlderHistory(false);
+    clearTranscriptContentRangeCache();
+    transcriptStore.releaseLoadedHistory();
+  }
+
   async function uploadAttachment(event) {
     const input = event.currentTarget;
     const files = Array.from(input.files || []);
@@ -1167,6 +1193,14 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         {error || groupedSessions.projectionError ? <div className="errorBanner" role="alert">{error || t("appRoute.someConversationsAreTemporarilyUnavailableRefreshThePageAnd")}</div> : null}
 
         <div className={`workspaceConversationPlane ${isHome ? "isEmpty" : ""}`}>
+          {transcriptManagedBytes >= TRANSCRIPT_MEMORY_WARNING_BYTES ? (
+            <div className="noticeBanner" role="status">
+              {t("appRoute.loadedConversationDataExceeds32MiB")}
+              <button type="button" onClick={releaseLoadedTranscriptHistory}>
+                {t("appRoute.releaseHistoryAndReturnToLatest")}
+              </button>
+            </div>
+          ) : null}
           <TranscriptBlockList
             store={transcriptStore}
             sessionId={sessionId || null}

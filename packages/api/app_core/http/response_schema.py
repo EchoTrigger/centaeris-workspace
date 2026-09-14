@@ -266,6 +266,22 @@ class SessionContextUsageEnvelope(StrictSchema):
     context_usage: ContextUsageResponse | None = Field(alias="contextUsage")
 
 
+class TranscriptContentRangeResponse(StrictSchema):
+    schema_id: Literal["transcript.content.range.v1"] = Field(alias="schema")
+    session_id: str = Field(alias="sessionId")
+    projection_version: Literal["transcript.projection.v1"] = Field(
+        alias="projectionVersion"
+    )
+    projection_generation: str = Field(alias="projectionGeneration")
+    ref_id: str = Field(alias="refId")
+    revision: Literal["2"]
+    byte_length: str = Field(alias="byteLength")
+    start_offset: str = Field(alias="startOffset")
+    end_offset: str = Field(alias="endOffset")
+    content: str
+    has_more: bool = Field(alias="hasMore")
+
+
 class SessionResponse(StrictSchema):
     id: str
     workspace_id: str = Field(alias="workspaceId")

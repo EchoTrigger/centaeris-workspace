@@ -24,6 +24,7 @@ export {
 } from "./transcriptContract.ts";
 
 type Listener = () => void;
+const transcriptByteEncoder = new TextEncoder();
 
 export type TranscriptViewStore = ReturnType<typeof createTranscriptViewStore>;
 
@@ -31,6 +32,11 @@ export function createTranscriptViewStore() {
   let viewEpoch = 0;
   let identity: TranscriptIdentity | null = null;
   let blocks = new Map<string, TranscriptBlock>();
+  let blockBytes = new Map<string, number>();
+  let managedBytes = 0;
+  let tailBlockIds = new Set<string>();
+  let postBaseOverrideIds = new Set<string>();
+  let tailOlderCursor: string | null = null;
   let revisions = new Map<string, string>();
   let orderOwners = new Map<string, string>();
   let noticeHighWater = 0n;
@@ -48,11 +54,16 @@ export function createTranscriptViewStore() {
   });
   let liveSnapshot: TranscriptLiveOverlay | null = null;
   const listListeners = new Set<Listener>();
+  const managedContentListeners = new Set<Listener>();
   const blockListeners = new Map<string, Set<Listener>>();
   const liveListeners = new Set<Listener>();
 
   function notifyList() {
     listListeners.forEach((listener) => listener());
+  }
+
+  function notifyManagedContent() {
+    managedContentListeners.forEach((listener) => listener());
   }
 
   function notifyBlocks(ids: Iterable<string>) {
@@ -100,6 +111,17 @@ export function createTranscriptViewStore() {
     return highWater;
   }
 
+  function replaceManagedBlock(blockId: string, block: TranscriptBlock | null) {
+    managedBytes -= blockBytes.get(blockId) ?? 0;
+    if (block === null) {
+      blockBytes.delete(blockId);
+      return;
+    }
+    const bytes = transcriptByteEncoder.encode(JSON.stringify(block)).byteLength;
+    blockBytes.set(blockId, bytes);
+    managedBytes += bytes;
+  }
+
   function mergeBlock(
     candidateBlocks: Map<string, TranscriptBlock>,
     candidateRevisions: Map<string, string>,
@@ -137,11 +159,17 @@ export function createTranscriptViewStore() {
       sourceHighWater: page.sourceHighWater,
     };
     blocks = new Map();
+    blockBytes = new Map();
+    managedBytes = 0;
+    postBaseOverrideIds = new Set();
     revisions = new Map();
     for (const item of page.blocks) {
       blocks.set(item.blockId, item);
+      replaceManagedBlock(item.blockId, item);
       revisions.set(item.blockId, item.blockRevision);
     }
+    tailBlockIds = new Set(page.blocks.map((item) => item.blockId));
+    tailOlderCursor = page.olderCursor;
     blockIds = sortedIds(blocks);
     orderOwners = indexOrders(blocks);
     noticeHighWater = latestNoticeHighWater(blocks);
@@ -157,6 +185,7 @@ export function createTranscriptViewStore() {
       appliedSourceHighWater: page.resumeCursors[0]?.cursor || "0",
     });
     setLiveSnapshot(null);
+    notifyManagedContent();
     notifyList();
     notifyBlocks(blockIds);
     return viewEpoch;
@@ -173,6 +202,9 @@ export function createTranscriptViewStore() {
     const changed = new Set<string>();
     page.blocks.forEach((item) => mergeBlock(candidateBlocks, candidateRevisions, item, changed));
     const nextIds = sortedIds(candidateBlocks);
+    for (const blockId of changed) {
+      replaceManagedBlock(blockId, candidateBlocks.get(blockId) ?? null);
+    }
     blocks = candidateBlocks;
     revisions = candidateRevisions;
     blockIds = nextIds;
@@ -189,6 +221,7 @@ export function createTranscriptViewStore() {
       olderCursor: page.olderCursor,
       hasOlder: page.hasOlder,
     });
+    if (changed.size > 0) notifyManagedContent();
     notifyList();
     notifyBlocks(changed);
     return true;
@@ -230,6 +263,10 @@ export function createTranscriptViewStore() {
           throw new Error("transcript block revision changed orderKey");
         }
         if (previous?.body.kind === "notice" || item.body.kind === "notice") noticeAffected = true;
+        if (blocks.has(item.blockId)
+          && BigInt(item.orderKey.sourceSequence) <= BigInt(identity.sourceHighWater)) {
+          postBaseOverrideIds.add(item.blockId);
+        }
         stagedBlocks.set(item.blockId, clone(item));
         stagedRevisions.set(item.blockId, item.blockRevision);
         changed.add(item.blockId);
@@ -306,7 +343,11 @@ export function createTranscriptViewStore() {
       nextIds = Object.freeze(mergedIds);
     }
     for (const [blockId, item] of stagedBlocks) {
-      if (item === null) blocks.delete(blockId);
+      replaceManagedBlock(blockId, item);
+      if (item === null) {
+        blocks.delete(blockId);
+        postBaseOverrideIds.delete(blockId);
+      }
       else blocks.set(blockId, item);
     }
     for (const [blockId, revision] of stagedRevisions) revisions.set(blockId, revision);
@@ -319,6 +360,7 @@ export function createTranscriptViewStore() {
       appliedSourceHighWater: page.nextSourceHighWater,
     });
     setLiveSnapshot(nextLive);
+    if (stagedBlocks.size > 0) notifyManagedContent();
     if (structuralChange) notifyList();
     notifyBlocks(changed);
     return true;
@@ -350,6 +392,11 @@ export function createTranscriptViewStore() {
     viewEpoch += 1;
     identity = null;
     blocks = new Map();
+    blockBytes = new Map();
+    managedBytes = 0;
+    tailBlockIds = new Set();
+    postBaseOverrideIds = new Set();
+    tailOlderCursor = null;
     revisions = new Map();
     orderOwners = new Map();
     noticeHighWater = 0n;
@@ -366,7 +413,38 @@ export function createTranscriptViewStore() {
       appliedSourceHighWater: "0",
     });
     setLiveSnapshot(null);
+    notifyManagedContent();
     notifyList();
+  }
+
+  function releaseLoadedHistory() {
+    if (identity === null) return;
+    const removed = new Set<string>();
+    for (const [blockId, block] of blocks) {
+      if (!tailBlockIds.has(blockId)
+        && !postBaseOverrideIds.has(blockId)
+        && BigInt(block.orderKey.sourceSequence) <= BigInt(identity.sourceHighWater)) {
+        blocks.delete(blockId);
+        replaceManagedBlock(blockId, null);
+        revisions.delete(blockId);
+        removed.add(blockId);
+      }
+    }
+    blockIds = sortedIds(blocks);
+    orderOwners = indexOrders(blocks);
+    listSnapshot = Object.freeze({
+      ...listSnapshot,
+      blockIds,
+      olderCursor: tailOlderCursor,
+      hasOlder: tailOlderCursor !== null,
+    });
+    if (removed.size > 0) notifyManagedContent();
+    notifyList();
+    notifyBlocks(removed);
+  }
+
+  function managedContentBytes() {
+    return managedBytes;
   }
 
   return {
@@ -376,12 +454,18 @@ export function createTranscriptViewStore() {
     applyLiveOverlay,
     clearLiveOverlay,
     clear,
+    releaseLoadedHistory,
+    managedContentBytes,
     getListSnapshot: () => listSnapshot,
     getBlockSnapshot: (blockId: string) => blocks.get(blockId) || null,
     getLiveSnapshot: () => liveSnapshot,
     subscribeList(listener: Listener) {
       listListeners.add(listener);
       return () => listListeners.delete(listener);
+    },
+    subscribeManagedContent(listener: Listener) {
+      managedContentListeners.add(listener);
+      return () => managedContentListeners.delete(listener);
     },
     subscribeBlock(blockId: string, listener: Listener) {
       const listeners = blockListeners.get(blockId) || new Set<Listener>();

@@ -107,8 +107,9 @@ browser interaction, authorization-UI, and appearance checks.
    workflow runs it for relevant pull requests and `main` changes, and supports
    an explicit manual run.
 3. Populate a private `.env`, then run `docker compose config --quiet`.
-4. On fresh Postgres, migrate from zero and confirm the Workspace app starts at
-   its new `0001_initial`.
+4. On fresh Postgres, migrate from zero through
+   `0002_session_event_tool_result_lookup` and confirm the Workspace app starts
+   from the current two-migration baseline.
 5. Build Runtime, API, worker, web, and execution images from root Compose
    contexts; verify health with an empty extension volume.
 6. `docker compose config` must resolve project `centaeris-workspace` and only

@@ -1,16 +1,23 @@
 import {
   memo,
   useCallback,
+  useState,
   useSyncExternalStore,
   type ComponentType,
 } from "react";
 import { SquareTerminal } from "lucide-react";
+import { useTranslation } from "../i18n.ts";
 import { MarkdownContent, StreamingMarkdownContent } from "./MarkdownContent";
+import {
+  loadTranscriptContentRange,
+  TRANSCRIPT_CONTENT_RANGE_BYTES,
+} from "./transcriptContentRanges.ts";
 import type {
   TranscriptBlock,
   TranscriptLiveOverlay,
   TranscriptViewStore,
 } from "./transcriptViewStore";
+import type { TranscriptContentRef } from "./transcriptContract.ts";
 
 const LiveMarkdownContent = StreamingMarkdownContent as ComponentType<{
   text: string;
@@ -29,6 +36,69 @@ function useTranscriptBlock(store: TranscriptViewStore, blockId: string) {
 function contentText(content: unknown) {
   if (typeof content !== "object" || content === null || !("inlineContent" in content)) return null;
   return typeof content.inlineContent === "string" ? content.inlineContent : null;
+}
+
+function contentReference(value: unknown): TranscriptContentRef | null {
+  if (typeof value !== "object" || value === null) return null;
+  const reference = value as Record<string, unknown>;
+  if (typeof reference.refId !== "string"
+    || typeof reference.revision !== "string"
+    || typeof reference.byteLength !== "string") return null;
+  return reference as TranscriptContentRef;
+}
+
+function TranscriptToolOutput({ store, reference }: Readonly<{
+  store: TranscriptViewStore;
+  reference: TranscriptContentRef;
+}>) {
+  const { t } = useTranslation();
+  const identity = useSyncExternalStore(
+    store.subscribeList,
+    store.getListSnapshot,
+    store.getListSnapshot,
+  );
+  const [content, setContent] = useState("");
+  const [nextOffset, setNextOffset] = useState("0");
+  const [hasMore, setHasMore] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  async function loadMore() {
+    if (!identity.sessionId || !identity.projectionGeneration || loading || !hasMore) return;
+    const controller = new AbortController();
+    setLoading(true);
+    setError("");
+    try {
+      const page = await loadTranscriptContentRange({
+        sessionId: identity.sessionId,
+        projectionGeneration: identity.projectionGeneration,
+        reference,
+      }, nextOffset, controller.signal);
+      setContent((current) => current + page.content);
+      setNextOffset(page.endOffset);
+      setHasMore(page.hasMore);
+    } catch {
+      setError(t("transcriptBlockContent.unableToLoadToolOutput"));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <details className="workspaceTranscriptToolOutput">
+      <summary>{t("transcriptBlockContent.toolOutputBytes", { value1: reference.byteLength })}</summary>
+      {content ? <pre>{content}</pre> : null}
+      {error ? <span role="alert">{error}</span> : null}
+      {hasMore ? (
+        <button type="button" disabled={loading} onClick={() => { void loadMore(); }}>
+          {loading
+            ? t("transcriptBlockContent.loading")
+            : t("transcriptBlockContent.loadNextValueKiB", {
+                value1: TRANSCRIPT_CONTENT_RANGE_BYTES / 1024,
+              })}
+        </button>
+      ) : null}
+    </details>
+  );
 }
 
 function ReferencedContent({ body }: Readonly<{ body: TranscriptBlock["body"] }>) {
@@ -94,10 +164,20 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
     );
   }
   if (body.kind === "tool") {
+    const outputReference = contentReference(body.outputRef);
     return (
       <div className="workspaceTranscriptBlock workspaceActivityGroup" data-block-id={block.blockId}>
         <SquareTerminal aria-hidden="true" />
-        <span>{text ?? <ReferencedContent body={body} />}</span>
+        <span>
+          {text ?? <ReferencedContent body={body} />}
+          {outputReference ? (
+            <TranscriptToolOutput
+              key={`${outputReference.refId}:${outputReference.revision}`}
+              store={store}
+              reference={outputReference}
+            />
+          ) : null}
+        </span>
       </div>
     );
   }

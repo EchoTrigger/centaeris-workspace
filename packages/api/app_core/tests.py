@@ -3009,6 +3009,101 @@ class ApiVerticalSliceTests(TransactionTestCase):
         self.assertEqual(denied.status_code, 404)
         denied_runtime.assert_not_called()
 
+    def test_transcript_content_reads_bounded_utf8_ranges_and_reauthorizes(self):
+        owner = User.objects.create_user(username="content-owner@example.com", password="password")
+        workspace = Workspace.objects.create(name="Content", createdBy=owner)
+        workspace.members.add(owner)
+        model = ModelConfig.objects.create(displayName="Content")
+        session = create_session(workspace=workspace, owner=owner)
+        run = AgentRun.objects.create(
+            workspace=workspace, session=session, user=owner, modelConfig=model, prompt="hello"
+        )
+        append_started(run)
+        output = ("x" * (64 * 1024 - 2) + "世").encode("utf-8")
+        prefix = b"log:"
+        path = ".agent-tool-results/result.log"
+        file_bytes = prefix + output
+        manifest = {
+            "schema": "workspace.snapshot.v1",
+            "files": [{
+                "path": path,
+                "sizeBytes": len(file_bytes),
+                "sha256": f"sha256:{hashlib.sha256(file_bytes).hexdigest()}",
+                "executable": False,
+            }],
+        }
+        manifest_bytes = json.dumps(
+            manifest, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        snapshot = len(manifest_bytes).to_bytes(4, "big") + manifest_bytes + file_bytes
+        storage_key = f"tests/transcript-content/{session.id}.snapshot"
+        default_storage.save(storage_key, ContentFile(snapshot))
+        session.workspaceStorageKey = storage_key
+        session.workspaceSnapshotSha256 = f"sha256:{hashlib.sha256(snapshot).hexdigest()}"
+        session.workspaceSnapshotSizeBytes = len(snapshot)
+        session.workspaceExpandedSizeBytes = len(file_bytes)
+        session.workspaceFileCount = 1
+        session.workspaceGeneration = 1
+        session.workspaceLastAdvancedAgentRun = run
+        session.save(update_fields=[
+            "workspaceStorageKey", "workspaceSnapshotSha256", "workspaceSnapshotSizeBytes",
+            "workspaceExpandedSizeBytes", "workspaceFileCount", "workspaceGeneration",
+            "workspaceLastAdvancedAgentRun", "updatedAt",
+        ])
+        append_session_records(run, [
+            session_record(run, 3, "tool_call", {
+                "callId": "call-range", "toolName": "shell", "providerId": "builtin",
+                "normalizedInput": {}, "toolContractDigest": "sha256:" + "a" * 64,
+                "displayTarget": "range",
+            }),
+            session_record(run, 4, "tool_result", {
+                "callId": "call-range", "toolName": "shell", "resultState": "successWithOutput",
+                "modelContent": "preview", "outputComplete": True,
+                "fullOutputPath": path, "outputStartByte": len(prefix),
+                "outputByteLength": len(output), "summary": "output", "operations": [],
+                "modelInputImages": [], "latencyMs": 1,
+            }),
+        ])
+        query = {
+            "projectionGeneration": "generation-1",
+            "refId": "tool-output:call-range",
+            "revision": "2",
+            "byteLength": str(len(output)),
+            "offset": "0",
+        }
+        self.client.force_login(owner)
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET LOCAL enable_seqscan = off")
+                cursor.execute(
+                    """
+                    EXPLAIN SELECT payload FROM app_core_sessionevent
+                    WHERE session_id = %s
+                      AND payload ->> 'type' = 'tool_result'
+                      AND payload #>> '{payload,callId}' = %s
+                    LIMIT 2
+                    """,
+                    [session.id, "call-range"],
+                )
+                plan = "\n".join(row[0] for row in cursor.fetchall())
+            self.assertIn("session_event_tool_result_lookup", plan)
+            first = self.client.get(f"/api/sessions/{session.id}/transcript/content", query)
+            self.assertEqual(first.status_code, 200, first.content)
+            self.assertEqual(first.json()["endOffset"], str(64 * 1024 - 2))
+            self.assertTrue(first.json()["hasMore"])
+            second = self.client.get(
+                f"/api/sessions/{session.id}/transcript/content",
+                {**query, "offset": first.json()["endOffset"]},
+            )
+            self.assertEqual(second.status_code, 200, second.content)
+            self.assertEqual(second.json()["content"], "世")
+            self.assertFalse(second.json()["hasMore"])
+            workspace.members.remove(owner)
+            denied = self.client.get(f"/api/sessions/{session.id}/transcript/content", query)
+            self.assertEqual(denied.status_code, 404)
+        finally:
+            default_storage.delete(storage_key)
+
     def test_transcript_patch_read_freezes_through_waterline_and_reauthorizes(self):
         owner = User.objects.create_user(username="patch-owner@example.com", password="password")
         workspace = Workspace.objects.create(name="Patches", createdBy=owner)

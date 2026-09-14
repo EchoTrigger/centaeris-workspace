@@ -12,10 +12,24 @@ const MAX_PATCH_BYTES = MAX_PAGE_BYTES;
 const MAX_PATCH_PAGE_BYTES = 2 * MAX_PATCH_BYTES;
 const U64_MAX = 18_446_744_073_709_551_615n;
 
-type TranscriptContentRef = Readonly<{
+export type TranscriptContentRef = Readonly<{
   refId: string;
   revision: string;
   byteLength: string;
+}>;
+
+export type TranscriptContentRange = Readonly<{
+  schema: "transcript.content.range.v1";
+  sessionId: string;
+  projectionVersion: typeof PROJECTION_VERSION;
+  projectionGeneration: string;
+  refId: string;
+  revision: string;
+  byteLength: string;
+  startOffset: string;
+  endOffset: string;
+  content: string;
+  hasMore: boolean;
 }>;
 
 type TranscriptTextContent = Readonly<{
@@ -94,6 +108,41 @@ export type TranscriptIdentity = Readonly<{
   projectionGeneration: string;
   sourceHighWater: string;
 }>;
+
+export function validateTranscriptContentRange(
+  value: unknown,
+  expected: Readonly<{
+    sessionId: string;
+    projectionGeneration: string;
+    reference: TranscriptContentRef;
+    offset: string;
+  }>,
+): TranscriptContentRange {
+  if (!isRecord(value)
+    || !exactKeys(value, [
+      "schema", "sessionId", "projectionVersion", "projectionGeneration", "refId",
+      "revision", "byteLength", "startOffset", "endOffset", "content", "hasMore",
+    ])
+    || value.schema !== "transcript.content.range.v1"
+    || value.sessionId !== expected.sessionId
+    || value.projectionVersion !== PROJECTION_VERSION
+    || value.projectionGeneration !== expected.projectionGeneration
+    || value.refId !== expected.reference.refId
+    || value.revision !== expected.reference.revision
+    || value.byteLength !== expected.reference.byteLength
+    || value.startOffset !== expected.offset
+    || !decimal(value.endOffset)
+    || BigInt(value.endOffset) < BigInt(expected.offset)
+    || BigInt(value.endOffset) > BigInt(expected.reference.byteLength)
+    || typeof value.content !== "string"
+    || utf8Bytes(value.content) > MAX_INLINE_BYTES
+    || BigInt(value.endOffset) - BigInt(expected.offset) !== BigInt(utf8Bytes(value.content))
+    || typeof value.hasMore !== "boolean"
+    || value.hasMore !== (BigInt(value.endOffset) < BigInt(value.byteLength as string))) {
+    throw new Error("invalid transcript content range");
+  }
+  return cloneTranscriptValue(value as TranscriptContentRange);
+}
 
 function invalid(kind: "page" | "patch page"): never {
   throw new Error(`invalid transcript ${kind}`);
