@@ -118,6 +118,16 @@ export type ProjectedAgentRun = AgentRunViewState & {
   lastSourceSequence: number;
 };
 
+export type TranscriptProjectionWork = {
+  committedEventVisits: number;
+  liveOverlayApplications: number;
+};
+
+export const createTranscriptProjectionWork = (): TranscriptProjectionWork => ({
+  committedEventVisits: 0,
+  liveOverlayApplications: 0,
+});
+
 export type HistoryPage = UnknownRecord & {
   schema: typeof HISTORY_PAGE_SCHEMA;
   session: UnknownRecord & { id: string; workspaceId: string };
@@ -519,7 +529,10 @@ function validateLiveReasoning(value: unknown): LiveAssistant["reasoning"] {
   return { blockId: value.blockId as string, requestId: value.requestId, text: value.text };
 }
 
-function projectAgentRun(agentRun: RawAgentRun): ProjectedAgentRun {
+function projectAgentRun(
+  agentRun: RawAgentRun,
+  work?: TranscriptProjectionWork,
+): ProjectedAgentRun {
   const initialStartedAtMs = Date.parse(agentRun.startedAt || agentRun.createdAt || "");
   let view: AgentRunViewState = {
     ...agentRun,
@@ -541,6 +554,7 @@ function projectAgentRun(agentRun: RawAgentRun): ProjectedAgentRun {
   let previousSequence = 0;
   const eventIds = new Set<string>();
   for (const stored of agentRun.events) {
+    if (work) work.committedEventVisits += 1;
     requireObject(stored, "stored session event");
     if (!hasExactFields(stored, ["event", "sequence"]) || !Number.isInteger(stored.sequence) || stored.sequence <= previousSequence) {
       throw new Error("stored session event ordering is invalid");
@@ -568,6 +582,7 @@ function projectAgentRun(agentRun: RawAgentRun): ProjectedAgentRun {
         : view.phaseStartedAtMs,
     };
   }
+  if (work && agentRun.live) work.liveOverlayApplications += 1;
   view = applyLive(view, agentRun.live);
   return { ...view, eventIds: [...eventIds], lastSourceSequence: previousSequence };
 }
@@ -575,6 +590,7 @@ function projectAgentRun(agentRun: RawAgentRun): ProjectedAgentRun {
 export function hydrateAgentRun(
   agentRun: unknown,
   identity: AgentRunIdentity = {},
+  work?: TranscriptProjectionWork,
 ): ProjectedAgentRun {
   requireObject(agentRun, "agent run history");
   const fields = ["completedAt", "createdAt", "events", "id", "live", "model", "startedAt", "status", "streamCursor", "citations", "citationSequence"];
@@ -588,7 +604,7 @@ export function hydrateAgentRun(
     ...(identity.sessionId ? { sessionId: identity.sessionId } : {}),
     ...(identity.workspaceId ? { workspaceId: identity.workspaceId } : {}),
   } as RawAgentRun;
-  return projectAgentRun(boundAgentRun);
+  return projectAgentRun(boundAgentRun, work);
 }
 
 function quarantineAgentRun(
@@ -621,6 +637,7 @@ function quarantineAgentRun(
 export function validateHistoryPage(
   page: unknown,
   expectedIdentity: AgentRunIdentity = {},
+  work?: TranscriptProjectionWork,
 ): HistoryPage {
   const fields = ["agentRuns", "hasMore", "nextCursor", "schema", "session"];
   if (!isRecord(page) || !hasExactFields(page, fields) || page.schema !== HISTORY_PAGE_SCHEMA || !Array.isArray(page.agentRuns)) {
@@ -638,7 +655,7 @@ export function validateHistoryPage(
   const identity = { sessionId: page.session.id, workspaceId: page.session.workspaceId };
   const agentRuns = page.agentRuns.map((agentRun) => {
     try {
-      return hydrateAgentRun(agentRun, identity);
+      return hydrateAgentRun(agentRun, identity, work);
     } catch {
       return quarantineAgentRun(agentRun, identity);
     }
@@ -720,6 +737,7 @@ export async function readSse(
 export function applyStreamEntry(
   agentRun: ProjectedAgentRun,
   entry: StreamEntry,
+  work?: TranscriptProjectionWork,
 ): ProjectedAgentRun {
   const { cursor, item } = entry;
   if (item.agentRunId !== agentRun.id) throw new Error("Session stream AgentRun binding mismatch");
@@ -731,7 +749,7 @@ export function applyStreamEntry(
       events: [...events, { sequence: item.sourceSequence, event: item.event }].sort((left, right) => left.sequence - right.sequence),
       live: TERMINAL_EVENT_TYPES.has(item.event.type) ? null : agentRun.live,
       streamCursor: cursor || agentRun.streamCursor,
-    });
+    }, work);
   }
   if (agentRun.live?.messageId === item.messageId && item.revision <= agentRun.live.revision) {
     return { ...agentRun, streamCursor: cursor || agentRun.streamCursor };
@@ -747,7 +765,7 @@ export function applyStreamEntry(
       ...(item.reasoning !== undefined ? { reasoning: item.reasoning } : {}),
     },
     streamCursor: cursor || agentRun.streamCursor,
-  });
+  }, work);
 }
 
 export function isAgentRunActive(agentRun: { status: string }) {

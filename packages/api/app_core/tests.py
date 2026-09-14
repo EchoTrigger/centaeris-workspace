@@ -102,7 +102,7 @@ from .deferred_input import resolve_deferred_input
 from .agent_run_authorization_factory import (
     create_agent_run_authorization as create_agent_run_authorization_with_image,
 )
-from .runtime_client import build_agent_run_start
+from .runtime_client import TranscriptRuntimeError, build_agent_run_start
 from .session_event import (
     project_committed_agent_run,
     rebuild_agent_run_citation_projection,
@@ -2994,6 +2994,153 @@ class ApiVerticalSliceTests(TransactionTestCase):
         )
         self.assertEqual(
             naive_timestamp.json(), {"error": "session_history_cursor_invalid"}
+        )
+
+    def test_transcript_page_freezes_source_high_water_and_reauthorizes_older_pages(self):
+        owner = User.objects.create_user(username="transcript-owner@example.com", password="password")
+        stranger = User.objects.create_user(username="transcript-stranger@example.com", password="password")
+        workspace = Workspace.objects.create(name="Transcript", createdBy=owner)
+        workspace.members.add(owner)
+        model = ModelConfig.objects.create(displayName="Transcript")
+        session = create_session(workspace=workspace, owner=owner)
+        run = AgentRun.objects.create(
+            workspace=workspace, session=session, user=owner, modelConfig=model, prompt="hello"
+        )
+        append_started(run)
+        page = {
+            "schema": "transcript.page.v1",
+            "sessionId": session.id,
+            "projectionVersion": "transcript.projection.v1",
+            "projectionGeneration": "generation-1",
+            "sourceHighWater": "2",
+            "blocks": [],
+            "olderCursor": "bound-cursor",
+            "hasOlder": True,
+            "resumeCursors": [
+                {"streamId": "workspace-transcript.v1", "cursor": "2"}
+            ],
+        }
+        self.client.force_login(owner)
+        with patch("app_core.http.workspaces.request_transcript_page", return_value=page) as request_page:
+            response = self.client.get(f"/api/sessions/{session.id}/transcript")
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json(), page)
+        self.assertEqual(
+            request_page.call_args.args[0],
+            {
+                "schema": "runtime.transcript.page.read.v1",
+                "sessionId": session.id,
+                "projectionVersion": "transcript.projection.v1",
+                "projectionGeneration": None,
+                "sourceHighWater": "2",
+                "olderCursor": None,
+            },
+        )
+
+        with patch("app_core.http.workspaces.request_transcript_page", return_value=page) as request_page:
+            frozen_tail = self.client.get(
+                f"/api/sessions/{session.id}/transcript",
+                {"projectionGeneration": "generation-1", "sourceHighWater": "2"},
+            )
+        self.assertEqual(frozen_tail.status_code, 200, frozen_tail.content)
+        self.assertIsNone(request_page.call_args.args[0]["olderCursor"])
+        self.assertEqual(request_page.call_args.args[0]["sourceHighWater"], "2")
+
+        with patch("app_core.http.workspaces.request_transcript_page", return_value=page) as request_page:
+            older = self.client.get(
+                f"/api/sessions/{session.id}/transcript",
+                {
+                    "projectionGeneration": "generation-1",
+                    "sourceHighWater": "2",
+                    "olderCursor": "bound-cursor",
+                },
+            )
+        self.assertEqual(older.status_code, 200, older.content)
+        self.assertEqual(request_page.call_args.args[0]["sourceHighWater"], "2")
+        self.assertEqual(request_page.call_args.args[0]["olderCursor"], "bound-cursor")
+
+        not_ready_payload = {
+            "error": "transcript_projection_not_ready",
+            "projectionGeneration": "generation-1",
+            "sourceHighWater": "2",
+            "projectedHighWater": "1",
+        }
+        with patch(
+            "app_core.http.workspaces.request_transcript_page",
+            side_effect=TranscriptRuntimeError(not_ready_payload),
+        ):
+            not_ready = self.client.get(
+                f"/api/sessions/{session.id}/transcript",
+                {
+                    "projectionGeneration": "generation-1",
+                    "sourceHighWater": "2",
+                },
+            )
+        self.assertEqual(not_ready.status_code, 409, not_ready.content)
+        self.assertEqual(not_ready.json(), not_ready_payload)
+        self.assertEqual(not_ready.headers["Cache-Control"], "no-store")
+
+        workspace.members.remove(owner)
+        with patch("app_core.http.workspaces.request_transcript_page") as revoked_runtime:
+            revoked = self.client.get(
+                f"/api/sessions/{session.id}/transcript",
+                {
+                    "projectionGeneration": "generation-1",
+                    "sourceHighWater": "2",
+                    "olderCursor": "bound-cursor",
+                },
+            )
+        self.assertEqual(revoked.status_code, 404)
+        revoked_runtime.assert_not_called()
+
+        self.client.force_login(stranger)
+        with patch("app_core.http.workspaces.request_transcript_page") as denied_runtime:
+            denied = self.client.get(f"/api/sessions/{session.id}/transcript")
+        self.assertEqual(denied.status_code, 404)
+        denied_runtime.assert_not_called()
+
+    def test_transcript_patch_read_freezes_through_waterline_and_reauthorizes(self):
+        owner = User.objects.create_user(username="patch-owner@example.com", password="password")
+        workspace = Workspace.objects.create(name="Patches", createdBy=owner)
+        workspace.members.add(owner)
+        model = ModelConfig.objects.create(displayName="Patches")
+        session = create_session(workspace=workspace, owner=owner)
+        run = AgentRun.objects.create(
+            workspace=workspace, session=session, user=owner, modelConfig=model, prompt="hello"
+        )
+        append_started(run)
+        append_completed(run)
+        payload = {
+            "schema": "transcript.patch.page.v1",
+            "sessionId": session.id,
+            "projectionVersion": "transcript.projection.v1",
+            "projectionGeneration": "generation-1",
+            "throughSourceHighWater": "4",
+            "patches": [],
+            "nextSourceHighWater": "4",
+            "hasMore": False,
+        }
+        self.client.force_login(owner)
+        with patch("app_core.http.workspaces.request_transcript_patches", return_value=payload) as request_patches:
+            response = self.client.get(
+                f"/api/sessions/{session.id}/transcript/patches",
+                {
+                    "projectionGeneration": "generation-1",
+                    "afterSourceHighWater": "2",
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json(), payload)
+        self.assertEqual(
+            request_patches.call_args.args[0],
+            {
+                "schema": "runtime.transcript.patch.read.v1",
+                "sessionId": session.id,
+                "projectionVersion": "transcript.projection.v1",
+                "projectionGeneration": "generation-1",
+                "afterSourceHighWater": "2",
+                "throughSourceHighWater": "4",
+            },
         )
 
 

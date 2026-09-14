@@ -11,6 +11,7 @@ use centaeris_core::session::reliability::AGENT_RUN_LIFECYCLE_JOB_KIND;
 use centaeris_core::session::store::{
     AgentRuntimeSnapshotStorePort, RuntimeStore, RuntimeStoreError, SessionDataStorePort,
 };
+use centaeris_core::session::transcript::TranscriptProjectionStorePort;
 use centaeris_core::session::{
     parse_wire_record, reduce_event, reduce_events, rewrite_last_user_tail_tombstone,
     session_record_projects_to_agent_run_stream, validate_sequenced_session_records,
@@ -288,6 +289,7 @@ impl SessionDataStorePort for PostgresRuntimeStore {
                 .map(|row| row.get::<_, String>(0))
                 .collect::<Vec<_>>();
             for table in [
+                "transcript_projection_heads",
                 "runtime_events",
                 "session_runtime_snapshots",
                 "checkpoints",
@@ -507,6 +509,7 @@ pub struct PostgresSessionLog {
     workspace_id: String,
     session_id: String,
     prompt: String,
+    projection_store: Option<PostgresRuntimeStore>,
     agent_run_state: Arc<Mutex<HashMap<String, AgentRunAppendState>>>,
     /// Clones share incremental state and serialize append validation for this
     /// AgentRun, while each transaction holds a pooled connection only until commit.
@@ -1173,9 +1176,22 @@ impl PostgresSessionLog {
             workspace_id,
             session_id,
             prompt,
+            projection_store: None,
             agent_run_state: Arc::new(Mutex::new(HashMap::new())),
             append_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    pub(crate) fn new_with_projection_store(
+        projection_store: PostgresRuntimeStore,
+        connections: Arc<PostgresConnectionPool>,
+        workspace_id: String,
+        session_id: String,
+        prompt: String,
+    ) -> Self {
+        let mut log = Self::new(connections, workspace_id, session_id, prompt);
+        log.projection_store = Some(projection_store);
+        log
     }
 }
 
@@ -1417,7 +1433,50 @@ impl PostgresSessionLog {
                 .map_err(|_| "session record AgentRun state lock poisoned".to_string())?
                 .remove(agent_run_id);
         }
-        result
+        let receipt = result?;
+        if let (Some(store), Some(source_high_water)) = (
+            self.projection_store.as_ref(),
+            receipt.records.iter().map(|record| record.sequence).max(),
+        ) {
+            let current =
+                store.load_or_initialize_current_transcript_generation(self.session_id.as_str());
+            let projection = current.as_ref().map_err(Clone::clone).and_then(|current| {
+                store.catch_up_transcript_projection(
+                    self.session_id.as_str(),
+                    current.projection_generation.as_str(),
+                    source_high_water,
+                )
+            });
+            if let Err(error) = projection {
+                eprintln!(
+                    "transcript projection catch-up deferred after source commit: sessionId={} error={error}",
+                    self.session_id
+                );
+                if let Ok(current) = current {
+                    let invalidated = store
+                        .load_transcript_projection_head(
+                            self.session_id.as_str(),
+                            current.projection_generation.as_str(),
+                        )
+                        .ok()
+                        .flatten()
+                        .is_some_and(|head| head.invalidation_reason.is_some());
+                    if invalidated {
+                        if let Err(rebuild_error) = store.schedule_transcript_generation_rebuild(
+                            self.session_id.as_str(),
+                            source_high_water,
+                            current.projection_generation.as_str(),
+                        ) {
+                            eprintln!(
+                                "transcript generation rebuild scheduling failed after source commit: sessionId={} error={rebuild_error}",
+                                self.session_id
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok(receipt)
     }
 
     fn load_idempotent_batch(

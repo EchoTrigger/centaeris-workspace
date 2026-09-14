@@ -18,6 +18,7 @@ mod platform_materials;
 mod postgres_store;
 mod request_capacity;
 mod skill_projection;
+mod transcript_protocol;
 mod transient_stream;
 mod workspace_tools;
 
@@ -1282,6 +1283,8 @@ fn handle_request(
                 | "/mcp/catalog"
                 | "/hooks/catalog"
                 | "/internal/plugins/inspect"
+                | "/internal/transcript/page"
+                | "/internal/transcript/patches"
         )
     {
         return Ok(http_response(404, "text/plain", b"not_found".to_vec()));
@@ -1290,6 +1293,14 @@ fn handle_request(
         env::var("INTERNAL_API_TOKEN").map_err(|_| "INTERNAL_API_TOKEN is required".to_string())?;
     if request.headers.get("x-internal-token").map(String::as_str) != Some(token.as_str()) {
         return json_error_response(401, "unauthorized");
+    }
+    if let Some(response) = transcript_protocol::handle(
+        request.path.as_str(),
+        request.body.as_slice(),
+        job_store.as_ref(),
+    ) {
+        let (status, body) = response?;
+        return Ok(http_response(status, "application/json", body));
     }
     if request.path == "/internal/plugins/inspect" {
         let request = match serde_json::from_slice::<WorkspacePluginInspectRequest>(

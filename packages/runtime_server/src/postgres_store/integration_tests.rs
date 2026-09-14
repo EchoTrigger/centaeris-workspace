@@ -13,6 +13,10 @@ use centaeris_core::session::supplement::{
     CloseTurnSupplementQueueRequest, EnqueueTurnSupplementDisposition,
     EnqueueTurnSupplementRequest, TurnSupplementStoreError, TurnSupplementStorePort,
 };
+use centaeris_core::session::transcript::{
+    TranscriptPagePolicyV1, TranscriptPageReadRequestV1, TranscriptPatchReadRequestV1,
+    TranscriptProjectionStorePort, TRANSCRIPT_PROJECTION_VERSION_V1,
+};
 use centaeris_core::session::{
     RuntimeJobLeaseFence, SequencedSessionRecord, SessionLogPort, SessionLogRecord,
     SessionRecordType, RUNTIME_JOB_LEASE_FENCE_REJECTED, SESSION_EVENT_SCHEMA_VERSION,
@@ -330,6 +334,269 @@ fn reset_store(url: &str) {
     client
         .batch_execute("DROP SCHEMA IF EXISTS runtime CASCADE")
         .expect("reset runtime schema");
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_state() {
+    let _guard = TEST_LOCK.lock().expect("Postgres test lock");
+    let url = test_url();
+    reset_store(&url);
+    let mut setup = Client::connect(&url, NoTls).expect("connect transcript setup");
+    setup
+        .batch_execute(
+            r#"
+            DROP TABLE IF EXISTS public.app_core_sessionevent;
+            DROP TABLE IF EXISTS public.app_core_session CASCADE;
+            CREATE TABLE public.app_core_session(id varchar(64) PRIMARY KEY,workspace_id varchar(64) NOT NULL);
+            CREATE TABLE public.app_core_sessionevent(
+                "eventId" varchar(160) PRIMARY KEY,workspace_id varchar(64) NOT NULL,
+                session_id varchar(64) NOT NULL,agent_run_id varchar(64) NOT NULL,
+                sequence integer NOT NULL,agent_run_sequence integer NOT NULL,
+                projects_to_agent_run_stream boolean NOT NULL,payload jsonb NOT NULL,
+                "createdAtMs" bigint NOT NULL,"insertedAt" timestamptz NOT NULL DEFAULT clock_timestamp(),
+                UNIQUE(session_id,sequence),UNIQUE(agent_run_id,agent_run_sequence)
+            );
+            INSERT INTO public.app_core_session(id,workspace_id) VALUES('session_transcript','workspace_transcript');
+            "#,
+        )
+        .expect("create transcript source tables");
+    drop(setup);
+    let store = PostgresRuntimeStore::new(&url).expect("open Postgres transcript store");
+    let log = super::PostgresSessionLog::new(
+        store.ordinary_connections.clone(),
+        "workspace_transcript".to_string(),
+        "session_transcript".to_string(),
+        "hello".to_string(),
+    );
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let run = "agent_run_transcript";
+    let records = vec![
+        session_record(
+            run,
+            "session_transcript",
+            1,
+            SessionRecordType::AgentRunStarted,
+            serde_json::json!({"userObjective":"hello"}),
+            1,
+        ),
+        session_record(
+            run,
+            "session_transcript",
+            2,
+            SessionRecordType::UserMessage,
+            serde_json::json!({"messageId":"message:user","text":"hello","attachments":[]}),
+            2,
+        ),
+        session_record(
+            run,
+            "session_transcript",
+            3,
+            SessionRecordType::AssistantMessage,
+            serde_json::json!({"messageId":"message:assistant","modelMarkdown":"done","artifactRefs":[],"status":"done"}),
+            3,
+        ),
+        session_record(
+            run,
+            "session_transcript",
+            4,
+            SessionRecordType::AgentRunCompleted,
+            serde_json::json!({"doneReason":"finalized"}),
+            4,
+        ),
+    ];
+    runtime
+        .block_on(log.append_session_records(run, &records))
+        .expect("append source facts independently of transcript projection");
+    let first = store
+        .catch_up_transcript_projection("session_transcript", "generation-1", 1)
+        .expect("commit first projection event");
+    assert_eq!(first.projected_high_water, 1);
+    drop(log);
+    drop(store);
+    let store = PostgresRuntimeStore::new(&url).expect("reopen Postgres transcript store");
+    let request = serde_json::to_vec(&serde_json::json!({
+        "schema":"runtime.transcript.page.read.v1",
+        "sessionId":"session_transcript",
+        "projectionVersion":"transcript.projection.v1",
+        "projectionGeneration":null,
+        "sourceHighWater":"4",
+        "olderCursor":null
+    }))
+    .unwrap();
+    let mut served = false;
+    for _ in 0..=records.len() {
+        let (status, body) = crate::transcript_protocol::handle(
+            "/internal/transcript/page",
+            request.as_slice(),
+            &store,
+        )
+        .expect("transcript protocol route")
+        .expect("transcript protocol response");
+        if status == 200 {
+            let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(page["sourceHighWater"], "4");
+            assert_eq!(page["projectionGeneration"], "generation-1");
+            assert_eq!(
+                page["resumeCursors"],
+                serde_json::json!([{
+                    "streamId": "workspace-transcript.v1",
+                    "cursor": "4"
+                }])
+            );
+            served = true;
+            break;
+        }
+        assert_eq!(status, 409, "{}", String::from_utf8_lossy(&body));
+        let progress: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(progress["error"], "transcript_projection_not_ready");
+        assert_eq!(progress["sourceHighWater"], "4");
+    }
+    assert!(
+        served,
+        "bounded page retries must finish an existing backlog"
+    );
+    let page = store
+        .load_transcript_page(TranscriptPageReadRequestV1 {
+            session_id: "session_transcript".to_string(),
+            projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
+            projection_generation: "generation-1".to_string(),
+            source_high_water: "4".to_string(),
+            older_cursor: None,
+            policy: TranscriptPagePolicyV1::default(),
+        })
+        .expect("load projected transcript page");
+    assert_eq!(page.work.raw_event_visits, 0);
+    assert_eq!(page.page.blocks.len(), 2);
+    let patches = store
+        .load_transcript_patches(TranscriptPatchReadRequestV1 {
+            session_id: "session_transcript".to_string(),
+            projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
+            projection_generation: "generation-1".to_string(),
+            after_source_high_water: "2".to_string(),
+            through_source_high_water: "4".to_string(),
+        })
+        .expect("load committed transcript patches");
+    assert_eq!(patches.work.raw_event_visits, 0);
+    assert_eq!(patches.next_source_high_water, "4");
+
+    let mut storage = Client::connect(&url, NoTls).expect("inspect transcript storage");
+    let recovery_count = storage
+        .query_one(
+            "SELECT count(*) FROM runtime.transcript_projection_current_recoveries WHERE session_id='session_transcript' AND projection_generation='generation-1'",
+            &[],
+        )
+        .expect("count current transcript recoveries")
+        .get::<_, i64>(0);
+    assert_eq!(
+        recovery_count, 1,
+        "current recovery is a single overwritten slot"
+    );
+    let commits_with_recovery = storage
+        .query_one(
+            "SELECT count(*) FROM runtime.transcript_projection_commits WHERE session_id='session_transcript' AND (commit_json::jsonb->'checkpoint' <> 'null'::jsonb OR commit_json::jsonb->'frontier' <> 'null'::jsonb)",
+            &[],
+        )
+        .expect("inspect transcript patch history")
+        .get::<_, i64>(0);
+    assert_eq!(
+        commits_with_recovery, 0,
+        "patch history must not copy current recovery payloads"
+    );
+
+    let live_log = store.session_log(
+        "workspace_transcript".to_string(),
+        "session_transcript".to_string(),
+        "next".to_string(),
+    );
+    let next_run = "agent_run_transcript_next";
+    runtime
+        .block_on(live_log.append_session_records(
+            next_run,
+            &[
+                session_record(
+                    next_run,
+                    "session_transcript",
+                    1,
+                    SessionRecordType::AgentRunStarted,
+                    serde_json::json!({"userObjective":"next"}),
+                    5,
+                ),
+                session_record(
+                    next_run,
+                    "session_transcript",
+                    2,
+                    SessionRecordType::UserMessage,
+                    serde_json::json!({"messageId":"message:user:next","text":"next","attachments":[]}),
+                    6,
+                ),
+            ],
+        ))
+        .expect("append new facts while transcript producer is active");
+    let new_patches = store
+        .load_transcript_patches(TranscriptPatchReadRequestV1 {
+            session_id: "session_transcript".to_string(),
+            projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
+            projection_generation: "generation-1".to_string(),
+            after_source_high_water: "4".to_string(),
+            through_source_high_water: "6".to_string(),
+        })
+        .expect("new source facts are projected without a full history replay");
+    assert_eq!(new_patches.next_source_high_water, "6");
+    assert_eq!(new_patches.patches.len(), 2);
+
+    store
+        .delete_session_data("session_transcript")
+        .expect("delete session-derived transcript state");
+    assert!(store
+        .load_transcript_projection_head("session_transcript", "generation-1")
+        .expect("load deleted transcript head")
+        .is_none());
+
+    let mut break_projection = Client::connect(&url, NoTls).expect("connect projection failure");
+    break_projection
+        .batch_execute("DROP TABLE runtime.transcript_projection_heads CASCADE")
+        .expect("break only the derived transcript read model");
+    drop(break_projection);
+    let failure_log = store.session_log(
+        "workspace_transcript".to_string(),
+        "session_transcript".to_string(),
+        "facts survive".to_string(),
+    );
+    let failure_run = "agent_run_projection_failure";
+    let receipt = runtime
+        .block_on(failure_log.append_session_records(
+            failure_run,
+            &[
+                session_record(
+                    failure_run,
+                    "session_transcript",
+                    1,
+                    SessionRecordType::AgentRunStarted,
+                    serde_json::json!({"userObjective":"facts survive"}),
+                    7,
+                ),
+                session_record(
+                    failure_run,
+                    "session_transcript",
+                    2,
+                    SessionRecordType::UserMessage,
+                    serde_json::json!({"messageId":"message:user:failure","text":"facts survive","attachments":[]}),
+                    8,
+                ),
+            ],
+        ))
+        .expect("derived projection failure must not turn a committed source append into failure");
+    assert_eq!(receipt.records.len(), 2);
+    let mut verify = Client::connect(&url, NoTls).expect("verify committed source facts");
+    let count = verify
+        .query_one(
+            "SELECT count(*) FROM public.app_core_sessionevent WHERE agent_run_id=$1",
+            &[&failure_run],
+        )
+        .unwrap()
+        .get::<_, i64>(0);
+    assert_eq!(count, 2);
 }
 
 fn job(id: &str, key: &str) -> RuntimeJobRecord {

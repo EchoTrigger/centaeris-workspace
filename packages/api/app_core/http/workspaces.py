@@ -5,7 +5,7 @@ from typing import Literal
 
 from django.db import transaction
 from django.http import JsonResponse
-from django.db.models import Q
+from django.db.models import Max, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from ninja import Router, Status
@@ -46,6 +46,7 @@ from app_core.agent_run_stream import (
     load_session_high_water,
 )
 from app_core.runtime_client import (
+    TranscriptRuntimeError,
     request_agent_run_cancellation,
     request_agent_run_supplement,
     request_workspace_skill_catalog,
@@ -53,6 +54,8 @@ from app_core.runtime_client import (
     request_workspace_hook_catalog,
     request_workspace_mcp_catalog,
     request_execution_profile,
+    request_transcript_page,
+    request_transcript_patches,
     schedule_agent_run_lifecycle,
 )
 from app_core.session_event import (
@@ -108,6 +111,7 @@ router = Router(tags=["workspaces-sessions"], by_alias=True)
 SESSION_HISTORY_SCHEMA = "session.history.page.v1"
 SESSION_HISTORY_DEFAULT_LIMIT = 40
 SESSION_HISTORY_MAX_LIMIT = 100
+TRANSCRIPT_PROJECTION_VERSION = "transcript.projection.v1"
 CONTEXT_COMPACTION_HEADROOM_TOKENS = 32_768
 
 
@@ -677,6 +681,118 @@ def permanently_delete_session(request, session_id: str):
 
 
 @router.get(
+    "/sessions/{session_id}/transcript",
+    auth=session_auth,
+    response=None,
+)
+def session_transcript(request, session_id: str):
+    session = _authorized_transcript_session(request.user, session_id)
+    if session is None:
+        return _transcript_json_response({"error": "session_not_found"}, status=404)
+    fields = set(request.GET.keys())
+    if any(len(request.GET.getlist(field)) != 1 for field in fields):
+        return _transcript_json_response(
+            {"error": "transcript_page_query_invalid"}, status=400
+        )
+    if not fields:
+        source_high_water = _session_source_high_water(session.id)
+        generation = None
+        older_cursor = None
+    elif fields in (
+        {"sourceHighWater", "projectionGeneration"},
+        {"sourceHighWater", "projectionGeneration", "olderCursor"},
+    ):
+        source_high_water = request.GET["sourceHighWater"]
+        generation = request.GET["projectionGeneration"]
+        older_cursor = request.GET.get("olderCursor")
+        current_high_water = _session_source_high_water(session.id)
+        if (
+            not _canonical_waterline(source_high_water)
+            or int(source_high_water) > current_high_water
+            or not generation
+            or len(generation) > 160
+            or (older_cursor is not None and (not older_cursor or len(older_cursor) > 4096))
+        ):
+            return _transcript_json_response(
+                {"error": "transcript_page_cursor_invalid"}, status=400
+            )
+    else:
+        return _transcript_json_response(
+            {"error": "transcript_page_query_invalid"}, status=400
+        )
+    body = {
+        "schema": "runtime.transcript.page.read.v1",
+        "sessionId": session.id,
+        "projectionVersion": TRANSCRIPT_PROJECTION_VERSION,
+        "projectionGeneration": generation,
+        "sourceHighWater": str(source_high_water),
+        "olderCursor": older_cursor,
+    }
+    try:
+        page = request_transcript_page(body)
+    except TranscriptRuntimeError as error:
+        return _transcript_json_response(error.payload, status=409)
+    except RuntimeError:
+        logger.exception("Workspace transcript page request failed", extra={"sessionId": session.id})
+        return _transcript_json_response(
+            {"error": "transcript_page_unavailable"}, status=503
+        )
+    return _transcript_json_response(page)
+
+
+@router.get(
+    "/sessions/{session_id}/transcript/patches",
+    auth=session_auth,
+    response=None,
+)
+def session_transcript_patches(request, session_id: str):
+    session = _authorized_transcript_session(request.user, session_id)
+    if session is None:
+        return _transcript_json_response({"error": "session_not_found"}, status=404)
+    fields = set(request.GET.keys())
+    if any(len(request.GET.getlist(field)) != 1 for field in fields) or fields not in (
+        {"afterSourceHighWater", "projectionGeneration"},
+        {"afterSourceHighWater", "throughSourceHighWater", "projectionGeneration"},
+    ):
+        return _transcript_json_response(
+            {"error": "transcript_patch_query_invalid"}, status=400
+        )
+    after = request.GET["afterSourceHighWater"]
+    generation = request.GET["projectionGeneration"]
+    current_high_water = _session_source_high_water(session.id)
+    through = request.GET.get("throughSourceHighWater", str(current_high_water))
+    if (
+        not _canonical_waterline(after)
+        or not _canonical_waterline(through)
+        or int(after) > int(through)
+        or int(through) > current_high_water
+        or not generation
+        or len(generation) > 160
+    ):
+        return _transcript_json_response(
+            {"error": "transcript_patch_cursor_invalid"}, status=400
+        )
+    body = {
+        "schema": "runtime.transcript.patch.read.v1",
+        "sessionId": session.id,
+        "projectionVersion": TRANSCRIPT_PROJECTION_VERSION,
+        "projectionGeneration": generation,
+        "afterSourceHighWater": after,
+        "throughSourceHighWater": through,
+    }
+    try:
+        result = request_transcript_patches(body)
+    except TranscriptRuntimeError as error:
+        return _transcript_json_response(error.payload, status=409)
+    except RuntimeError:
+        logger.exception("Workspace transcript patch request failed", extra={"sessionId": session.id})
+        return _transcript_json_response(
+            {"error": "transcript_patch_unavailable"}, status=503
+        )
+    return _transcript_json_response(result)
+
+
+@router.get(
     "/sessions/{session_id}/history",
     auth=session_auth,
     response={200: SessionHistoryEnvelope} | COMMON_ERROR_RESPONSES,
@@ -861,6 +977,44 @@ def session_context_usage(request, session_id: str):
         "sessionId": session.id,
         "contextUsage": context_usage,
     }
+
+
+def _authorized_transcript_session(user, session_id: str) -> Session | None:
+    try:
+        session = Session.objects.select_related("workspace").get(
+            id=session_id,
+            owner=user,
+            purgedAt__isnull=True,
+            agent__purgedAt__isnull=True,
+        )
+    except Session.DoesNotExist:
+        return None
+    if workspace_membership_for(user, session.workspace_id) is None:
+        return None
+    return session
+
+
+def _transcript_json_response(payload: dict, *, status: int = 200) -> JsonResponse:
+    response = JsonResponse(payload, status=status)
+    response["Cache-Control"] = "no-store"
+    return response
+
+
+def _session_source_high_water(session_id: str) -> int:
+    return SessionEvent.objects.filter(session_id=session_id).aggregate(
+        value=Max("sequence")
+    )["value"] or 0
+
+
+def _canonical_waterline(value: str) -> bool:
+    return (
+        isinstance(value, str)
+        and value.isascii()
+        and value.isdigit()
+        and (value == "0" or not value.startswith("0"))
+        and len(value) <= 20
+        and int(value) <= 18_446_744_073_709_551_615
+    )
 
 
 def _encode_session_history_cursor(agent_run: AgentRun) -> str:
