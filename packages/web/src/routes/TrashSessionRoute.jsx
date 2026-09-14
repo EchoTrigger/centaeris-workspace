@@ -1,15 +1,23 @@
-
 import { useTranslation } from "../i18n";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useRevalidator, useRouteLoaderData } from "react-router";
 import { ArrowLeft, LoaderCircle, RotateCcw, Trash2 } from "lucide-react";
-import { apiJson, apiUrl } from "../api";
+import { apiJson } from "../api";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import { createChatViewStore } from "../chat/chatViewStore";
-import { validateHistoryPage } from "../chat/sessionEvents";
-import { VirtualAgentRunList } from "../chat/VirtualAgentRunList";
-import { attachmentPreviewUrl } from "../chat/attachments.mjs";
+import { createTranscriptViewStore } from "../chat/transcriptViewStore";
+import { createWorkspaceTranscriptTransport } from "../chat/transcriptTransport";
+import { TranscriptBlockList } from "../chat/TranscriptBlockList";
 import { ShellPage } from "../shell/ShellPage";
+
+function requireSessionEnvelope(value, sessionId, workspaceId) {
+  const session = value?.session;
+  if (!session || session.id !== sessionId || session.workspaceId !== workspaceId
+    || typeof session.agentId !== "string"
+    || !["active", "deleted"].includes(session.status)) {
+    throw new Error("session_response_invalid");
+  }
+  return session;
+}
 
 export default function TrashSessionRoute() {
   const { t } = useTranslation();
@@ -19,12 +27,13 @@ export default function TrashSessionRoute() {
   const navigate = useNavigate();
   const revalidator = useRevalidator();
   const storeRef = useRef(null);
-  if (!storeRef.current) storeRef.current = createChatViewStore();
+  if (!storeRef.current) storeRef.current = createTranscriptViewStore();
   const store = storeRef.current;
+  const transportRef = useRef(null);
+  if (!transportRef.current) transportRef.current = createWorkspaceTranscriptTransport();
+  const transport = transportRef.current;
+  const olderRequestRef = useRef(null);
   const [session, setSession] = useState(null);
-  const [assets, setAssets] = useState([]);
-  const [cursor, setCursor] = useState(null);
-  const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [restoring, setRestoring] = useState(false);
@@ -33,45 +42,79 @@ export default function TrashSessionRoute() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    let active = true;
+    const controller = new AbortController();
+    olderRequestRef.current?.controller.abort();
+    olderRequestRef.current = null;
+    store.clear();
+    setSession(null);
     setLoading(true);
+    setLoadingOlder(false);
     setError("");
     Promise.all([
-      apiJson(`/api/sessions/${encodeURIComponent(sessionId)}/history?limit=40`),
-      apiJson(`/api/sessions/${encodeURIComponent(sessionId)}/assets`),
-    ]).then(([historyResult, assetResult]) => {
-      if (!active) return;
-      const history = validateHistoryPage(historyResult, { sessionId, workspaceId: workspace.id });
-      if (history.session.status === "active" && agents.some((agent) => agent.id === history.session.agentId)) {
-        navigate(`${base}/agents/${encodeURIComponent(history.session.agentId)}?sessionId=${encodeURIComponent(sessionId)}`, { replace: true });
+      apiJson(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+        signal: controller.signal,
+      }),
+      transport.loadTail(sessionId, controller.signal),
+    ]).then(([sessionResult, tailPage]) => {
+      if (controller.signal.aborted) return;
+      const loadedSession = requireSessionEnvelope(
+        sessionResult,
+        sessionId,
+        workspace.id,
+      );
+      if (loadedSession.status === "active"
+        && agents.some((agent) => agent.id === loadedSession.agentId)) {
+        navigate(`${base}/agents/${encodeURIComponent(loadedSession.agentId)}?sessionId=${encodeURIComponent(sessionId)}`, { replace: true });
         return;
       }
-      setSession(history.session);
-      setAssets(assetResult.assets || []);
-      store.replaceAll(history.agentRuns);
-      setCursor(history.nextCursor);
-      setHasMore(history.hasMore);
+      setSession(loadedSession);
+      store.openTail(tailPage);
     }).catch((requestError) => {
-      if (!active) return;
+      if (controller.signal.aborted) return;
       if (requestError.status === 404) navigate(`${base}/app`, { replace: true });
       else setError(t("trashSessionRoute.unableToLoadConversationHistoryValue", { value1: requestError.message }));
-    }).finally(() => active && setLoading(false));
-    return () => { active = false; store.clear(); };
-  }, [agents, base, navigate, sessionId, store, workspace.id, t]);
+    }).finally(() => {
+      if (!controller.signal.aborted) setLoading(false);
+    });
+    return () => {
+      controller.abort();
+      olderRequestRef.current?.controller.abort();
+      olderRequestRef.current = null;
+      store.clear();
+    };
+  }, [agents, base, navigate, sessionId, store, transport, workspace.id, t]);
 
   async function loadOlder() {
-    if (!cursor || !hasMore || loadingOlder) return;
+    const current = store.getListSnapshot();
+    if (!current.hasOlder || !current.olderCursor || loadingOlder
+      || !current.sessionId || !current.projectionVersion
+      || !current.projectionGeneration) return;
+    const controller = new AbortController();
+    const request = {
+      controller,
+      viewEpoch: current.viewEpoch,
+      olderCursor: current.olderCursor,
+    };
+    olderRequestRef.current = request;
     setLoadingOlder(true);
     try {
-      const result = await apiJson(`/api/sessions/${encodeURIComponent(sessionId)}/history?limit=40&before=${encodeURIComponent(cursor)}`);
-      const page = validateHistoryPage(result, { sessionId, workspaceId: workspace.id });
-      store.prependAgentRuns(page.agentRuns);
-      setCursor(page.nextCursor);
-      setHasMore(page.hasMore);
+      const page = await transport.loadOlder({
+        sessionId: current.sessionId,
+        projectionVersion: current.projectionVersion,
+        projectionGeneration: current.projectionGeneration,
+        sourceHighWater: current.sourceHighWater,
+      }, current.olderCursor, controller.signal);
+      if (olderRequestRef.current !== request) return;
+      store.prependPage(page, current.viewEpoch);
     } catch (requestError) {
-      setError(t("trashSessionRoute.unableToLoadEarlierMessagesValue", { value1: requestError.message }));
+      if (!controller.signal.aborted) {
+        setError(t("trashSessionRoute.unableToLoadEarlierMessagesValue", { value1: requestError.message }));
+      }
     } finally {
-      setLoadingOlder(false);
+      if (olderRequestRef.current === request) {
+        olderRequestRef.current = null;
+        setLoadingOlder(false);
+      }
     }
   }
 
@@ -110,7 +153,6 @@ export default function TrashSessionRoute() {
   }
 
   const parentActive = session && agents.some((agent) => agent.id === session.agentId);
-  const openProtected = (path) => window.open(apiUrl(path), "_blank", "noopener,noreferrer");
   const remainingDays = session?.deletedAt ? Math.max(1, Math.ceil((new Date(session.deletedAt).valueOf() + 30 * 86400000 - Date.now()) / 86400000)) : null;
 
   return (
@@ -123,17 +165,12 @@ export default function TrashSessionRoute() {
       </div>
       {error ? <div className="errorBanner" role="alert">{error}</div> : null}
       <section className="shTrashHistory" aria-label={t("trashSessionRoute.readOnlyConversationHistory")}>
-        <VirtualAgentRunList
+        <TranscriptBlockList
           store={store}
           sessionId={sessionId}
           loadingHistory={loading}
-          hasMoreHistory={hasMore}
           loadingOlderHistory={loadingOlder}
           onLoadOlderHistory={loadOlder}
-          assets={assets}
-          onShowCitation={(_agentRunId, citation) => openProtected(`${citation.sourceUrl}/preview`)}
-          onShowArtifact={(_agentRunId, artifact) => openProtected(artifact.downloadUrl)}
-          onShowAttachment={(asset) => window.open(attachmentPreviewUrl(asset), "_blank", "noopener,noreferrer")}
         />
       </section>
       <ConfirmDialog open={purgeOpen} title={t("appRoute.deleteThisConversation")} busy={purging} onCancel={() => setPurgeOpen(false)} onConfirm={() => void purge()} />

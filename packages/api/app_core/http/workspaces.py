@@ -1,4 +1,3 @@
-import base64
 import json
 import logging
 from typing import Literal
@@ -7,7 +6,6 @@ from django.db import transaction
 from django.http import JsonResponse
 from django.db.models import Max, Q
 from django.utils import timezone
-from django.utils.dateparse import parse_datetime
 from ninja import Router, Status
 from ninja.responses import codes_4xx
 from pydantic import Field, ValidationError, field_validator
@@ -37,14 +35,7 @@ from app_core.plugin_catalog import (
     plugin_activation_for_workspace,
 )
 from app_core.agent_run_authorization_factory import create_agent_run_authorization
-from app_core.agent_run_stream import (
-    AgentRunStreamUnavailable,
-    advance_overlay_barrier,
-    encode_stream_cursor,
-    live_overlay_is_superseded,
-    load_live_text_state,
-    load_session_high_water,
-)
+from app_core.agent_run_stream import encode_stream_cursor
 from app_core.runtime_client import (
     TranscriptRuntimeError,
     request_agent_run_cancellation,
@@ -59,7 +50,6 @@ from app_core.runtime_client import (
     schedule_agent_run_lifecycle,
 )
 from app_core.session_event import (
-    citation_snapshot,
     committed_session_terminal_state,
     project_committed_agent_run,
 )
@@ -77,7 +67,6 @@ from .response_schema import (
     SessionEnvelope,
     SessionProjectEnvelope,
     SessionProjectsEnvelope,
-    SessionHistoryEnvelope,
     SessionContextUsageEnvelope,
     AgentRunAcceptedResponse,
     AgentRunCancellationResponse,
@@ -108,9 +97,6 @@ from .serialization import (
 
 logger = logging.getLogger(__name__)
 router = Router(tags=["workspaces-sessions"], by_alias=True)
-SESSION_HISTORY_SCHEMA = "session.history.page.v1"
-SESSION_HISTORY_DEFAULT_LIMIT = 40
-SESSION_HISTORY_MAX_LIMIT = 100
 TRANSCRIPT_PROJECTION_VERSION = "transcript.projection.v1"
 CONTEXT_COMPACTION_HEADROOM_TOKENS = 32_768
 
@@ -540,7 +526,7 @@ def create_workspace_session(request, workspace_id: str, payload: SessionCreateR
     response={200: SessionEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def get_session(request, session_id: str):
-    session = _session_for_update(request.user, session_id, lock=False)
+    session = _authorized_transcript_session(request.user, session_id)
     if session is None:
         return Status(404, {"error": "session_not_found"})
     return {"session": serialize_session(session)}
@@ -793,155 +779,60 @@ def session_transcript_patches(request, session_id: str):
 
 
 @router.get(
-    "/sessions/{session_id}/history",
+    "/sessions/{session_id}/transcript/active-agent-run",
     auth=session_auth,
-    response={200: SessionHistoryEnvelope} | COMMON_ERROR_RESPONSES,
+    response=None,
 )
-def session_history(request, session_id: str):
-    try:
-        session = Session.objects.select_related("workspace").get(
-            id=session_id,
-            owner=request.user,
-            purgedAt__isnull=True,
-            agent__purgedAt__isnull=True,
+def session_transcript_active_agent_run(request, session_id: str):
+    session = _authorized_transcript_session(request.user, session_id)
+    if session is None:
+        return _transcript_json_response({"error": "session_not_found"}, status=404)
+    fields = set(request.GET.keys())
+    source_high_water = request.GET.get("sourceHighWater")
+    if (
+        fields != {"sourceHighWater"}
+        or len(request.GET.getlist("sourceHighWater")) != 1
+        or not _canonical_waterline(source_high_water)
+        or int(source_high_water) > _session_source_high_water(session.id)
+    ):
+        return _transcript_json_response(
+            {"error": "transcript_active_agent_run_query_invalid"}, status=400
         )
-    except Session.DoesNotExist:
-        return Status(404, {"error": "session_not_found"})
-    if workspace_membership_for(request.user, session.workspace_id) is None:
-        return Status(404, {"error": "session_not_found"})
-    query_fields = set(request.GET.keys())
-    if not query_fields.issubset({"before", "limit"}):
-        return Status(400, {"error": "session_history_query_invalid"})
-    if any(len(request.GET.getlist(field)) != 1 for field in query_fields):
-        return Status(400, {"error": "session_history_query_invalid"})
-    raw_limit = request.GET.get("limit", str(SESSION_HISTORY_DEFAULT_LIMIT))
-    try:
-        limit = int(raw_limit)
-    except (TypeError, ValueError):
-        return Status(400, {"error": "session_history_limit_invalid"})
-    if limit < 1 or limit > SESSION_HISTORY_MAX_LIMIT or str(limit) != raw_limit:
-        return Status(400, {"error": "session_history_limit_invalid"})
-    before = request.GET.get("before")
-    cursor = None
-    if before is not None:
-        try:
-            cursor = _decode_session_history_cursor(before)
-        except ValueError:
-            return Status(400, {"error": "session_history_cursor_invalid"})
-
-    agent_runs = []
-    run_query = session.agent_runs.select_related(
-        "modelConfig",
-        "authorization",
-    ).filter(
-        Q(status__in={"queued", "running"})
-        | Q(events__projects_to_agent_run_stream=True)
-    ).distinct().order_by("-createdAt", "-id")
-    if cursor is not None:
-        run_query = run_query.filter(
-            Q(createdAt__lt=cursor["createdAt"])
-            | Q(createdAt=cursor["createdAt"], id__lt=cursor["id"])
+    candidates = list(
+        session.agent_runs.filter(status__in={"queued", "running"})
+        .order_by("-createdAt", "-id")[:2]
+    )
+    active_runs = []
+    for agent_run in candidates:
+        terminal_state = committed_session_terminal_state(agent_run)
+        if terminal_state is None:
+            active_runs.append(agent_run)
+        else:
+            project_committed_agent_run(agent_run, terminal_state)
+    if len(active_runs) > 1:
+        return _transcript_json_response(
+            {"error": "transcript_active_agent_run_conflict"}, status=409
         )
-    page_descending = list(run_query[: limit + 1])
-    has_more = len(page_descending) > limit
-    page = list(reversed(page_descending[:limit]))
-    for agent_run in page:
-        try:
-            terminal_agent_run = agent_run.status in {"completed", "failed", "cancelled"}
-            if not terminal_agent_run and committed_session_terminal_state(agent_run) is not None:
-                agent_run = project_committed_agent_run(agent_run)
-                terminal_agent_run = True
-            stream_cursor = "0-0"
-            live_state = None
-            stored_events = list(
-                SessionEvent.objects.filter(
-                    agent_run=agent_run,
-                    projects_to_agent_run_stream=True,
-                ).order_by("sequence", "eventId")
-            )
-            overlay_barriers = {}
-            for stored in stored_events:
-                advance_overlay_barrier(
-                    overlay_barriers,
-                    stored.payload,
-                    stored.sequence,
-                )
-            if stored_events:
-                stream_cursor = encode_stream_cursor(
-                    agent_run.id,
-                    stored_events[-1].sequence,
-                )
-            if not terminal_agent_run:
-                try:
-                    live_state = load_live_text_state(agent_run.id)
-                except AgentRunStreamUnavailable as error:
-                    if str(error) == "agent_run_live_state_invalid":
-                        raise ValueError(str(error)) from error
-                    logger.warning(
-                        "Redis AgentRun buffer is unavailable; serving Postgres history only",
-                        extra={"agentRunId": agent_run.id},
-                    )
-            if live_state is not None:
-                if live_state["afterSequence"] > load_session_high_water(
-                    agent_run.session_id
-                ):
-                    raise ValueError(
-                        "live afterSequence exceeds PostgreSQL session high-water"
-                    )
-                if live_overlay_is_superseded(live_state, overlay_barriers):
-                    live_state = None
-            if live_state is not None:
-                sealed = next(
-                    (
-                        stored.payload
-                        for stored in stored_events
-                        if stored.payload["type"] == "assistant_message"
-                        and stored.payload["payload"]["messageId"]
-                        == live_state["messageId"]
+    active_run = active_runs[0] if active_runs else None
+    return _transcript_json_response(
+        {
+            "schema": "workspace.transcript.active_agent_run.v1",
+            "sessionId": session.id,
+            "agentRun": (
+                {
+                    "agentRunId": active_run.id,
+                    "status": active_run.status,
+                    "streamCursor": encode_stream_cursor(
+                        active_run.id, int(source_high_water)
                     ),
-                    None,
-                )
-                if sealed is not None:
-                    if sealed["turnId"] != live_state["turnId"]:
-                        raise ValueError(
-                            "live assistant message identity conflicts with sealed history"
-                        )
-                    live_state = None
-        except (RuntimeError, ValueError) as error:
-            logger.exception(
-                "Session history is invalid",
-                extra={"agentRunId": agent_run.id},
-            )
-            return Status(409, {"error": str(error)})
-        citations = citation_snapshot(agent_run)
-        agent_runs.append(
-            {
-                "id": agent_run.id,
-                "status": agent_run.status,
-                "model": serialize_model(agent_run.modelConfig),
-                "createdAt": agent_run.createdAt.isoformat(),
-                "startedAt": agent_run.startedAt.isoformat() if agent_run.startedAt else None,
-                "completedAt": (
-                    agent_run.completedAt.isoformat() if agent_run.completedAt else None
-                ),
-                "events": [
-                    {"sequence": stored.sequence, "event": stored.payload}
-                    for stored in stored_events
-                ],
-                "live": live_state,
-                "streamCursor": stream_cursor,
-                "citations": citations["citations"],
-                "citationSequence": citations["throughSequence"],
-            }
-        )
-    next_cursor = _encode_session_history_cursor(page[0]) if has_more else None
-    return {
-        "schema": SESSION_HISTORY_SCHEMA,
-        "session": serialize_session(session),
-        "agentRuns": agent_runs,
-        "nextCursor": next_cursor,
-        "hasMore": has_more,
-    }
+                }
+                if active_run is not None
+                else None
+            ),
+        }
+    )
+
+
 
 
 @router.get(
@@ -1017,47 +908,6 @@ def _canonical_waterline(value: str) -> bool:
     )
 
 
-def _encode_session_history_cursor(agent_run: AgentRun) -> str:
-    payload = json.dumps(
-        {"createdAt": agent_run.createdAt.isoformat(), "id": agent_run.id},
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
-
-
-def _decode_session_history_cursor(value: str) -> dict:
-    if not value or len(value) > 1024:
-        raise ValueError("session history cursor length is invalid")
-    try:
-        padding = "=" * (-len(value) % 4)
-        raw = base64.b64decode(
-            f"{value}{padding}",
-            altchars=b"-_",
-            validate=True,
-        )
-        payload = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ValueError("session history cursor is invalid") from error
-    if not isinstance(payload, dict) or set(payload) != {"createdAt", "id"}:
-        raise ValueError("session history cursor fields are invalid")
-    try:
-        created_at = (
-            parse_datetime(payload["createdAt"])
-            if isinstance(payload["createdAt"], str)
-            else None
-        )
-    except ValueError as error:
-        raise ValueError("session history cursor timestamp is invalid") from error
-    agent_run_id = payload["id"]
-    if created_at is None or not timezone.is_aware(created_at):
-        raise ValueError("session history cursor timestamp is invalid")
-    if not isinstance(agent_run_id, str) or not agent_run_id or len(agent_run_id) > 128:
-        raise ValueError("session history cursor AgentRun id is invalid")
-    canonical = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-    if canonical != value:
-        raise ValueError("session history cursor encoding is not canonical")
-    return {"createdAt": created_at, "id": agent_run_id}
 
 
 @router.post(

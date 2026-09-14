@@ -28,6 +28,7 @@
   "virtualAgentRunList.newChat": "New chat",
   "virtualAgentRunList.startWithATask": "Start with a task",
   "virtualAgentRunList.loadingEarlierMessages": "Loading earlier messages…",
+  "virtualAgentRunList.loadEarlierMessages": "Load earlier messages",
   "virtualAgentRunList.jumpToLatest": "Jump to latest",
   "confirmDialog.confirm": "Confirm",
   "confirmDialog.value": "{{value1}}…",

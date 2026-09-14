@@ -84,11 +84,11 @@ archive.
 
 ## Workspace citation presentation
 
-Each history AgentRun requires `citations` and `citationSequence`, including an
-empty array and zero for an empty run. Citation summaries have exactly
-`citationId`, `inputRef`, `displayName`, `sourceToolCallId`, and `sourceUrl`.
-Source URLs are first-party `/api/citations/{citationId}` detail routes, not
-arbitrary model-supplied links. Preview authorization is checked on every access.
+The retired Session-history response is not a citation transport. Citation
+summaries have exactly `citationId`, `inputRef`, `displayName`,
+`sourceToolCallId`, and `sourceUrl`. Source URLs are first-party
+`/api/citations/{citationId}` detail routes, not arbitrary model-supplied links.
+Preview authorization is checked on every access.
 
 `GET /api/sessions/{sessionId}/agent-runs/{agentRunId}/citations` returns a no-store
 snapshot with exactly `schema: "workspace.citations.v1"`, `sessionId`, `agentRunId`,
@@ -97,13 +97,13 @@ membership; unknown query parameters fail. The snapshot rebuilds verified
 projections from committed events through a captured sequence, under the run
 projection lock, so it works before terminal lifecycle reconciliation.
 
-History and live refresh use the same snapshot service. The web view replaces
-its citation collection after tool-result batches and termination, coalesces
-in-flight refreshes, bounds each request to ten seconds, ignores obsolete or
-cross-session responses, and preserves existing citations on refresh failure.
-Snapshots do not advance the Session stream cursor. Historical Core citation
-events remain validated but no longer independently populate browser citations.
-API and web strict schemas must be released together; no old-field aliases exist.
+Citation snapshots remain an independently authorized resource API and do not
+advance the Session stream cursor. The transcript page carries display blocks
+and content references; it does not embed citation snapshots. Browser citation
+rows must bind this endpoint to a stable transcript block identity before they
+are re-enabled. Historical Core citation events remain validated and cannot by
+themselves populate browser citations. API and web strict schemas must be
+released together; no old-field aliases exist.
 
 Internal REST calls require `X-Internal-Token`; there is no anonymous fallback.
 The first-party MCP transport `/internal/mcp` is an exception: it accepts only a

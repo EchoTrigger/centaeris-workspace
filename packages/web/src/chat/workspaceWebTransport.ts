@@ -1,15 +1,23 @@
 import { ApiError, apiResponse } from "../api";
-import { readSse } from "./sessionEvents.ts";
+import { readSse } from "./sessionStreamProtocol.ts";
 import type { StreamEntry } from "./streamTypes.ts";
-import type { WorkspaceChatController } from "./workspaceChatController.ts";
 
 type ResumeState = {
   status: string;
   streamCursor: string;
 };
 
+type WorkspaceStreamController = {
+  sessionId: string;
+  agentRunId: string;
+  lastCursor: string;
+  acceptWithBackpressure(entry: StreamEntry): Promise<void>;
+  whenIdle(): Promise<void>;
+  setCursor(cursor: string): void;
+};
+
 type StreamWorkspaceAgentRunOptions = {
-  controller: WorkspaceChatController;
+  controller: WorkspaceStreamController;
   signal: AbortSignal;
   onConnection(connection: "running" | "reconnecting"): void;
   refreshResumeState(): Promise<ResumeState>;

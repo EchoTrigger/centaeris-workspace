@@ -4,7 +4,7 @@ use postgres::Client;
 
 const STORE_SCHEMA_VERSION: i64 = 2;
 
-const RUNTIME_TABLES: &[&str] = &[
+pub(super) const RUNTIME_TABLES: &[&str] = &[
     "execution_job_tenants",
     "checkpoints",
     "dead_letters",

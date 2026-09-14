@@ -28,6 +28,7 @@
   "virtualAgentRunList.newChat": "新会话",
   "virtualAgentRunList.startWithATask": "从一个任务开始",
   "virtualAgentRunList.loadingEarlierMessages": "正在读取更早内容…",
+  "virtualAgentRunList.loadEarlierMessages": "加载更早内容",
   "virtualAgentRunList.jumpToLatest": "回到最新",
   "confirmDialog.confirm": "确认",
   "confirmDialog.value": "{{value1}}中…",

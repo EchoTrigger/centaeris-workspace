@@ -1594,26 +1594,11 @@ fn postgres_runtime_store_persists_core_state_and_claims_jobs_once() {
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         tables,
-        [
-            "checkpoints",
-            "dead_letters",
-            "external_context_links",
-            "external_context_objects",
-            "model_observation_contents",
-            "model_observation_manifests",
-            "resource_claims",
-            "runtime_events",
-            "runtime_job_outbox",
-            "runtime_job_waiters",
-            "execution_job_tenants",
-            "runtime_jobs",
-            "runtime_turn_supplement_queues",
-            "schema_migrations",
-            "session_runtime_snapshots",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect()
+        super::schema::RUNTIME_TABLES
+            .iter()
+            .copied()
+            .map(str::to_string)
+            .collect()
     );
 }
 

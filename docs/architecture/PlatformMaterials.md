@@ -161,16 +161,15 @@ are not the platform's evidence-persistence mechanism.
 
 Projection rebuilding is transactional and serialized on the AgentRun. It
 combines validated receipts with supported `citation_recorded` events and
-derives stable IDs across restart. Deleting session history also deletes its
+derives stable IDs across restart. Purging the owning Session also deletes its
 receipts.
 
-Workspace exposes `workspace.citations.v1` snapshots in session history and
-through the run citation endpoint. A snapshot includes the run/session identity,
-`throughSequence` and citation summaries. The browser validates snapshots,
-uses their watermark for citation updates and renders citation buttons with the
-existing preview UI. It does not infer trusted citations from answer text.
-Snapshot and preview access recheck current authorization; revoked access does
-not reveal the resource.
+Workspace exposes `workspace.citations.v1` snapshots through the run citation
+endpoint. A snapshot includes the run/session identity, `throughSequence` and
+citation summaries. The transcript protocol does not embed that snapshot;
+browser presentation requires a stable transcript-block binding. It must not
+infer trusted citations from answer text. Snapshot and preview access recheck
+current authorization; revoked access does not reveal the resource.
 
 ## Code and verification
 
@@ -181,7 +180,7 @@ authorized evidence; `material_operations.py`, `material_task_source.py`,
 `material_leases.py` and `material_processor.py` handle processing;
 `platform_material_commit.py`, `material_commit.py` and
 `material_staging.py` handle publication; `material_receipts.py` and the
-Session projection handle citations. Runtime's first-party integration is in
+citation projection handle citations. Runtime's first-party integration is in
 `packages/runtime_server/src/platform_materials.rs`.
 
 Run the [release gate](../eval/ReleaseGate.md) for integration validation.

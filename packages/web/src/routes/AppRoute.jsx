@@ -1,24 +1,20 @@
-import { t } from "../i18n";
 import { useTranslation } from "../i18n";
-import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Link, matchPath, useNavigate, useRouteLoaderData } from "react-router";
 import { apiResponse } from "../api";
-import { createCitationRefresher } from "../chat/citationSnapshot";
 import { WorkspaceContextPanel } from "../components/WorkspaceContextPanel";
 import { DocumentPreview } from "../components/DocumentPreview";
 import { officeFileType } from "../chat/officeFormats.mjs";
 import { officePreviewUrl } from "../chat/attachments.mjs";
 import { codePreviewCanRender } from "../chat/codePreviewFormats.mjs";
-import { ContextUsagePicker } from "../components/ContextUsagePicker";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { useModalDialog } from "../components/useModalDialog";
-import { createChatViewStore } from "../chat/chatViewStore";
-import { useAgentRunList } from "../chat/chatStoreHooks";
-import { isAgentRunActive, validateHistoryPage } from "../chat/sessionEvents";
-import { WorkspaceChatController } from "../chat/workspaceChatController";
 import { streamWorkspaceAgentRun } from "../chat/workspaceWebTransport";
-import { VirtualAgentRunList } from "../chat/VirtualAgentRunList";
-import { AttachmentCard, LocalAttachmentCard, localAttachmentKey } from "../chat/AttachmentCard";
+import { createTranscriptViewStore } from "../chat/transcriptViewStore";
+import { createWorkspaceTranscriptTransport } from "../chat/transcriptTransport";
+import { WorkspaceTranscriptController } from "../chat/workspaceTranscriptController";
+import { TranscriptBlockList } from "../chat/TranscriptBlockList";
+import { WorkspaceComposer } from "../chat/WorkspaceComposer";
 import {
   attachmentCanPreview,
   attachmentDownloadUrl,
@@ -31,10 +27,6 @@ import { HomePlane, HomeQuickActions } from "../shell/HomePlane";
 import { AgentMark } from "../shell/AgentMark";
 import { ShellSidebar } from "../shell/ShellSidebar";
 import {
-  ArrowUp,
-  ChartNoAxesColumnIncreasing,
-  Check,
-  ChevronDown,
   Ellipsis,
   Image as ImageIcon,
   LoaderCircle,
@@ -42,26 +34,14 @@ import {
   MailOpen,
   MessageSquare,
   PanelLeft,
-  Plus,
   Pencil,
   Pin,
   PinOff,
-  Square,
-  SlidersHorizontal,
   Trash2,
   X,
 } from "lucide-react";
 
 const CLOSED_CONTEXT_PANEL = Object.freeze({ mode: "closed" });
-
-const THINKING_MODE_LABELS = () => (Object.freeze({
-  none: t("workspaceContextPanel.close"),
-  low: t("appRoute.low"),
-  medium: t("appRoute.medium"),
-  high: t("appRoute.high"),
-  xhigh: t("appRoute.veryHigh"),
-  max: t("appRoute.maximum"),
-}));
 
 const ARTIFACT_PREVIEW_MAX_BYTES = 1024 * 1024;
 const ARTIFACT_PREVIEW_CONTENT_TYPES = new Set([
@@ -72,10 +52,6 @@ const ARTIFACT_PREVIEW_CONTENT_TYPES = new Set([
   "image/jpeg",
   "image/webp",
 ]);
-
-function publishChatRenderTelemetry(metric) {
-  window.dispatchEvent(new CustomEvent("centaeris:chat-render-telemetry", { detail: metric }));
-}
 
 function upsertBy(items, key, value) {
   const index = items.findIndex((item) => item[key] === value[key]);
@@ -88,62 +64,6 @@ function sortSessions(items) {
     Number(Boolean(right.isPinned)) - Number(Boolean(left.isPinned))
     || String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""))
   ));
-}
-
-function thinkingModeLabel(mode) {
-  return THINKING_MODE_LABELS()[mode] || mode;
-}
-
-function closeComposerPicker(event) {
-  event.currentTarget.closest("details")?.removeAttribute("open");
-}
-
-function closeComposerPickerOnBlur(event) {
-  if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.removeAttribute("open");
-}
-
-function closeComposerPickerOnEscape(event) {
-  if (event.key !== "Escape") return;
-  event.preventDefault();
-  event.currentTarget.removeAttribute("open");
-  event.currentTarget.querySelector("summary")?.focus();
-}
-
-function ComposerThinkingPicker({ model, value, onChange, disabled }) {
-  const { t } = useTranslation();
-  const modes = model?.thinkingModes || [];
-  return <details className="workspaceComposerPicker workspaceComposerThinking" onBlur={closeComposerPickerOnBlur} onKeyDown={closeComposerPickerOnEscape}>
-    <summary
-      role="button"
-      aria-label={t("appRoute.reasoningEffort")}
-      aria-disabled={disabled}
-      aria-haspopup="menu"
-      onClick={(event) => disabled && event.preventDefault()}
-    ><ChartNoAxesColumnIncreasing aria-hidden="true" /></summary>
-    <div className="workspaceComposerPickerPanel is-thinking" aria-label={t("appRoute.selectReasoningEffort")}>
-      <small>{t("appRoute.reasoningEffort")}</small>
-      {modes.map((mode) => <button type="button" aria-pressed={value === mode} key={mode} onClick={(event) => { onChange(mode); closeComposerPicker(event); }}><span>{thinkingModeLabel(mode)}</span>{value === mode ? <Check aria-hidden="true" /> : null}</button>)}
-    </div>
-  </details>;
-}
-
-function ComposerModelPicker({ groups, model, value, onChange, disabled }) {
-  const { t } = useTranslation();
-  return <details className="workspaceComposerPicker workspaceComposerModel" onBlur={closeComposerPickerOnBlur} onKeyDown={closeComposerPickerOnEscape}>
-    <summary
-      role="button"
-      aria-label={t("appRoute.aiModel")}
-      aria-disabled={disabled}
-      aria-haspopup="menu"
-      onClick={(event) => disabled && event.preventDefault()}
-    ><span>{model?.displayName || (groups.length ? t("appRoute.selectModel") : t("appRoute.notConfigured"))}</span><ChevronDown aria-hidden="true" /></summary>
-    <div className="workspaceComposerPickerPanel is-model" aria-label={t("appRoute.selectAiModel")}>
-      {groups.map((group) => <section key={group.provider}>
-        <small>{group.label}</small>
-        {group.models.map((option) => <button type="button" aria-pressed={value === option.id} key={option.id} onClick={(event) => { onChange(option.id); closeComposerPicker(event); }}><span>{option.displayName}</span>{value === option.id ? <Check aria-hidden="true" /> : null}</button>)}
-      </section>)}
-    </div>
-  </details>;
 }
 
 function ConnectedWorkspaceContextPanel({ panel, browserWidthPx, onBrowserWidthChange, onClose, onReturn }) {
@@ -179,9 +99,12 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   const chatControllerRef = useRef(null);
   const acceptedSessionRef = useRef(null);
   const acceptedRouteSessionIdRef = useRef("");
-  const chatStoreRef = useRef(null);
-  if (!chatStoreRef.current) chatStoreRef.current = createChatViewStore({ onRenderTelemetry: publishChatRenderTelemetry });
-  const chatStore = chatStoreRef.current;
+  const transcriptStoreRef = useRef(null);
+  if (!transcriptStoreRef.current) transcriptStoreRef.current = createTranscriptViewStore();
+  const transcriptStore = transcriptStoreRef.current;
+  const transcriptTransportRef = useRef(null);
+  if (!transcriptTransportRef.current) transcriptTransportRef.current = createWorkspaceTranscriptTransport();
+  const transcriptTransport = transcriptTransportRef.current;
   const fileInputRef = useRef(null);
   const composerRef = useRef(null);
   const composerStartRectRef = useRef(null);
@@ -196,7 +119,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   const [pendingUploadFiles, setPendingUploadFiles] = useState([]);
   const [draft, setDraft] = useState("");
   const enterStartsNewLine = useEnterStartsNewLine(user.id);
-  const [editingTail, setEditingTail] = useState(null);
   const [error, setError] = useState("");
   const [sending, setSending] = useState(false);
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
@@ -208,18 +130,28 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   const [openSessionMenuId, setOpenSessionMenuId] = useState("");
   const [cancellingAgentRunId, setCancellingRunId] = useState("");
   const [loadingHistory, setLoadingHistory] = useState(!workspaceDraft);
-  const [historyCursor, setHistoryCursor] = useState(null);
-  const [hasMoreHistory, setHasMoreHistory] = useState(false);
   const [loadingOlderHistory, setLoadingOlderHistory] = useState(false);
+  const [activeTranscriptRun, setActiveTranscriptRun] = useState(null);
   const [contextPanel, setContextPanel] = useState(CLOSED_CONTEXT_PANEL);
   const [browserPanelWidthPx, setBrowserPanelWidthPx] = useState(760);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const attachmentDialogRef = useModalDialog({ open: Boolean(attachmentPreview), onClose: () => setAttachmentPreview(null) });
   const previewRequestIdRef = useRef(0);
   const activeSessionIdRef = useRef(sessionId);
+  const activeTranscriptRunRef = useRef(activeTranscriptRun);
+  const olderHistoryRequestRef = useRef(null);
   activeSessionIdRef.current = sessionId;
+  activeTranscriptRunRef.current = activeTranscriptRun;
+  const updateActiveTranscriptRun = useCallback((next) => {
+    activeTranscriptRunRef.current = next;
+    setActiveTranscriptRun(next);
+  }, []);
 
-  const agentRunList = useAgentRunList(chatStore);
+  const transcriptList = useSyncExternalStore(
+    transcriptStore.subscribeList,
+    transcriptStore.getListSnapshot,
+    transcriptStore.getListSnapshot,
+  );
   const currentModel = useMemo(() => models.find((model) => model.id === modelId), [models, modelId]);
   const modelGroups = useMemo(() => {
     const groups = new Map();
@@ -239,23 +171,15 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   useEffect(() => {
     setThinkingMode(currentModel?.thinkingMode || "");
   }, [currentModel?.id, currentModel?.thinkingMode]);
-  const hasActiveAgentRun = agentRunList.hasActiveAgentRun;
-  const activeAgentRunId = [...agentRunList.agentRunIds].reverse().find((agentRunId) => isAgentRunActive(chatStore.getAgentRunSnapshot(agentRunId))) || "";
+  const hasActiveAgentRun = activeTranscriptRun !== null;
+  const activeAgentRunId = activeTranscriptRun?.agentRunId || "";
   const pendingAttachments = useMemo(
     () => pendingAttachmentIds
       .map((id) => assets.find((link) => link.id === id))
       .filter(Boolean),
     [assets, pendingAttachmentIds],
   );
-  const latestAgentRun = agentRunList.agentRunIds.length ? chatStore.getAgentRunSnapshot(agentRunList.agentRunIds.at(-1)) : null;
   const activeSession = sessions.find((candidate) => candidate.id === sessionId);
-  const latestUserMessage = latestAgentRun?.messages?.findLast((message) => message.role === "user") || null;
-  const editableMessageId = !hasActiveAgentRun
-    && latestAgentRun
-    && latestUserMessage
-    && latestUserMessage.messageId === `message:${latestUserMessage.turnId}:user`
-    ? latestUserMessage.messageId
-    : "";
 
   const acceptModels = useCallback((nextModels) => {
     setModels(nextModels);
@@ -271,13 +195,14 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     setContextPanel(CLOSED_CONTEXT_PANEL);
   }, []);
   const clearConversationProjection = useCallback(() => {
-    chatStore.clear();
-    setHistoryCursor(null);
-    setHasMoreHistory(false);
+    transcriptStore.clear();
+    updateActiveTranscriptRun(null);
+    olderHistoryRequestRef.current?.controller.abort();
+    olderHistoryRequestRef.current = null;
     setAssets([]);
     setPendingAttachmentIds([]);
     setPendingUploadFiles([]);
-  }, [chatStore]);
+  }, [transcriptStore, updateActiveTranscriptRun]);
   const stopActiveStream = useCallback(() => {
     streamAbortRef.current?.abort();
     chatControllerRef.current?.dispose();
@@ -341,7 +266,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     clearConversationProjection();
     setDraft("");
     setSending(false);
-    setEditingTail(null);
     setEditingSessionId("");
     setOpenSessionMenuId("");
     clearContextPanel();
@@ -382,58 +306,57 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   }, [loadingHistory, modelId, startFresh, workspace]);
 
   useEffect(() => {
-    setEditingTail(null);
     if (!sessionId) {
       clearConversationProjection();
       return;
     }
-    const acceptedSession = acceptedSessionRef.current;
-    if (acceptedSession?.sessionId === sessionId) {
-      acceptedSessionRef.current = null;
-      const controller = new AbortController();
-      streamAbortRef.current = controller;
-      setHistoryCursor(null);
-      setHasMoreHistory(false);
-      setLoadingHistory(false);
-      apiResponse(`/api/sessions/${sessionId}/assets`)
-        .then((response) => response.json())
-        .then((data) => {
-          if (activeSessionIdRef.current === sessionId) setAssets(data.assets);
-        })
-        .catch(() => {
-          if (activeSessionIdRef.current === sessionId) reportLoadError("appRoute.unableToRefreshConversationMaterials");
-        });
-      connectLoadedAgentRun(acceptedSession.agentRunId, workspace.id, sessionId, controller).catch((streamError) => {
-        handleLoadedAgentRunStreamFailure(streamError, acceptedSession.agentRunId);
-      });
-      return () => {
-        controller.abort();
-        chatControllerRef.current?.dispose();
-      };
-    }
+    acceptedSessionRef.current = null;
     stopActiveStream();
     const controller = new AbortController();
     streamAbortRef.current = controller;
     let active = true;
+    transcriptStore.clear();
+    updateActiveTranscriptRun(null);
     setLoadingHistory(true);
     setError("");
-    Promise.all([apiResponse(`/api/sessions/${sessionId}/history?limit=40`), apiResponse(`/api/sessions/${sessionId}/assets`)])
-      .then(async ([historyResponse, assetsResponse]) => {
-        const history = validateHistoryPage(await historyResponse.json(), { sessionId, workspaceId: workspace.id });
+    Promise.all([
+      transcriptTransport.loadTail(sessionId, controller.signal),
+      apiResponse(`/api/sessions/${sessionId}/assets`, { signal: controller.signal }),
+    ])
+      .then(async ([tailPage, assetsResponse]) => {
         const assetData = await assetsResponse.json();
-        if (!active) return;
-        chatStore.replaceAll(history.agentRuns);
-        setHistoryCursor(history.nextCursor);
-        setHasMoreHistory(history.hasMore);
+        if (!active || controller.signal.aborted) return;
+        const viewEpoch = transcriptStore.openTail(tailPage);
+        const identity = {
+          sessionId,
+          projectionVersion: tailPage.projectionVersion,
+          projectionGeneration: tailPage.projectionGeneration,
+        };
+        await transcriptTransport.loadPatches({
+          ...identity,
+          afterSourceHighWater: transcriptStore.getListSnapshot().appliedSourceHighWater,
+        }, controller.signal, (patchPage) => {
+          if (!transcriptStore.applyPatchPage(patchPage, viewEpoch)) {
+            throw new Error("transcript view epoch changed while loading the tail");
+          }
+        });
+        const appliedSourceHighWater = transcriptStore.getListSnapshot().appliedSourceHighWater;
+        const activeEnvelope = await transcriptTransport.loadActiveAgentRun({
+          ...identity,
+          sourceHighWater: appliedSourceHighWater,
+        }, controller.signal);
+        if (!active || controller.signal.aborted || activeSessionIdRef.current !== sessionId) return;
         setAssets(assetData.assets);
         setPendingAttachmentIds([]);
         setPendingUploadFiles([]);
-        const runningAgentRun = [...history.agentRuns].reverse().find((agentRun) => ["queued", "running"].includes(agentRun.status) && !agentRun.projectionError);
-        if (runningAgentRun) {
-          connectLoadedAgentRun(runningAgentRun.id, workspace.id, sessionId, controller, {
-            cursor: runningAgentRun.streamCursor,
+        updateActiveTranscriptRun(activeEnvelope.agentRun);
+        if (activeEnvelope.agentRun) {
+          connectLoadedAgentRun(activeEnvelope.agentRun.agentRunId, workspace.id, sessionId, controller, {
+            cursor: activeEnvelope.agentRun.streamCursor,
+            viewEpoch,
+            identity,
           }).catch((streamError) => {
-            handleLoadedAgentRunStreamFailure(streamError, runningAgentRun.id);
+            handleLoadedAgentRunStreamFailure(streamError, activeEnvelope.agentRun.agentRunId);
           });
         }
       })
@@ -444,7 +367,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       controller.abort();
       chatControllerRef.current?.dispose();
     };
-  }, [sessionId, workspace?.id, clearConversationProjection, stopActiveStream, chatStore.replaceAll]);
+  }, [sessionId, workspace?.id, clearConversationProjection, stopActiveStream, transcriptStore, transcriptTransport, updateActiveTranscriptRun]);
 
   function showStreamError(errorValue) {
     if (errorValue?.name === "AbortError") return;
@@ -453,36 +376,23 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
 
   function handleAgentRunStreamFailure(errorValue, agentRunId) {
     if (errorValue?.name === "AbortError") return;
-    chatStore.markAgentRunProjectionError(agentRunId);
-  }
-
-  async function refreshAgentRunResumeState(agentRunId, targetWorkspaceId, targetSessionId) {
-    const response = await apiResponse(`/api/sessions/${targetSessionId}/history?limit=40`);
-    const history = validateHistoryPage(await response.json(), {
-      sessionId: targetSessionId,
-      workspaceId: targetWorkspaceId,
-    });
-    const resumedAgentRun = history.agentRuns.find((item) => item.id === agentRunId);
-    if (!resumedAgentRun) throw new Error("active AgentRun is missing from Session history");
-    chatStore.replaceAgentRun(resumedAgentRun);
-    return resumedAgentRun;
-  }
-
-  async function retryAgentRunProjection(agentRunId) {
-    if (!sessionId) return;
-    setError("");
-    try {
-      const resumed = await refreshAgentRunResumeState(agentRunId, workspace.id, sessionId);
-      if (resumed.projectionError || !["queued", "running"].includes(resumed.status)) return;
-      stopActiveStream();
-      const controller = new AbortController();
-      streamAbortRef.current = controller;
-      connectAgentRun(agentRunId, workspace.id, sessionId, controller, {
-        cursor: resumed.streamCursor,
-      }).catch((streamError) => handleAgentRunStreamFailure(streamError, agentRunId));
-    } catch {
-      chatStore.markAgentRunProjectionError(agentRunId);
+    if (activeTranscriptRunRef.current?.agentRunId === agentRunId) {
+      setError(t("appRoute.someConversationsAreTemporarilyUnavailableRefreshThePageAnd"));
     }
+  }
+
+  async function refreshAgentRunResumeState(agentRunId, _targetWorkspaceId, targetSessionId, identity) {
+    const sourceHighWater = transcriptStore.getListSnapshot().appliedSourceHighWater;
+    const envelope = await transcriptTransport.loadActiveAgentRun({
+      ...identity,
+      sessionId: targetSessionId,
+      sourceHighWater,
+    }, streamAbortRef.current?.signal || new AbortController().signal);
+    if (!envelope.agentRun || envelope.agentRun.agentRunId !== agentRunId) {
+      return { status: "completed", streamCursor: "0-0" };
+    }
+    updateActiveTranscriptRun(envelope.agentRun);
+    return envelope.agentRun;
   }
 
   async function refreshSessions(targetWorkspaceId) {
@@ -516,24 +426,20 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
 
   async function connectAgentRun(agentRunId, targetWorkspaceId, targetSessionId, abortController, resume = {}) {
     chatControllerRef.current?.dispose();
-    const citations = createCitationRefresher({ sessionId: targetSessionId, agentRunId,
-      load: async (signal) => (await apiResponse(`/api/sessions/${targetSessionId}/agent-runs/${agentRunId}/citations`, { signal })).json(),
-      apply: (snapshot) => {
-        if (!abortController.signal.aborted && activeSessionIdRef.current === targetSessionId) chatStore.applyCitationSnapshot(snapshot);
-      },
-    });
-    const disposeCitations = () => citations.dispose();
-    abortController.signal.addEventListener("abort", disposeCitations, { once: true });
-    const refreshCitations = () => citations.request().catch((error) => {
-      if (error?.name !== "AbortError" && !abortController.signal.aborted) setError(t("appRoute.citationRefreshFailed"));
-    });
-    const controller = new WorkspaceChatController({
-      store: chatStore,
-      workspaceId: targetWorkspaceId,
-      sessionId: targetSessionId,
+    if (!resume.identity || !Number.isInteger(resume.viewEpoch)) {
+      throw new Error("transcript stream identity is missing");
+    }
+    const controller = new WorkspaceTranscriptController({
+      store: transcriptStore,
+      viewEpoch: resume.viewEpoch,
+      identity: resume.identity,
       agentRunId,
       initialCursor: resume.cursor || "0-0",
-      onCitationsChanged: () => { void refreshCitations(); },
+      transport: transcriptTransport,
+      signal: abortController.signal,
+      onTerminal: () => {
+        if (activeSessionIdRef.current === targetSessionId) updateActiveTranscriptRun(null);
+      },
     });
     chatControllerRef.current = controller;
     let streamCompleted = false;
@@ -541,16 +447,20 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       await streamWorkspaceAgentRun({
         controller,
         signal: abortController.signal,
-        onConnection: (connection) => chatStore.updateConnection(agentRunId, connection),
-        refreshResumeState: () => refreshAgentRunResumeState(agentRunId, targetWorkspaceId, targetSessionId),
+        onConnection: () => {},
+        refreshResumeState: () => refreshAgentRunResumeState(
+          agentRunId,
+          targetWorkspaceId,
+          targetSessionId,
+          resume.identity,
+        ),
       });
       streamCompleted = true;
     } finally {
       try {
         await controller.whenIdle();
-        if (!abortController.signal.aborted) await refreshCitations();
-        const agentRun = chatStore.getAgentRunSnapshot(agentRunId);
-        if (streamCompleted && agentRun && !isAgentRunActive(agentRun)) {
+        if (streamCompleted && !abortController.signal.aborted) {
+          updateActiveTranscriptRun(null);
           try {
             const nextSessions = await refreshSessions(targetWorkspaceId);
             const current = nextSessions.find((item) => item.id === targetSessionId);
@@ -564,8 +474,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       } finally {
         if (chatControllerRef.current === controller) chatControllerRef.current = null;
         controller.dispose();
-        citations.dispose();
-        abortController.signal.removeEventListener("abort", disposeCitations);
       }
     }
   }
@@ -578,7 +486,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     setSessionId("");
     setLoadingHistory(false);
     clearConversationProjection();
-    setEditingTail(null);
     setDraft("");
     setError("");
     setEditingSessionId("");
@@ -594,7 +501,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   function selectSession(session) {
     acceptedRouteSessionIdRef.current = "";
     setPendingUploadFiles([]);
-    setEditingTail(null);
     setEditingSessionId("");
     setOpenSessionMenuId("");
     clearContextPanel();
@@ -688,9 +594,9 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     }
   }
 
-  async function sendMessage(event, inlineEdit = null) {
+  async function sendMessage(event) {
     event?.preventDefault();
-    const text = (inlineEdit?.text ?? draft).trim();
+    const text = draft.trim();
     if (!workspace || !text || sending || loadingHistory) return;
     const requestScope = requestScopeRef.current;
     const isCurrentRequest = () => {
@@ -742,47 +648,10 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     if (!modelId) return;
     setSending(true);
     const targetSessionId = sessionId || "new";
-    const pendingId = `pending:${Date.now()}`;
-    const pendingTurnId = `${pendingId}:turn`;
-    const replacedAgentRun = inlineEdit ? chatStore.getAgentRunSnapshot(inlineEdit.agentRunId) : null;
-    if (inlineEdit && !replacedAgentRun) {
-      setError(t("appRoute.thePreviousTurnNoLongerExistsRefreshThePage"));
-      setSending(false);
-      return;
-    }
-    const attachmentRefs = inlineEdit
-      ? inlineEdit.attachments.map((attachment) => attachment.inputRef).sort()
-      : [...pendingAttachmentIds].sort();
-    const uploadFiles = inlineEdit ? [] : pendingUploadFiles;
-    const messageAttachments = inlineEdit ? inlineEdit.attachments : [
-      ...pendingAttachments.map((link) => ({
-        inputRef: link.id,
-        displayName: link.displayName,
-        contentType: link.contentType,
-      })),
-      ...uploadFiles.map((file, index) => ({
-        inputRef: `${pendingId}:upload:${index}`,
-        displayName: file.name,
-        contentType: file.type || "application/octet-stream",
-      })),
-    ];
+    const attachmentRefs = [...pendingAttachmentIds].sort();
+    const uploadFiles = pendingUploadFiles;
     setError("");
-    const optimisticAgentRun = {
-      id: pendingId,
-      status: "queued",
-      connection: "starting",
-      model: currentModel,
-      messages: [{ messageId: `message:${pendingTurnId}:user`, turnId: pendingTurnId, sequence: 0, role: "user", phase: "user", status: "done", text, createdAtMs: Date.now(), attachments: messageAttachments, artifacts: [], entryMotion: targetSessionId === "new" ? "conversation" : "" }],
-      activities: [],
-      reasoningBlocks: [],
-      citations: [],
-      citationSequence: 0,
-      startedAtMs: Date.now(),
-      finishedAtMs: null,
-    };
     if (targetSessionId === "new") composerStartRectRef.current = composerRef.current?.getBoundingClientRect() || null;
-    if (replacedAgentRun) chatStore.replaceAgentRunId(replacedAgentRun.id, optimisticAgentRun);
-    else chatStore.appendAgentRun(optimisticAgentRun);
     try {
       let body;
       if (targetSessionId === "new" && uploadFiles.length) {
@@ -801,11 +670,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
           modelConfigRef: modelId,
           ...(thinkingMode ? { thinkingMode } : {}),
           attachmentRefs,
-          ...(inlineEdit ? { tailAction: {
-            type: "rewriteLastUser",
-            targetMessageId: inlineEdit.targetMessageId,
-            expectedTailMessageId: inlineEdit.expectedTailMessageId,
-          } } : {}),
         });
       }
       const messageResponse = await apiResponse(`/api/workspaces/${workspace.id}/sessions/${targetSessionId}/messages`, {
@@ -827,31 +691,9 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         throw new Error("AgentRun acceptance identity is invalid");
       }
       const resolvedSessionId = messageData.sessionId;
-      const pendingAgentRun = chatStore.getAgentRunSnapshot(pendingId);
-      if (!pendingAgentRun) throw new Error("pending AgentRun disappeared before acceptance");
-      if (!inlineEdit) {
-        setDraft("");
-        setPendingAttachmentIds([]);
-        setPendingUploadFiles([]);
-      }
-      setEditingTail(null);
-      chatStore.replaceAgentRunId(pendingId, {
-        ...pendingAgentRun,
-        id: messageData.agentRunId,
-        workspaceId: workspace.id,
-        sessionId: resolvedSessionId,
-        events: [],
-        eventIds: [],
-        live: null,
-        streamCursor: "0-0",
-        citations: [],
-        citationSequence: 0,
-        messages: pendingAgentRun.messages.map((message) => ({
-          ...message,
-          messageId: `message:${messageData.turnId}:user`,
-          turnId: messageData.turnId,
-        })),
-      });
+      setDraft("");
+      setPendingAttachmentIds([]);
+      setPendingUploadFiles([]);
       setSessions((items) =>
         sortSessions(
           sessionId
@@ -868,53 +710,66 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       } else {
         const controller = new AbortController();
         streamAbortRef.current = controller;
-        connectAgentRun(messageData.agentRunId, workspace.id, resolvedSessionId, controller).catch((streamError) => {
+        const currentTranscript = transcriptStore.getListSnapshot();
+        if (!currentTranscript.projectionVersion || !currentTranscript.projectionGeneration) {
+          throw new Error("transcript view identity is missing after AgentRun acceptance");
+        }
+        const activeEnvelope = await transcriptTransport.loadActiveAgentRun({
+          sessionId: resolvedSessionId,
+          projectionVersion: currentTranscript.projectionVersion,
+          projectionGeneration: currentTranscript.projectionGeneration,
+          sourceHighWater: currentTranscript.appliedSourceHighWater,
+        }, controller.signal);
+        if (!activeEnvelope.agentRun || activeEnvelope.agentRun.agentRunId !== messageData.agentRunId) {
+          throw new Error("accepted AgentRun is not active");
+        }
+        updateActiveTranscriptRun(activeEnvelope.agentRun);
+        connectAgentRun(messageData.agentRunId, workspace.id, resolvedSessionId, controller, {
+          cursor: activeEnvelope.agentRun.streamCursor,
+          viewEpoch: currentTranscript.viewEpoch,
+          identity: {
+            sessionId: resolvedSessionId,
+            projectionVersion: currentTranscript.projectionVersion,
+            projectionGeneration: currentTranscript.projectionGeneration,
+          },
+        }).catch((streamError) => {
           handleAgentRunStreamFailure(streamError, messageData.agentRunId);
         });
       }
     } catch (errorValue) {
       if (!isCurrentRequest()) return;
-      if (replacedAgentRun && chatStore.getAgentRunSnapshot(pendingId)) chatStore.replaceAgentRunId(pendingId, replacedAgentRun);
-      else chatStore.rejectPendingAgentRun(pendingId);
       showStreamError(errorValue);
     } finally {
       if (isCurrentRequest()) setSending(false);
     }
   }
 
-  function startEditingMessage(message) {
-    const expectedTail = latestAgentRun?.messages?.filter((item) => item.role === "user" || item.phase === "final").at(-1);
-    if (!latestAgentRun || message.messageId !== editableMessageId || !expectedTail) return;
-    setEditingTail({
-      agentRunId: latestAgentRun.id,
-      targetMessageId: message.messageId,
-      expectedTailMessageId: expectedTail.messageId,
-      text: message.text,
-      attachments: message.attachments || [],
-    });
-  }
-
-  function cancelEditingMessage() {
-    setEditingTail(null);
-  }
-
   async function loadOlderHistory() {
-    if (!sessionId || !hasMoreHistory || !historyCursor || loadingOlderHistory) return;
+    const current = transcriptStore.getListSnapshot();
+    if (!sessionId || !current.projectionVersion || !current.projectionGeneration
+      || !current.hasOlder || !current.olderCursor || olderHistoryRequestRef.current) return;
     const requestedForSessionId = sessionId;
+    const requestKey = `${sessionId}:${current.viewEpoch}:${current.olderCursor}`;
+    const controller = new AbortController();
+    olderHistoryRequestRef.current = { key: requestKey, controller };
     setLoadingOlderHistory(true);
     try {
-      const response = await apiResponse(
-        `/api/sessions/${sessionId}/history?limit=40&before=${encodeURIComponent(historyCursor)}`,
-      );
-      const page = validateHistoryPage(await response.json(), { sessionId, workspaceId: workspace.id });
-      if (activeSessionIdRef.current !== requestedForSessionId) return;
-      chatStore.prependAgentRuns(page.agentRuns);
-      setHistoryCursor(page.nextCursor);
-      setHasMoreHistory(page.hasMore);
+      const page = await transcriptTransport.loadOlder({
+        sessionId,
+        projectionVersion: current.projectionVersion,
+        projectionGeneration: current.projectionGeneration,
+        sourceHighWater: current.sourceHighWater,
+      }, current.olderCursor, controller.signal);
+      if (activeSessionIdRef.current !== requestedForSessionId
+        || olderHistoryRequestRef.current?.key !== requestKey) return;
+      transcriptStore.prependPage(page, current.viewEpoch);
     } catch {
-      setError(t("appRoute.unableToLoadEarlierMessagesPleaseTryAgain"));
+      if (!controller.signal.aborted) setError(t("appRoute.unableToLoadEarlierMessagesPleaseTryAgain"));
     } finally {
-      if (activeSessionIdRef.current === requestedForSessionId) setLoadingOlderHistory(false);
+      if (olderHistoryRequestRef.current?.key === requestKey) {
+        olderHistoryRequestRef.current = null;
+        setLoadingOlderHistory(false);
+      }
     }
   }
 
@@ -993,6 +848,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     });
   }
 
+  // biome-ignore lint/correctness/noUnusedVariables: The existing authorized preview remains until transcript resource rows are bound.
   async function showCitation(citation, origin) {
     const requestId = previewRequestIdRef.current + 1;
     previewRequestIdRef.current = requestId;
@@ -1061,6 +917,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     }
   }
 
+  // biome-ignore lint/correctness/noUnusedVariables: The existing authorized preview remains until transcript resource rows are bound.
   async function showArtifact(artifact, origin) {
     const requestId = previewRequestIdRef.current + 1;
     previewRequestIdRef.current = requestId;
@@ -1127,7 +984,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
 
   const hasContextPanel = contextPanel.mode !== "closed";
   const contextPanelClass = hasContextPanel ? "withContextPanel withFilePreview" : "";
-  const isHome = !requestedSessionId && !sessionId && agentRunList.agentRunIds.length === 0;
+  const isHome = !requestedSessionId && !sessionId && transcriptList.blockIds.length === 0;
   useLayoutEffect(() => {
     const startRect = composerStartRectRef.current;
     if (isHome || !startRect) return;
@@ -1310,118 +1167,46 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         {error || groupedSessions.projectionError ? <div className="errorBanner" role="alert">{error || t("appRoute.someConversationsAreTemporarilyUnavailableRefreshThePageAnd")}</div> : null}
 
         <div className={`workspaceConversationPlane ${isHome ? "isEmpty" : ""}`}>
-          <VirtualAgentRunList
-            store={chatStore}
+          <TranscriptBlockList
+            store={transcriptStore}
             sessionId={sessionId || null}
             loadingHistory={loadingHistory}
-            hasMoreHistory={hasMoreHistory}
             loadingOlderHistory={loadingOlderHistory}
             onLoadOlderHistory={loadOlderHistory}
             emptyState={isHome ? <HomePlane agent={activeAgent} /> : null}
-            onShowCitation={(agentRunId, citation) => showCitation(citation, {
-              mode: "answer",
-              agentRunId,
-              elementId: `citation:${agentRunId}:${citation.citationId}`,
-            })}
-            onShowArtifact={(agentRunId, artifact) => showArtifact(artifact, {
-              mode: "answer",
-              agentRunId,
-              elementId: `artifact:${agentRunId}:${artifact.artifactRef}`,
-            })}
-            assets={assets}
-            onShowAttachment={setAttachmentPreview}
-            editableMessageId={editableMessageId}
-            editingMessageId={editingTail?.targetMessageId || ""}
-            editingPrompt={editingTail?.text || ""}
-            editingDisabled={sending}
-            onStartEditingMessage={startEditingMessage}
-            onEditingPromptChange={(text) => setEditingTail((current) => current ? { ...current, text } : current)}
-            onCancelEditingMessage={cancelEditingMessage}
-            onSubmitEditingMessage={() => void sendMessage(null, editingTail)}
-            onRetryAgentRun={retryAgentRunProjection}
           />
 
-          <form ref={composerRef} className={`workspaceComposer ${isHome ? "shComposerHero" : ""}`} onSubmit={sendMessage}>
-            {pendingAttachments.length || pendingUploadFiles.length ? (
-              <div className="workspaceComposerAttachments" aria-label={t("appRoute.referenceMaterialsForThisConversation")}>
-                {pendingAttachments.map((link) => (
-                  <AttachmentCard className="workspaceComposerAttachment" attachment={link} onPreview={() => setAttachmentPreview(link)} onRemove={() => removePendingAttachment(link)} key={link.id} />
-                ))}
-                {pendingUploadFiles.map((file, index) => (
-                  <LocalAttachmentCard file={file} onRemove={() => removePendingUploadFile(index)} key={localAttachmentKey(file)} />
-                ))}
-              </div>
-            ) : null}
-            <label className="srOnly" htmlFor="messageDraft">{t("appRoute.message")}</label>
-            <textarea
-              id="messageDraft"
-              autoFocus={isHome}
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
-                const shouldSend = enterStartsNewLine
-                  ? event.metaKey || event.ctrlKey
-                  : !event.shiftKey;
-                if (shouldSend) {
-                  event.preventDefault();
-                  event.currentTarget.form?.requestSubmit();
-                }
-              }}
-              placeholder={t("appRoute.describeATaskForValue", { value1: activeAgent.name })}
-              disabled={!workspace || sending || loadingHistory || !!editingTail}
-            />
-            <div className="workspaceComposerFooter">
-              <div className="workspaceComposerControlGroup">
-                <span className="workspaceComposerControl" data-tooltip={t("appRoute.add")}>
-                  <button
-                    className="workspaceComposerIconButton"
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={hasActiveAgentRun || sending || uploadingAttachment || !!editingTail}
-                    aria-label={t("appRoute.add")}
-                  >
-                    {uploadingAttachment ? <LoaderCircle className="statusIcon" aria-hidden="true" /> : <Plus aria-hidden="true" />}
-                  </button>
-                </span>
-                <span className="workspaceComposerControl isPending" data-tooltip={t("appRoute.settingsComingSoon")} role="img" aria-label={t("appRoute.settingsComingSoon2")}>
-                  <SlidersHorizontal aria-hidden="true" />
-                </span>
-                <ContextUsagePicker sessionId={sessionId} isRunning={hasActiveAgentRun} />
-              </div>
-              <input ref={fileInputRef} className="srOnly" type="file" multiple aria-label={t("appRoute.selectOneOrMoreMaterials")} onChange={uploadAttachment} />
-              <div className="workspaceComposerControlGroup isRuntime">
-                <span className="workspaceComposerControl" data-tooltip={thinkingMode ? t("appRoute.reasoningEffortValue", { value1: thinkingModeLabel(thinkingMode) }) : t("appRoute.reasoningEffort")}>
-                  <ComposerThinkingPicker model={currentModel} value={thinkingMode} onChange={setThinkingMode} disabled={!currentModel?.thinkingModes?.length || sending || hasActiveAgentRun || !!editingTail} />
-                </span>
-                <span className="workspaceComposerControl" data-tooltip={t("appRoute.aiModelValue", { value1: currentModel?.displayName || (models.length ? t("appRoute.selectAnOption") : t("appRoute.notConfigured")) })}>
-                  <ComposerModelPicker groups={modelGroups} model={currentModel} value={modelId} onChange={setModelId} disabled={!models.length || sending || !!editingTail} />
-                </span>
-                <span className="workspaceComposerControl" data-tooltip={hasActiveAgentRun ? t("appRoute.stop") : t("appRoute.input")}>
-                  {hasActiveAgentRun ? (
-                    <button
-                      className="workspaceSendButton"
-                      type="button"
-                      aria-label={t("appRoute.stop")}
-                      disabled={!activeAgentRunId || Boolean(cancellingAgentRunId)}
-                      onClick={cancelActiveAgentRun}
-                    >
-                      {cancellingAgentRunId ? <LoaderCircle className="statusIcon" aria-hidden="true" /> : <Square aria-hidden="true" />}
-                    </button>
-                  ) : (
-                    <button
-                      className="workspaceSendButton"
-                      type="submit"
-                      aria-label={t("appRoute.input")}
-                      disabled={!workspace || !draft.trim() || !modelId || sending || loadingHistory || !!editingTail}
-                    >
-                      {sending ? <LoaderCircle className="statusIcon" aria-hidden="true" /> : <ArrowUp aria-hidden="true" />}
-                    </button>
-                  )}
-                </span>
-              </div>
-            </div>
-          </form>
+          <WorkspaceComposer
+            formRef={composerRef}
+            fileInputRef={fileInputRef}
+            isHome={isHome}
+            onSubmit={sendMessage}
+            pendingAttachments={pendingAttachments}
+            pendingUploadFiles={pendingUploadFiles}
+            onPreviewAttachment={setAttachmentPreview}
+            onRemoveAttachment={removePendingAttachment}
+            onRemoveUpload={removePendingUploadFile}
+            draft={draft}
+            onDraftChange={setDraft}
+            enterStartsNewLine={enterStartsNewLine}
+            activeAgentName={activeAgent.name}
+            workspaceAvailable={Boolean(workspace)}
+            sending={sending}
+            loadingHistory={loadingHistory}
+            hasActiveAgentRun={hasActiveAgentRun}
+            uploadingAttachment={uploadingAttachment}
+            onUploadAttachment={uploadAttachment}
+            sessionId={sessionId}
+            currentModel={currentModel}
+            thinkingMode={thinkingMode}
+            onThinkingModeChange={setThinkingMode}
+            modelGroups={modelGroups}
+            modelId={modelId}
+            onModelIdChange={setModelId}
+            activeAgentRunId={activeAgentRunId}
+            cancellingAgentRunId={cancellingAgentRunId}
+            onCancelActiveAgentRun={cancelActiveAgentRun}
+          />
           {isHome ? <HomeQuickActions onQuickAction={handleQuickAction} /> : null}
         </div>
       </section>
