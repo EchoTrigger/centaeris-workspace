@@ -9,6 +9,7 @@ const encoder = new TextEncoder();
 const pages = new Map<string, TranscriptContentRange>();
 const keysByReference = new Map<string, string[]>();
 let cachedBytes = 0;
+let cacheEpoch = 0;
 const listeners = new Set<() => void>();
 
 function notify() {
@@ -62,15 +63,20 @@ export async function loadTranscriptContentRange(
   offset: string,
   signal: AbortSignal,
 ) {
+  signal.throwIfAborted();
+  const epoch = cacheEpoch;
   const key = `${referenceKey(identity)}\0${offset}`;
   const cached = pages.get(key);
   if (cached !== undefined) return cached;
   const page = await transport.loadContentRange(identity, offset, signal);
+  signal.throwIfAborted();
+  if (epoch !== cacheEpoch) throw new Error("transcript content view was cleared");
   remember(identity, key, page);
   return page;
 }
 
 export function clearTranscriptContentRangeCache() {
+  cacheEpoch++;
   pages.clear();
   keysByReference.clear();
   cachedBytes = 0;

@@ -38,6 +38,7 @@ def main():
            'EXECUTION_TENANT_LIMIT': '4'}
     commands = [['cargo', 'test', '--locked', '-p', 'runtime_server', 'postgres_outbox', '--']]
     exact_tests = [
+        'postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_state',
         'postgres_runtime_store_persists_core_state_and_claims_jobs_once',
         'hosted_execution_capacity_is_shared_across_replicas_and_released_on_yield',
         'postgres_runtime_store_validates_waiter_owner_index_on_reopen',

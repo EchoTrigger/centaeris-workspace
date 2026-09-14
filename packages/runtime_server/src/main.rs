@@ -1285,6 +1285,7 @@ fn handle_request(
                 | "/internal/plugins/inspect"
                 | "/internal/transcript/page"
                 | "/internal/transcript/patches"
+                | "/internal/transcript/content"
         )
     {
         return Ok(http_response(404, "text/plain", b"not_found".to_vec()));

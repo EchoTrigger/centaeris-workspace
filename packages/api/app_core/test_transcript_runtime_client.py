@@ -9,6 +9,7 @@ from app_core.runtime_client import (
     TranscriptRuntimeError,
     request_transcript_page,
     request_transcript_patches,
+    request_transcript_content,
 )
 
 
@@ -23,6 +24,26 @@ def _http_conflict(payload: dict) -> urllib.error.HTTPError:
 
 
 class TranscriptRuntimeClientTests(SimpleTestCase):
+    @patch("app_core.runtime_client.urllib.request.urlopen")
+    def test_content_range_preserves_text_and_rejects_identity_or_continuation_drift(self, urlopen):
+        request = {
+            "schema": "transcript.content.range.read.v1", "sessionId": "session-1",
+            "projectionVersion": "transcript.projection.v1", "projectionGeneration": "generation-1",
+            "refId": "session-event:event-1:modelMarkdown", "revision": "1",
+            "byteLength": "6", "offset": "0", "maxBytes": 65536,
+        }
+        result = {key: value for key, value in request.items() if key not in {"schema", "offset", "maxBytes"}}
+        result.update(schema="transcript.content.range.v1", startOffset="0", endOffset="3", content="中", hasMore=True)
+        response = urlopen.return_value.__enter__.return_value
+        response.read.return_value = json.dumps(result).encode()
+        self.assertEqual(request_transcript_content(request), result)
+        for changes in ({"sessionId": "foreign"}, {"revision": "2"}, {"endOffset": "4"},
+                        {"hasMore": False}, {"unknown": True}, {"content": "", "endOffset": "0"}):
+            with self.subTest(changes=changes):
+                response.read.return_value = json.dumps({**result, **changes}).encode()
+                with self.assertRaisesRegex(RuntimeError, "transcript_content_response_invalid"):
+                    request_transcript_content(request)
+
     @patch("app_core.runtime_client.urllib.request.urlopen")
     def test_page_accepts_a_tool_summary_reference(self, urlopen):
         request = {

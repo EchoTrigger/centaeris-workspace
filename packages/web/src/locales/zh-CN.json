@@ -109,10 +109,7 @@
   "appRoute.unableToLoadEarlierMessagesPleaseTryAgain": "无法读取更早的会话内容，请重试。",
   "appRoute.loadedConversationDataExceeds32MiB": "已加载的会话数据超过 32 MiB。",
   "appRoute.releaseHistoryAndReturnToLatest": "释放历史并返回最新内容",
-  "transcriptBlockContent.unableToLoadToolOutput": "无法加载工具输出。",
-  "transcriptBlockContent.toolOutputBytes": "{{value1}} 字节工具输出",
   "transcriptBlockContent.loading": "正在加载…",
-  "transcriptBlockContent.loadNextValueKiB": "继续加载 {{value1}} KiB",
   "appRoute.addUpToValueMaterialsAtATime": "一次最多添加 {{value1}} 份材料",
   "appRoute.attachmentUploadFailed": "附件上传失败",
   "appRoute.inlinePreviewIsUnavailableForThisFileType": "此文件类型暂不支持内嵌预览。",
@@ -792,5 +789,9 @@
   "spreadsheetPreview.viewMode": "工作簿视图",
   "spreadsheetPreview.tableView": "表格视图",
   "spreadsheetPreview.printView": "打印视图",
-  "spreadsheetPreview.sheets": "工作表"
+  "spreadsheetPreview.sheets": "工作表",
+  "transcriptBlockContent.unableToLoadContent": "内容加载失败。",
+  "transcriptBlockContent.previousOutput": "上一段输出",
+  "transcriptBlockContent.nextOutput": "下一段输出",
+  "transcriptBlockContent.toolOutput": "工具输出"
 }
