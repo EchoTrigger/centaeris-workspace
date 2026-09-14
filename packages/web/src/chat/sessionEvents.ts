@@ -2,9 +2,20 @@ import { validateCitationSnapshot } from "./citationSnapshot.ts";
 import type {
   SessionStreamEvent,
   StreamEntry,
-  StreamItem,
   UnknownRecord,
 } from "./streamTypes.ts";
+import {
+  hasExactFields,
+  isInteger,
+  isRecord,
+  isTerminalSessionEvent,
+  requireObject,
+  requireString,
+  validateLiveReasoning,
+  validateSessionEvent,
+} from "./sessionStreamProtocol.ts";
+
+export { readSse, readSseBlock } from "./sessionStreamProtocol.ts";
 
 // Frontend view data, separate from model-visible messages and wire schemas.
 export type ReasoningBlockView = {
@@ -118,6 +129,16 @@ export type ProjectedAgentRun = AgentRunViewState & {
   lastSourceSequence: number;
 };
 
+export type TranscriptProjectionWork = {
+  committedEventVisits: number;
+  liveOverlayApplications: number;
+};
+
+export const createTranscriptProjectionWork = (): TranscriptProjectionWork => ({
+  committedEventVisits: 0,
+  liveOverlayApplications: 0,
+});
+
 export type HistoryPage = UnknownRecord & {
   schema: typeof HISTORY_PAGE_SCHEMA;
   session: UnknownRecord & { id: string; workspaceId: string };
@@ -127,66 +148,7 @@ export type HistoryPage = UnknownRecord & {
 };
 
 const AGENT_RUN_STATUSES = new Set(["queued", "running", "completed", "failed", "cancelled"]);
-const VISIBLE_EVENT_TYPES = new Set([
-  "agent_run_started", "user_message", "turn_supplement", "assistant_message", "tool_call",
-  "tool_result", "phase_event", "external_evidence_ref", "citation_recorded",
-  "artifact_published", "compaction", "tombstone", "agent_run_completed", "agent_run_failed",
-  "agent_run_interrupted",
-  "reasoning_block",
-]);
-const TERMINAL_EVENT_TYPES = new Set(["agent_run_completed", "agent_run_failed", "agent_run_interrupted"]);
-const STREAM_ITEM_FIELDS = {
-  committed: ["event", "kind", "agentRunId", "schema", "sourceSequence"],
-  live: ["afterSequence", "kind", "messageId", "revision", "agentRunId", "schema", "text", "turnId"],
-};
-
 export const HISTORY_PAGE_SCHEMA = "session.history.page.v1";
-
-function isRecord(value: unknown): value is UnknownRecord {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function isInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isInteger(value);
-}
-
-function hasExactFields(value: UnknownRecord, fields: readonly string[]) {
-  return Object.keys(value).sort().join("|") === [...fields].sort().join("|");
-}
-
-function requireObject(value: unknown, name: string): asserts value is UnknownRecord {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${name} must be an object`);
-}
-
-function requireString(
-  value: unknown,
-  name: string,
-  allowEmpty = false,
-): asserts value is string {
-  if (typeof value !== "string" || (!allowEmpty && !value.trim())) throw new Error(`${name} must be a string`);
-}
-
-function validateSessionEvent(
-  event: unknown,
-  identity: AgentRunIdentity = {},
-): SessionStreamEvent {
-  requireObject(event, "session event");
-  const required = ["sessionId", "createdAtMs", "eventId", "eventVersion", "payload", "schemaVersion", "sequence", "type"];
-  const allowed = new Set([...required, "agentRunId", "turnId"]);
-  if (required.some((field) => !(field in event)) || Object.keys(event).some((field) => !allowed.has(field))) {
-    throw new Error("session event fields mismatch");
-  }
-  if (event.schemaVersion !== "session.event.v1" || event.eventVersion !== 1 || typeof event.type !== "string" || !VISIBLE_EVENT_TYPES.has(event.type)) {
-    throw new Error("session event schema or type is unsupported");
-  }
-  for (const field of ["eventId", "sessionId"]) requireString(event[field], `session event ${field}`);
-  if (!isInteger(event.createdAtMs) || event.createdAtMs < 0) throw new Error("session event createdAtMs is invalid");
-  if (!isInteger(event.sequence) || event.sequence <= 0) throw new Error("session event sequence is invalid");
-  requireObject(event.payload, "session event payload");
-  if (identity.sessionId && event.sessionId !== identity.sessionId) throw new Error("session event session binding mismatch");
-  if (identity.agentRunId && event.agentRunId !== identity.agentRunId) throw new Error("Session event AgentRun binding mismatch");
-  return event as SessionStreamEvent;
-}
 
 function validateOperation(operation: unknown, callId: string): UnknownRecord {
   requireObject(operation, "tool operation");
@@ -450,7 +412,7 @@ function applySessionEvent(
       }),
     };
   }
-  if (TERMINAL_EVENT_TYPES.has(event.type)) {
+  if (isTerminalSessionEvent(event.type)) {
     const status = event.type === "agent_run_completed" ? "completed" : event.type === "agent_run_failed" ? "failed" : "cancelled";
     return {
       ...view,
@@ -509,17 +471,10 @@ function applyLive(
   return { ...view, messages, live: liveAssistant };
 }
 
-function validateLiveReasoning(value: unknown): LiveAssistant["reasoning"] {
-  if (value === undefined || value === null) return value;
-  requireObject(value, "live reasoning");
-  if (!hasExactFields(value, ["blockId", "requestId", "text"])) throw new Error("live reasoning fields mismatch");
-  requireString(value.requestId, "live reasoning requestId");
-  requireString(value.text, "live reasoning text", true);
-  if (value.blockId !== `reasoning:${value.requestId}`) throw new Error("live reasoning identity mismatch");
-  return { blockId: value.blockId as string, requestId: value.requestId, text: value.text };
-}
-
-function projectAgentRun(agentRun: RawAgentRun): ProjectedAgentRun {
+function projectAgentRun(
+  agentRun: RawAgentRun,
+  work?: TranscriptProjectionWork,
+): ProjectedAgentRun {
   const initialStartedAtMs = Date.parse(agentRun.startedAt || agentRun.createdAt || "");
   let view: AgentRunViewState = {
     ...agentRun,
@@ -541,6 +496,7 @@ function projectAgentRun(agentRun: RawAgentRun): ProjectedAgentRun {
   let previousSequence = 0;
   const eventIds = new Set<string>();
   for (const stored of agentRun.events) {
+    if (work) work.committedEventVisits += 1;
     requireObject(stored, "stored session event");
     if (!hasExactFields(stored, ["event", "sequence"]) || !Number.isInteger(stored.sequence) || stored.sequence <= previousSequence) {
       throw new Error("stored session event ordering is invalid");
@@ -568,6 +524,7 @@ function projectAgentRun(agentRun: RawAgentRun): ProjectedAgentRun {
         : view.phaseStartedAtMs,
     };
   }
+  if (work && agentRun.live) work.liveOverlayApplications += 1;
   view = applyLive(view, agentRun.live);
   return { ...view, eventIds: [...eventIds], lastSourceSequence: previousSequence };
 }
@@ -575,6 +532,7 @@ function projectAgentRun(agentRun: RawAgentRun): ProjectedAgentRun {
 export function hydrateAgentRun(
   agentRun: unknown,
   identity: AgentRunIdentity = {},
+  work?: TranscriptProjectionWork,
 ): ProjectedAgentRun {
   requireObject(agentRun, "agent run history");
   const fields = ["completedAt", "createdAt", "events", "id", "live", "model", "startedAt", "status", "streamCursor", "citations", "citationSequence"];
@@ -588,7 +546,7 @@ export function hydrateAgentRun(
     ...(identity.sessionId ? { sessionId: identity.sessionId } : {}),
     ...(identity.workspaceId ? { workspaceId: identity.workspaceId } : {}),
   } as RawAgentRun;
-  return projectAgentRun(boundAgentRun);
+  return projectAgentRun(boundAgentRun, work);
 }
 
 function quarantineAgentRun(
@@ -621,6 +579,7 @@ function quarantineAgentRun(
 export function validateHistoryPage(
   page: unknown,
   expectedIdentity: AgentRunIdentity = {},
+  work?: TranscriptProjectionWork,
 ): HistoryPage {
   const fields = ["agentRuns", "hasMore", "nextCursor", "schema", "session"];
   if (!isRecord(page) || !hasExactFields(page, fields) || page.schema !== HISTORY_PAGE_SCHEMA || !Array.isArray(page.agentRuns)) {
@@ -638,7 +597,7 @@ export function validateHistoryPage(
   const identity = { sessionId: page.session.id, workspaceId: page.session.workspaceId };
   const agentRuns = page.agentRuns.map((agentRun) => {
     try {
-      return hydrateAgentRun(agentRun, identity);
+      return hydrateAgentRun(agentRun, identity, work);
     } catch {
       return quarantineAgentRun(agentRun, identity);
     }
@@ -647,79 +606,10 @@ export function validateHistoryPage(
   return { ...page, agentRuns } as HistoryPage;
 }
 
-function validateStreamItem(item: unknown, agentRunId: string): StreamItem {
-  requireObject(item, "session stream item");
-  if (item.kind !== "committed" && item.kind !== "live") {
-    throw new Error("session stream item fields or binding are invalid");
-  }
-  const fields = [...STREAM_ITEM_FIELDS[item.kind], ...(item.kind === "live" && Object.hasOwn(item, "reasoning") ? ["reasoning"] : [])];
-  if (!fields || !hasExactFields(item, fields) || item.schema !== "session.stream.item.v1" || item.agentRunId !== agentRunId) {
-    throw new Error("session stream item fields or binding are invalid");
-  }
-  if (item.kind === "committed") {
-    if (!isInteger(item.sourceSequence) || item.sourceSequence <= 0) throw new Error("sourceSequence is invalid");
-    const event = validateSessionEvent(item.event, { agentRunId });
-    if (event.sequence !== item.sourceSequence) throw new Error("stream session event sequence binding mismatch");
-  } else {
-    if (!isInteger(item.afterSequence) || item.afterSequence < 0 || !isInteger(item.revision) || item.revision <= 0) throw new Error("live stream sequence is invalid");
-    for (const field of ["messageId", "turnId"]) requireString(item[field], `live ${field}`);
-    requireString(item.text, "live text", true);
-    validateLiveReasoning(item.reasoning);
-  }
-  return item as StreamItem;
-}
-
-export function readSseBlock(block: string, agentRunId: string): StreamEntry | null {
-  let cursor = null;
-  const dataLines: string[] = [];
-  for (const line of block.split(/\r?\n/)) {
-    if (line.startsWith("id:")) cursor = line.slice(3).trim();
-    else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
-  }
-  if (!dataLines.length) return null;
-  return { cursor, item: validateStreamItem(JSON.parse(dataLines.join("\n")), agentRunId) };
-}
-
-function throwIfAborted(signal?: AbortSignal) {
-  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-}
-
-export async function readSse(
-  response: Response,
-  agentRunId: string,
-  onItem: (entry: StreamEntry) => void | Promise<void>,
-  { signal }: { signal?: AbortSignal } = {},
-) {
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error("stream body is unavailable");
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let terminal = false;
-  const deliver = async (block: string) => {
-    throwIfAborted(signal);
-    const entry = readSseBlock(block, agentRunId);
-    if (!entry) return;
-    if (terminal) throw new Error("session stream emitted an item after terminal");
-    await onItem(entry);
-    terminal = entry.item.kind === "committed" && TERMINAL_EVENT_TYPES.has(entry.item.event.type);
-  };
-  while (true) {
-    throwIfAborted(signal);
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const blocks = buffer.split(/\r?\n\r?\n/);
-    buffer = blocks.pop() || "";
-    for (const block of blocks) await deliver(block);
-  }
-  buffer += decoder.decode();
-  if (buffer.trim()) await deliver(buffer);
-  return terminal;
-}
-
 export function applyStreamEntry(
   agentRun: ProjectedAgentRun,
   entry: StreamEntry,
+  work?: TranscriptProjectionWork,
 ): ProjectedAgentRun {
   const { cursor, item } = entry;
   if (item.agentRunId !== agentRun.id) throw new Error("Session stream AgentRun binding mismatch");
@@ -729,9 +619,9 @@ export function applyStreamEntry(
     return projectAgentRun({
       ...agentRun,
       events: [...events, { sequence: item.sourceSequence, event: item.event }].sort((left, right) => left.sequence - right.sequence),
-      live: TERMINAL_EVENT_TYPES.has(item.event.type) ? null : agentRun.live,
+      live: isTerminalSessionEvent(item.event.type) ? null : agentRun.live,
       streamCursor: cursor || agentRun.streamCursor,
-    });
+    }, work);
   }
   if (agentRun.live?.messageId === item.messageId && item.revision <= agentRun.live.revision) {
     return { ...agentRun, streamCursor: cursor || agentRun.streamCursor };
@@ -747,7 +637,7 @@ export function applyStreamEntry(
       ...(item.reasoning !== undefined ? { reasoning: item.reasoning } : {}),
     },
     streamCursor: cursor || agentRun.streamCursor,
-  });
+  }, work);
 }
 
 export function isAgentRunActive(agentRun: { status: string }) {

@@ -220,7 +220,7 @@ class PrivateAgentTests(TestCase):
                 agent=owner_agent,
             )
 
-    def test_agent_delete_tombstones_parent_and_preserves_session_history(self):
+    def test_agent_delete_tombstones_parent_and_preserves_sessions(self):
         agent = Agent.objects.create(
             workspace=self.workspace,
             owner=self.member,
@@ -303,7 +303,7 @@ class PrivateAgentTests(TestCase):
             {"error": "agent_deleted"},
         )
         self.assertEqual(
-            self.client.get(f"/api/sessions/{active_session.id}/history").status_code,
+            self.client.get(f"/api/sessions/{active_session.id}").status_code,
             200,
         )
         message = self.client.post(

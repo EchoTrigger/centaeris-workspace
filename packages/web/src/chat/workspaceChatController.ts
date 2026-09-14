@@ -56,6 +56,7 @@ export class WorkspaceChatController {
   readonly sessionId: string;
   readonly agentRunId: string;
   lastCursor: string;
+  receivedCursor: string;
   readonly maxItemsPerFrame: number;
   readonly reducerBudgetMs: number;
   readonly queueHighWaterMark: number;
@@ -99,6 +100,7 @@ export class WorkspaceChatController {
     this.sessionId = sessionId;
     this.agentRunId = agentRunId;
     this.lastCursor = initialCursor;
+    this.receivedCursor = initialCursor;
     this.maxItemsPerFrame = maxItemsPerFrame;
     this.reducerBudgetMs = reducerBudgetMs;
     this.queueHighWaterMark = queueHighWaterMark;
@@ -125,7 +127,7 @@ export class WorkspaceChatController {
     if (entry.item.agentRunId !== this.agentRunId) throw new Error("Session stream AgentRun binding mismatch");
     if (entry.cursor !== null) {
       if (typeof entry.cursor !== "string" || !entry.cursor) throw new Error("session stream cursor is invalid");
-      this.lastCursor = entry.cursor;
+      this.receivedCursor = entry.cursor;
     }
     this.terminalAccepted = entry.item.kind === "committed"
       && TERMINALS.has(entry.item.event.type);
@@ -141,6 +143,7 @@ export class WorkspaceChatController {
     if (typeof cursor !== "string" || !cursor) throw new Error("resume cursor is invalid");
     if (this.hasQueuedItems()) throw new Error("cannot replace cursor while stream items are queued");
     this.lastCursor = cursor;
+    this.receivedCursor = cursor;
   }
 
   async acceptWithBackpressure(entry: StreamEntry) {
@@ -174,6 +177,8 @@ export class WorkspaceChatController {
       try {
         const telemetry = batch.map((entry) => this.acceptedTelemetry.get(entry));
         this.store.applyStreamEntries(batch, telemetry);
+        const appliedCursor = [...batch].reverse().find((entry) => entry.cursor !== null)?.cursor;
+        if (appliedCursor) this.lastCursor = appliedCursor;
         if (batch.some(({ item }) => item.kind === "committed"
           && (item.event.type === "tool_result" || item.event.type === "citation_recorded" || TERMINALS.has(item.event.type)))) {
           this.onCitationsChanged();

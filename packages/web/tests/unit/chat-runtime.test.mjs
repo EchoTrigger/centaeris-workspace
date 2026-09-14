@@ -723,6 +723,57 @@ test("live SSE without an id does not advance the durable cursor", () => {
   assert.equal(controller.lastCursor, "v1.durable");
 });
 
+test("controller exposes only the last successfully applied durable cursor", async () => {
+  const store = createChatViewStore();
+  store.replaceAll([validateHistoryPage(page(historyAgentRun([]))).agentRuns[0]]);
+  const frames = [];
+  const controller = new WorkspaceChatController({
+    store,
+    workspaceId: "workspace_1",
+    sessionId,
+    agentRunId,
+    initialCursor: "1-0",
+    scheduleFrame: (callback) => (frames.push(callback), frames.length),
+    cancelFrame: () => {},
+  });
+
+  controller.accept(committedEntry(event("agent_run_started", 1, { userObjective: "cursor" }), "2-0"));
+  assert.equal(controller.receivedCursor, "2-0");
+  assert.equal(controller.lastCursor, "1-0", "reconnect must stay on the applied cursor while an entry is queued");
+
+  frames.shift()();
+  await controller.whenIdle();
+  assert.equal(controller.lastCursor, "2-0");
+});
+
+test("controller keeps the applied cursor when an atomic reducer batch fails", async () => {
+  const baseStore = createChatViewStore();
+  baseStore.replaceAll([validateHistoryPage(page(historyAgentRun([]))).agentRuns[0]]);
+  const store = {
+    ...baseStore,
+    applyStreamEntries() {
+      throw new Error("projection failed");
+    },
+  };
+  const frames = [];
+  const controller = new WorkspaceChatController({
+    store,
+    workspaceId: "workspace_1",
+    sessionId,
+    agentRunId,
+    initialCursor: "1-0",
+    scheduleFrame: (callback) => (frames.push(callback), frames.length),
+    cancelFrame: () => {},
+  });
+
+  controller.accept(committedEntry(event("agent_run_started", 1, { userObjective: "cursor" }), "2-0"));
+  frames.shift()();
+
+  await assert.rejects(controller.whenIdle(), /projection failed/);
+  assert.equal(controller.receivedCursor, "2-0");
+  assert.equal(controller.lastCursor, "1-0");
+});
+
 test("history schema and global event order loud-fail", () => {
   assert.throws(() => validateHistoryPage({ ...page(historyAgentRun([])), schema: "banana" }), /invalid session history page/);
   const projected = validateHistoryPage(page(historyAgentRun([

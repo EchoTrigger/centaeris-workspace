@@ -36,13 +36,59 @@ default locale. IDs are tie-breakers, not timestamps. Each kind contributes at
 most 51 candidates and the response contains at most 50 entries. Permissions,
 filters, and cursor fields are unchanged by the choice of database locale.
 
+## Transcript page and committed patch reads
+
+`GET /api/sessions/{sessionId}/transcript` returns the Core-owned
+`transcript.page.v1` display read model. An initial request captures the current
+Session source high-water and current projection generation on the server. A
+retry of the frozen tail supplies exactly `sourceHighWater` and
+`projectionGeneration`; an older-page request additionally supplies the opaque
+`olderCursor`. The cursor is bound to the Session, projection version,
+generation, high-water, and stable display order. Pages are ascending even
+though PostgreSQL reads the page index in descending order.
+`resumeCursors` contains one Session display stream (`workspace-transcript.v1`)
+whose cursor is the canonical Session source sequence. It is deliberately not
+an AgentRun SSE cursor, so the number of runs cannot exhaust the page cursor
+budget.
+Tool blocks contain exactly one of inline `summary` or bounded `summaryRef`;
+large summaries use the same stable `session-event:<eventId>:<field>` reference
+scheme as other transcript text and do not stall page cursors.
+
+`GET /api/sessions/{sessionId}/transcript/patches` reads committed display
+patches strictly after `afterSourceHighWater` and through one frozen
+`throughSourceHighWater`. The first request may omit the through-water and lets
+the server capture it; continuations reuse the returned value. Results use
+`transcript.patch.page.v1`, contain at most 128 patches, and never reconstruct
+patches by scanning raw Session events.
+
+Both routes recheck Session ownership and current Workspace membership on every
+request and return `Cache-Control: no-store`. The Python API authorizes, binds,
+and transports these contracts; it does not implement display projection.
+Runtime reads the PostgreSQL display index through the public Core transcript
+store port. A page or patch is returned only after the requested high-water is
+fully projected. A bounded catch-up pass normally handles at most 128 source
+events and 256 KiB. To guarantee cursor progress, one source event may exceed
+the byte budget; Runtime processes that one event, records an explicit
+`transcript projection progress exception` diagnostic with its byte size, and
+then yields rather than looping on the same event. If more work remains, HTTP 409
+`transcript_projection_not_ready` reports both `sourceHighWater` and
+`projectedHighWater`, and a frozen-water retry advances another bounded pass.
+An invalid generation fails explicitly rather than mixing pages. Empty Sessions
+return a valid high-water-zero empty page without creating synthetic facts.
+Runtime atomically overwrites one current-head recovery frontier with each
+normal projection commit. Historical patch commits exclude that recovery
+payload, so open-tool state is not copied into every retained patch. This
+current recovery slot is not the periodic historical checkpoint policy owned by
+Core; normal page and patch reads do not depend on a historical checkpoint
+archive.
+
 ## Workspace citation presentation
 
-Each history AgentRun requires `citations` and `citationSequence`, including an
-empty array and zero for an empty run. Citation summaries have exactly
-`citationId`, `inputRef`, `displayName`, `sourceToolCallId`, and `sourceUrl`.
-Source URLs are first-party `/api/citations/{citationId}` detail routes, not
-arbitrary model-supplied links. Preview authorization is checked on every access.
+The retired Session-history response is not a citation transport. Citation
+summaries have exactly `citationId`, `inputRef`, `displayName`,
+`sourceToolCallId`, and `sourceUrl`. Source URLs are first-party
+`/api/citations/{citationId}` detail routes, not arbitrary model-supplied links.
+Preview authorization is checked on every access.
 
 `GET /api/sessions/{sessionId}/agent-runs/{agentRunId}/citations` returns a no-store
 snapshot with exactly `schema: "workspace.citations.v1"`, `sessionId`, `agentRunId`,
@@ -51,13 +97,13 @@ membership; unknown query parameters fail. The snapshot rebuilds verified
 projections from committed events through a captured sequence, under the run
 projection lock, so it works before terminal lifecycle reconciliation.
 
-History and live refresh use the same snapshot service. The web view replaces
-its citation collection after tool-result batches and termination, coalesces
-in-flight refreshes, bounds each request to ten seconds, ignores obsolete or
-cross-session responses, and preserves existing citations on refresh failure.
-Snapshots do not advance the Session stream cursor. Historical Core citation
-events remain validated but no longer independently populate browser citations.
-API and web strict schemas must be released together; no old-field aliases exist.
+Citation snapshots remain an independently authorized resource API and do not
+advance the Session stream cursor. The transcript page carries display blocks
+and content references; it does not embed citation snapshots. Browser citation
+rows must bind this endpoint to a stable transcript block identity before they
+are re-enabled. Historical Core citation events remain validated and cannot by
+themselves populate browser citations. API and web strict schemas must be
+released together; no old-field aliases exist.
 
 Internal REST calls require `X-Internal-Token`; there is no anonymous fallback.
 The first-party MCP transport `/internal/mcp` is an exception: it accepts only a

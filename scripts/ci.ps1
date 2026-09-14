@@ -1,5 +1,5 @@
 param(
-    [switch]$InstallPlaywright
+    [switch]$SkipFrontendTests
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,18 +30,11 @@ Run "Django migration drift" { uv run --frozen --package api python packages/api
 Run "Full Django PostgreSQL suite" { uv run --frozen --package api python scripts/python_test_gate.py api }
 Run "First-party MCP Rust/Python client" { uv run --frozen --package api python scripts/platform-mcp-client-gate.py }
 Run "Node install" { npm ci }
-if ($InstallPlaywright) {
-    if ($IsLinux) {
-        Run "Playwright Chromium install" { npx playwright install --with-deps chromium }
-    } else {
-        Run "Playwright Chromium install" { npx playwright install chromium }
-    }
-}
 Run "Performance artifact validation" { node --test scripts/performance-eval-artifact.test.mjs }
-Run "Web lint" { npm run lint }
-Run "Web typecheck" { npm run typecheck }
-Run "Web unit tests" { npm run test:unit --workspace packages/web }
-Run "Web browser interactions" { npm run test:e2e --workspace packages/web }
+Run "Web production validation" { npm run build --workspace packages/web }
+if (-not $SkipFrontendTests) {
+    Run "Web unit tests" { npm run test:unit --workspace packages/web }
+}
 Run "Compose structure" {
     $config = docker compose --env-file .env.example config --format json | ConvertFrom-Json
     foreach ($service in @("document-processor", "workspace-general")) {

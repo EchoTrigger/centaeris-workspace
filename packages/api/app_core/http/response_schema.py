@@ -266,6 +266,22 @@ class SessionContextUsageEnvelope(StrictSchema):
     context_usage: ContextUsageResponse | None = Field(alias="contextUsage")
 
 
+class TranscriptContentRangeResponse(StrictSchema):
+    schema_id: Literal["transcript.content.range.v1"] = Field(alias="schema")
+    session_id: str = Field(alias="sessionId")
+    projection_version: Literal["transcript.projection.v1"] = Field(
+        alias="projectionVersion"
+    )
+    projection_generation: str = Field(alias="projectionGeneration")
+    ref_id: str = Field(alias="refId")
+    revision: Literal["2"]
+    byte_length: str = Field(alias="byteLength")
+    start_offset: str = Field(alias="startOffset")
+    end_offset: str = Field(alias="endOffset")
+    content: str
+    has_more: bool = Field(alias="hasMore")
+
+
 class SessionResponse(StrictSchema):
     id: str
     workspace_id: str = Field(alias="workspaceId")
@@ -612,39 +628,6 @@ class CitationEnvelope(StrictSchema):
     citation: CitationResponse
 
 
-class SessionEventResponse(StrictSchema):
-    schema_version: Literal["session.event.v1"] = Field(alias="schemaVersion")
-    event_version: Literal[1] = Field(alias="eventVersion")
-    sequence: int = Field(gt=0)
-    type: str
-    event_id: str = Field(alias="eventId")
-    session_id: str = Field(alias="sessionId")
-    turn_id: str | None = Field(default=None, alias="turnId")
-    agent_run_id: str | None = Field(default=None, alias="agentRunId")
-    created_at_ms: int = Field(alias="createdAtMs")
-    payload: dict
-
-
-class StoredSessionEventResponse(StrictSchema):
-    sequence: int = Field(gt=0)
-    event: SessionEventResponse
-
-
-class LiveReasoningResponse(StrictSchema):
-    block_id: str = Field(alias="blockId")
-    request_id: str = Field(alias="requestId")
-    text: str
-
-
-class LiveAssistantResponse(StrictSchema):
-    message_id: str = Field(alias="messageId")
-    turn_id: str = Field(alias="turnId")
-    after_sequence: int = Field(alias="afterSequence", ge=0)
-    revision: int = Field(gt=0)
-    text: str
-    reasoning: LiveReasoningResponse | None = None
-
-
 class CitationSummaryResponse(StrictSchema):
     citation_id: str = Field(alias="citationId")
     input_ref: str = Field(alias="inputRef")
@@ -659,28 +642,6 @@ class CitationSnapshotResponse(StrictSchema):
     session_id: str = Field(alias="sessionId")
     through_sequence: int = Field(alias="throughSequence", ge=0)
     citations: list[CitationSummaryResponse]
-
-
-class AgentRunHistoryResponse(StrictSchema):
-    id: str
-    status: str
-    model: ModelResponse
-    created_at: str = Field(alias="createdAt")
-    started_at: str | None = Field(alias="startedAt")
-    completed_at: str | None = Field(alias="completedAt")
-    events: list[StoredSessionEventResponse]
-    live: LiveAssistantResponse | None
-    stream_cursor: str = Field(alias="streamCursor")
-    citations: list[CitationSummaryResponse]
-    citation_sequence: int = Field(alias="citationSequence", ge=0)
-
-
-class SessionHistoryEnvelope(StrictSchema):
-    schema_id: Literal["session.history.page.v1"] = Field(alias="schema")
-    session: SessionResponse
-    agent_runs: list[AgentRunHistoryResponse] = Field(alias="agentRuns")
-    next_cursor: str | None = Field(alias="nextCursor")
-    has_more: bool = Field(alias="hasMore")
 
 
 class AgentRunAcceptedResponse(StrictSchema):

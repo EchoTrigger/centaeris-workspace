@@ -81,6 +81,7 @@ mod reliability;
 mod runtime;
 mod schema;
 mod transactions;
+mod transcript;
 mod turn_supplement;
 
 #[derive(Clone)]
@@ -249,7 +250,8 @@ impl PostgresRuntimeStore {
         session_id: String,
         prompt: String,
     ) -> PostgresSessionLog {
-        PostgresSessionLog::new(
+        PostgresSessionLog::new_with_projection_store(
+            self.clone(),
             self.ordinary_connections.clone(),
             workspace_id,
             session_id,

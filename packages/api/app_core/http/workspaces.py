@@ -1,13 +1,12 @@
-import base64
 import json
 import logging
 from typing import Literal
 
 from django.db import transaction
+from django.core.files.storage import default_storage
 from django.http import JsonResponse
-from django.db.models import Q
+from django.db.models import Max, Q
 from django.utils import timezone
-from django.utils.dateparse import parse_datetime
 from ninja import Router, Status
 from ninja.responses import codes_4xx
 from pydantic import Field, ValidationError, field_validator
@@ -37,15 +36,9 @@ from app_core.plugin_catalog import (
     plugin_activation_for_workspace,
 )
 from app_core.agent_run_authorization_factory import create_agent_run_authorization
-from app_core.agent_run_stream import (
-    AgentRunStreamUnavailable,
-    advance_overlay_barrier,
-    encode_stream_cursor,
-    live_overlay_is_superseded,
-    load_live_text_state,
-    load_session_high_water,
-)
+from app_core.agent_run_stream import encode_stream_cursor
 from app_core.runtime_client import (
+    TranscriptRuntimeError,
     request_agent_run_cancellation,
     request_agent_run_supplement,
     request_workspace_skill_catalog,
@@ -53,10 +46,11 @@ from app_core.runtime_client import (
     request_workspace_hook_catalog,
     request_workspace_mcp_catalog,
     request_execution_profile,
+    request_transcript_page,
+    request_transcript_patches,
     schedule_agent_run_lifecycle,
 )
 from app_core.session_event import (
-    citation_snapshot,
     committed_session_terminal_state,
     project_committed_agent_run,
 )
@@ -74,8 +68,8 @@ from .response_schema import (
     SessionEnvelope,
     SessionProjectEnvelope,
     SessionProjectsEnvelope,
-    SessionHistoryEnvelope,
     SessionContextUsageEnvelope,
+    TranscriptContentRangeResponse,
     AgentRunAcceptedResponse,
     AgentRunCancellationResponse,
     AgentRunSupplementResponse,
@@ -105,9 +99,10 @@ from .serialization import (
 
 logger = logging.getLogger(__name__)
 router = Router(tags=["workspaces-sessions"], by_alias=True)
-SESSION_HISTORY_SCHEMA = "session.history.page.v1"
-SESSION_HISTORY_DEFAULT_LIMIT = 40
-SESSION_HISTORY_MAX_LIMIT = 100
+TRANSCRIPT_PROJECTION_VERSION = "transcript.projection.v1"
+TRANSCRIPT_CONTENT_RANGE_BYTES = 64 * 1024
+TRANSCRIPT_SNAPSHOT_MANIFEST_BYTES = 1024 * 1024
+TRANSCRIPT_SNAPSHOT_SCHEMA = "workspace.snapshot.v1"
 CONTEXT_COMPACTION_HEADROOM_TOKENS = 32_768
 
 
@@ -536,7 +531,7 @@ def create_workspace_session(request, workspace_id: str, payload: SessionCreateR
     response={200: SessionEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def get_session(request, session_id: str):
-    session = _session_for_update(request.user, session_id, lock=False)
+    session = _authorized_transcript_session(request.user, session_id)
     if session is None:
         return Status(404, {"error": "session_not_found"})
     return {"session": serialize_session(session)}
@@ -677,155 +672,292 @@ def permanently_delete_session(request, session_id: str):
 
 
 @router.get(
-    "/sessions/{session_id}/history",
+    "/sessions/{session_id}/transcript",
     auth=session_auth,
-    response={200: SessionHistoryEnvelope} | COMMON_ERROR_RESPONSES,
+    response=None,
 )
-def session_history(request, session_id: str):
-    try:
-        session = Session.objects.select_related("workspace").get(
-            id=session_id,
-            owner=request.user,
-            purgedAt__isnull=True,
-            agent__purgedAt__isnull=True,
+def session_transcript(request, session_id: str):
+    session = _authorized_transcript_session(request.user, session_id)
+    if session is None:
+        return _transcript_json_response({"error": "session_not_found"}, status=404)
+    fields = set(request.GET.keys())
+    if any(len(request.GET.getlist(field)) != 1 for field in fields):
+        return _transcript_json_response(
+            {"error": "transcript_page_query_invalid"}, status=400
         )
-    except Session.DoesNotExist:
-        return Status(404, {"error": "session_not_found"})
-    if workspace_membership_for(request.user, session.workspace_id) is None:
-        return Status(404, {"error": "session_not_found"})
-    query_fields = set(request.GET.keys())
-    if not query_fields.issubset({"before", "limit"}):
-        return Status(400, {"error": "session_history_query_invalid"})
-    if any(len(request.GET.getlist(field)) != 1 for field in query_fields):
-        return Status(400, {"error": "session_history_query_invalid"})
-    raw_limit = request.GET.get("limit", str(SESSION_HISTORY_DEFAULT_LIMIT))
-    try:
-        limit = int(raw_limit)
-    except (TypeError, ValueError):
-        return Status(400, {"error": "session_history_limit_invalid"})
-    if limit < 1 or limit > SESSION_HISTORY_MAX_LIMIT or str(limit) != raw_limit:
-        return Status(400, {"error": "session_history_limit_invalid"})
-    before = request.GET.get("before")
-    cursor = None
-    if before is not None:
-        try:
-            cursor = _decode_session_history_cursor(before)
-        except ValueError:
-            return Status(400, {"error": "session_history_cursor_invalid"})
-
-    agent_runs = []
-    run_query = session.agent_runs.select_related(
-        "modelConfig",
-        "authorization",
-    ).filter(
-        Q(status__in={"queued", "running"})
-        | Q(events__projects_to_agent_run_stream=True)
-    ).distinct().order_by("-createdAt", "-id")
-    if cursor is not None:
-        run_query = run_query.filter(
-            Q(createdAt__lt=cursor["createdAt"])
-            | Q(createdAt=cursor["createdAt"], id__lt=cursor["id"])
-        )
-    page_descending = list(run_query[: limit + 1])
-    has_more = len(page_descending) > limit
-    page = list(reversed(page_descending[:limit]))
-    for agent_run in page:
-        try:
-            terminal_agent_run = agent_run.status in {"completed", "failed", "cancelled"}
-            if not terminal_agent_run and committed_session_terminal_state(agent_run) is not None:
-                agent_run = project_committed_agent_run(agent_run)
-                terminal_agent_run = True
-            stream_cursor = "0-0"
-            live_state = None
-            stored_events = list(
-                SessionEvent.objects.filter(
-                    agent_run=agent_run,
-                    projects_to_agent_run_stream=True,
-                ).order_by("sequence", "eventId")
+    if not fields:
+        source_high_water = _session_source_high_water(session.id)
+        generation = None
+        older_cursor = None
+    elif fields in (
+        {"sourceHighWater", "projectionGeneration"},
+        {"sourceHighWater", "projectionGeneration", "olderCursor"},
+    ):
+        source_high_water = request.GET["sourceHighWater"]
+        generation = request.GET["projectionGeneration"]
+        older_cursor = request.GET.get("olderCursor")
+        current_high_water = _session_source_high_water(session.id)
+        if (
+            not _canonical_waterline(source_high_water)
+            or int(source_high_water) > current_high_water
+            or not generation
+            or len(generation) > 160
+            or (older_cursor is not None and (not older_cursor or len(older_cursor) > 4096))
+        ):
+            return _transcript_json_response(
+                {"error": "transcript_page_cursor_invalid"}, status=400
             )
-            overlay_barriers = {}
-            for stored in stored_events:
-                advance_overlay_barrier(
-                    overlay_barriers,
-                    stored.payload,
-                    stored.sequence,
-                )
-            if stored_events:
-                stream_cursor = encode_stream_cursor(
-                    agent_run.id,
-                    stored_events[-1].sequence,
-                )
-            if not terminal_agent_run:
-                try:
-                    live_state = load_live_text_state(agent_run.id)
-                except AgentRunStreamUnavailable as error:
-                    if str(error) == "agent_run_live_state_invalid":
-                        raise ValueError(str(error)) from error
-                    logger.warning(
-                        "Redis AgentRun buffer is unavailable; serving Postgres history only",
-                        extra={"agentRunId": agent_run.id},
-                    )
-            if live_state is not None:
-                if live_state["afterSequence"] > load_session_high_water(
-                    agent_run.session_id
-                ):
-                    raise ValueError(
-                        "live afterSequence exceeds PostgreSQL session high-water"
-                    )
-                if live_overlay_is_superseded(live_state, overlay_barriers):
-                    live_state = None
-            if live_state is not None:
-                sealed = next(
-                    (
-                        stored.payload
-                        for stored in stored_events
-                        if stored.payload["type"] == "assistant_message"
-                        and stored.payload["payload"]["messageId"]
-                        == live_state["messageId"]
-                    ),
-                    None,
-                )
-                if sealed is not None:
-                    if sealed["turnId"] != live_state["turnId"]:
-                        raise ValueError(
-                            "live assistant message identity conflicts with sealed history"
-                        )
-                    live_state = None
-        except (RuntimeError, ValueError) as error:
-            logger.exception(
-                "Session history is invalid",
-                extra={"agentRunId": agent_run.id},
-            )
-            return Status(409, {"error": str(error)})
-        citations = citation_snapshot(agent_run)
-        agent_runs.append(
-            {
-                "id": agent_run.id,
-                "status": agent_run.status,
-                "model": serialize_model(agent_run.modelConfig),
-                "createdAt": agent_run.createdAt.isoformat(),
-                "startedAt": agent_run.startedAt.isoformat() if agent_run.startedAt else None,
-                "completedAt": (
-                    agent_run.completedAt.isoformat() if agent_run.completedAt else None
-                ),
-                "events": [
-                    {"sequence": stored.sequence, "event": stored.payload}
-                    for stored in stored_events
-                ],
-                "live": live_state,
-                "streamCursor": stream_cursor,
-                "citations": citations["citations"],
-                "citationSequence": citations["throughSequence"],
-            }
+    else:
+        return _transcript_json_response(
+            {"error": "transcript_page_query_invalid"}, status=400
         )
-    next_cursor = _encode_session_history_cursor(page[0]) if has_more else None
-    return {
-        "schema": SESSION_HISTORY_SCHEMA,
-        "session": serialize_session(session),
-        "agentRuns": agent_runs,
-        "nextCursor": next_cursor,
-        "hasMore": has_more,
+    body = {
+        "schema": "runtime.transcript.page.read.v1",
+        "sessionId": session.id,
+        "projectionVersion": TRANSCRIPT_PROJECTION_VERSION,
+        "projectionGeneration": generation,
+        "sourceHighWater": str(source_high_water),
+        "olderCursor": older_cursor,
     }
+    try:
+        page = request_transcript_page(body)
+    except TranscriptRuntimeError as error:
+        return _transcript_json_response(error.payload, status=409)
+    except RuntimeError:
+        logger.exception("Workspace transcript page request failed", extra={"sessionId": session.id})
+        return _transcript_json_response(
+            {"error": "transcript_page_unavailable"}, status=503
+        )
+    return _transcript_json_response(page)
+
+
+@router.get(
+    "/sessions/{session_id}/transcript/patches",
+    auth=session_auth,
+    response=None,
+)
+def session_transcript_patches(request, session_id: str):
+    session = _authorized_transcript_session(request.user, session_id)
+    if session is None:
+        return _transcript_json_response({"error": "session_not_found"}, status=404)
+    fields = set(request.GET.keys())
+    if any(len(request.GET.getlist(field)) != 1 for field in fields) or fields not in (
+        {"afterSourceHighWater", "projectionGeneration"},
+        {"afterSourceHighWater", "throughSourceHighWater", "projectionGeneration"},
+    ):
+        return _transcript_json_response(
+            {"error": "transcript_patch_query_invalid"}, status=400
+        )
+    after = request.GET["afterSourceHighWater"]
+    generation = request.GET["projectionGeneration"]
+    current_high_water = _session_source_high_water(session.id)
+    through = request.GET.get("throughSourceHighWater", str(current_high_water))
+    if (
+        not _canonical_waterline(after)
+        or not _canonical_waterline(through)
+        or int(after) > int(through)
+        or int(through) > current_high_water
+        or not generation
+        or len(generation) > 160
+    ):
+        return _transcript_json_response(
+            {"error": "transcript_patch_cursor_invalid"}, status=400
+        )
+    body = {
+        "schema": "runtime.transcript.patch.read.v1",
+        "sessionId": session.id,
+        "projectionVersion": TRANSCRIPT_PROJECTION_VERSION,
+        "projectionGeneration": generation,
+        "afterSourceHighWater": after,
+        "throughSourceHighWater": through,
+    }
+    try:
+        result = request_transcript_patches(body)
+    except TranscriptRuntimeError as error:
+        return _transcript_json_response(error.payload, status=409)
+    except RuntimeError:
+        logger.exception("Workspace transcript patch request failed", extra={"sessionId": session.id})
+        return _transcript_json_response(
+            {"error": "transcript_patch_unavailable"}, status=503
+        )
+    return _transcript_json_response(result)
+
+
+@router.get(
+    "/sessions/{session_id}/transcript/content",
+    auth=session_auth,
+    response={200: TranscriptContentRangeResponse} | COMMON_ERROR_RESPONSES,
+)
+def session_transcript_content(request, session_id: str):
+    session = _authorized_transcript_session(request.user, session_id)
+    if session is None:
+        return _transcript_json_response({"error": "session_not_found"}, status=404)
+    fields = {
+        "projectionGeneration",
+        "refId",
+        "revision",
+        "byteLength",
+        "offset",
+    }
+    if set(request.GET.keys()) != fields or any(
+        len(request.GET.getlist(field)) != 1 for field in fields
+    ):
+        return _transcript_json_response(
+            {"error": "transcript_content_query_invalid"}, status=400
+        )
+    generation = request.GET["projectionGeneration"]
+    ref_id = request.GET["refId"]
+    revision = request.GET["revision"]
+    byte_length_raw = request.GET["byteLength"]
+    offset_raw = request.GET["offset"]
+    if (
+        not generation
+        or len(generation) > 160
+        or not ref_id.startswith("tool-output:")
+        or not ref_id.removeprefix("tool-output:")
+        or len(ref_id) > 320
+        or revision != "2"
+        or not _canonical_waterline(byte_length_raw)
+        or byte_length_raw == "0"
+        or not _canonical_waterline(offset_raw)
+        or int(offset_raw) > int(byte_length_raw)
+    ):
+        return _transcript_json_response(
+            {"error": "transcript_content_query_invalid"}, status=400
+        )
+    call_id = ref_id.removeprefix("tool-output:")
+    candidates = list(
+        SessionEvent.objects.filter(
+            session=session,
+        )
+        .extra(
+            where=[
+                "app_core_sessionevent.payload ->> 'type' = 'tool_result'",
+                "app_core_sessionevent.payload #>> '{payload,callId}' = %s",
+            ],
+            params=[call_id],
+        )
+        .only("payload")[:2]
+    )
+    if len(candidates) != 1:
+        return _transcript_json_response(
+            {"error": "transcript_content_unavailable"}, status=409
+        )
+    payload = candidates[0].payload.get("payload")
+    byte_length = int(byte_length_raw)
+    if (
+        not isinstance(payload, dict)
+        or payload.get("outputComplete") is not True
+        or payload.get("outputByteLength") != byte_length
+    ):
+        return _transcript_json_response(
+            {"error": "transcript_content_reference_stale"}, status=409
+        )
+    try:
+        if payload.get("fullOutputPath") is None and payload.get("outputStartByte") is None:
+            inline_content = payload.get("modelContent")
+            if (
+                not isinstance(inline_content, str)
+                or len(inline_content.encode("utf-8")) != byte_length
+            ):
+                raise ValueError("transcript inline content is invalid")
+            content, end_offset = _transcript_utf8_range(
+                inline_content, int(offset_raw)
+            )
+        else:
+            if (
+                not isinstance(payload.get("outputStartByte"), int)
+                or isinstance(payload.get("outputStartByte"), bool)
+                or payload["outputStartByte"] < 0
+                or not isinstance(payload.get("fullOutputPath"), str)
+            ):
+                raise ValueError("transcript spill identity is invalid")
+            content, end_offset = _read_transcript_snapshot_range(
+                session,
+                payload["fullOutputPath"],
+                payload["outputStartByte"],
+                byte_length,
+                int(offset_raw),
+            )
+    except (OSError, ValueError, UnicodeDecodeError):
+        logger.exception(
+            "Workspace transcript content range failed", extra={"sessionId": session.id}
+        )
+        return _transcript_json_response(
+            {"error": "transcript_content_unavailable"}, status=409
+        )
+    return _transcript_json_response(
+        {
+            "schema": "transcript.content.range.v1",
+            "sessionId": session.id,
+            "projectionVersion": TRANSCRIPT_PROJECTION_VERSION,
+            "projectionGeneration": generation,
+            "refId": ref_id,
+            "revision": revision,
+            "byteLength": byte_length_raw,
+            "startOffset": offset_raw,
+            "endOffset": str(end_offset),
+            "content": content,
+            "hasMore": end_offset < byte_length,
+        }
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/transcript/active-agent-run",
+    auth=session_auth,
+    response=None,
+)
+def session_transcript_active_agent_run(request, session_id: str):
+    session = _authorized_transcript_session(request.user, session_id)
+    if session is None:
+        return _transcript_json_response({"error": "session_not_found"}, status=404)
+    fields = set(request.GET.keys())
+    source_high_water = request.GET.get("sourceHighWater")
+    if (
+        fields != {"sourceHighWater"}
+        or len(request.GET.getlist("sourceHighWater")) != 1
+        or not _canonical_waterline(source_high_water)
+        or int(source_high_water) > _session_source_high_water(session.id)
+    ):
+        return _transcript_json_response(
+            {"error": "transcript_active_agent_run_query_invalid"}, status=400
+        )
+    candidates = list(
+        session.agent_runs.filter(status__in={"queued", "running"})
+        .order_by("-createdAt", "-id")[:2]
+    )
+    active_runs = []
+    for agent_run in candidates:
+        terminal_state = committed_session_terminal_state(agent_run)
+        if terminal_state is None:
+            active_runs.append(agent_run)
+        else:
+            project_committed_agent_run(agent_run, terminal_state)
+    if len(active_runs) > 1:
+        return _transcript_json_response(
+            {"error": "transcript_active_agent_run_conflict"}, status=409
+        )
+    active_run = active_runs[0] if active_runs else None
+    return _transcript_json_response(
+        {
+            "schema": "workspace.transcript.active_agent_run.v1",
+            "sessionId": session.id,
+            "agentRun": (
+                {
+                    "agentRunId": active_run.id,
+                    "status": active_run.status,
+                    "streamCursor": encode_stream_cursor(
+                        active_run.id, int(source_high_water)
+                    ),
+                }
+                if active_run is not None
+                else None
+            ),
+        }
+    )
+
+
 
 
 @router.get(
@@ -863,47 +995,44 @@ def session_context_usage(request, session_id: str):
     }
 
 
-def _encode_session_history_cursor(agent_run: AgentRun) -> str:
-    payload = json.dumps(
-        {"createdAt": agent_run.createdAt.isoformat(), "id": agent_run.id},
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+def _authorized_transcript_session(user, session_id: str) -> Session | None:
+    try:
+        session = Session.objects.select_related("workspace").get(
+            id=session_id,
+            owner=user,
+            purgedAt__isnull=True,
+            agent__purgedAt__isnull=True,
+        )
+    except Session.DoesNotExist:
+        return None
+    if workspace_membership_for(user, session.workspace_id) is None:
+        return None
+    return session
 
 
-def _decode_session_history_cursor(value: str) -> dict:
-    if not value or len(value) > 1024:
-        raise ValueError("session history cursor length is invalid")
-    try:
-        padding = "=" * (-len(value) % 4)
-        raw = base64.b64decode(
-            f"{value}{padding}",
-            altchars=b"-_",
-            validate=True,
-        )
-        payload = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ValueError("session history cursor is invalid") from error
-    if not isinstance(payload, dict) or set(payload) != {"createdAt", "id"}:
-        raise ValueError("session history cursor fields are invalid")
-    try:
-        created_at = (
-            parse_datetime(payload["createdAt"])
-            if isinstance(payload["createdAt"], str)
-            else None
-        )
-    except ValueError as error:
-        raise ValueError("session history cursor timestamp is invalid") from error
-    agent_run_id = payload["id"]
-    if created_at is None or not timezone.is_aware(created_at):
-        raise ValueError("session history cursor timestamp is invalid")
-    if not isinstance(agent_run_id, str) or not agent_run_id or len(agent_run_id) > 128:
-        raise ValueError("session history cursor AgentRun id is invalid")
-    canonical = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-    if canonical != value:
-        raise ValueError("session history cursor encoding is not canonical")
-    return {"createdAt": created_at, "id": agent_run_id}
+def _transcript_json_response(payload: dict, *, status: int = 200) -> JsonResponse:
+    response = JsonResponse(payload, status=status)
+    response["Cache-Control"] = "no-store"
+    return response
+
+
+def _session_source_high_water(session_id: str) -> int:
+    return SessionEvent.objects.filter(session_id=session_id).aggregate(
+        value=Max("sequence")
+    )["value"] or 0
+
+
+def _canonical_waterline(value: str) -> bool:
+    return (
+        isinstance(value, str)
+        and value.isascii()
+        and value.isdigit()
+        and (value == "0" or not value.startswith("0"))
+        and len(value) <= 20
+        and int(value) <= 18_446_744_073_709_551_615
+    )
+
+
 
 
 @router.post(
@@ -1531,6 +1660,104 @@ def _context_usage(event: SessionEvent, is_compacting: bool) -> dict:
             "freeSpaceTokens": max(max_context_tokens - used_tokens, 0),
         },
     }
+
+
+def _read_exact(source, size: int) -> bytes:
+    chunks = []
+    remaining = size
+    while remaining:
+        chunk = source.read(remaining)
+        if not chunk:
+            raise ValueError("stored workspace snapshot ended early")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _transcript_utf8_range(content: str, offset: int) -> tuple[str, int]:
+    encoded = content.encode("utf-8")
+    if offset > len(encoded):
+        raise ValueError("transcript content offset exceeds byteLength")
+    return _decode_transcript_range(
+        encoded[offset : offset + TRANSCRIPT_CONTENT_RANGE_BYTES], offset
+    )
+
+
+def _decode_transcript_range(encoded: bytes, offset: int) -> tuple[str, int]:
+    for trim in range(4):
+        candidate = encoded if trim == 0 else encoded[:-trim]
+        try:
+            content = candidate.decode("utf-8")
+            return content, offset + len(candidate)
+        except UnicodeDecodeError:
+            continue
+    raise UnicodeDecodeError("utf-8", encoded, 0, len(encoded), "invalid range boundary")
+
+
+def _read_transcript_snapshot_range(
+    session: Session,
+    path: str,
+    content_start: int,
+    byte_length: int,
+    offset: int,
+) -> tuple[str, int]:
+    if (
+        not session.workspaceStorageKey
+        or not session.workspaceSnapshotSizeBytes
+        or not path
+        or path.startswith(("/", "\\"))
+        or "\\" in path
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+    ):
+        raise ValueError("transcript content snapshot identity is invalid")
+    with default_storage.open(session.workspaceStorageKey, "rb") as source:
+        manifest_length = int.from_bytes(_read_exact(source, 4), "big")
+        if not 0 < manifest_length <= TRANSCRIPT_SNAPSHOT_MANIFEST_BYTES:
+            raise ValueError("stored workspace snapshot manifest is invalid")
+        manifest_bytes = _read_exact(source, manifest_length)
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+        if (
+            json.dumps(manifest, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            != manifest_bytes
+            or not isinstance(manifest, dict)
+            or set(manifest) != {"schema", "files"}
+            or manifest["schema"] != TRANSCRIPT_SNAPSHOT_SCHEMA
+            or not isinstance(manifest["files"], list)
+            or len(manifest["files"]) != session.workspaceFileCount
+        ):
+            raise ValueError("stored workspace snapshot manifest is invalid")
+        data_offset = 4 + manifest_length
+        target = None
+        expanded_size = 0
+        previous_path = None
+        for item in manifest["files"]:
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"path", "sizeBytes", "sha256", "executable"}
+                or not isinstance(item["path"], str)
+                or not isinstance(item["sizeBytes"], int)
+                or isinstance(item["sizeBytes"], bool)
+                or item["sizeBytes"] < 0
+                or previous_path is not None
+                and previous_path >= item["path"]
+            ):
+                raise ValueError("stored workspace snapshot manifest is invalid")
+            if item["path"] == path:
+                target = (data_offset, item["sizeBytes"])
+            data_offset += item["sizeBytes"]
+            expanded_size += item["sizeBytes"]
+            previous_path = item["path"]
+        if (
+            expanded_size != session.workspaceExpandedSizeBytes
+            or data_offset != session.workspaceSnapshotSizeBytes
+            or target is None
+            or content_start + byte_length > target[1]
+        ):
+            raise ValueError("transcript content spill is unavailable")
+        requested = min(TRANSCRIPT_CONTENT_RANGE_BYTES, byte_length - offset)
+        source.seek(target[0] + content_start + offset)
+        encoded = _read_exact(source, requested)
+    return _decode_transcript_range(encoded, offset)
 
 
 def _session_for_update(user, session_id: str, *, lock: bool):

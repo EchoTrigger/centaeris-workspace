@@ -95,13 +95,23 @@ class ResourceIdTests(TestCase):
             response = self.client.get(path)
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()[envelope]["id"], resource.pk)
-        self.assertEqual(self.client.get(f"/api/sessions/{session.pk}/history").status_code, 200)
+        self.assertEqual(
+            self.client.get(
+                f"/api/sessions/{session.pk}/transcript/active-agent-run",
+                {"sourceHighWater": "0"},
+            ).status_code,
+            200,
+        )
         self.assertEqual(self.client.get(f"/api/sessions/{session.pk.lower()}").status_code, 404)
 
         other = get_user_model().objects.create_user(username="id-other-member")
         WorkspaceMembership.objects.create(workspace=workspace, user=other, role="member")
         self.client.force_login(other)
-        for path in (f"/api/agents/{agent.pk}", f"/api/sessions/{session.pk}", f"/api/sessions/{session.pk}/history"):
+        for path in (
+            f"/api/agents/{agent.pk}",
+            f"/api/sessions/{session.pk}",
+            f"/api/sessions/{session.pk}/transcript/active-agent-run?sourceHighWater=0",
+        ):
             self.assertEqual(self.client.get(path).status_code, 404)
         self.client.logout()
         self.assertEqual(self.client.get(f"/api/sessions/{session.pk}").status_code, 401)
