@@ -8,12 +8,8 @@ import {
 import { SquareTerminal } from "lucide-react";
 import { useTranslation } from "../i18n.ts";
 import { MarkdownContent, StreamingMarkdownContent } from "./MarkdownContent";
-import {
-  loadTranscriptContentRange,
-  TRANSCRIPT_CONTENT_RANGE_BYTES,
-} from "./transcriptContentRanges.ts";
+import { TranscriptReferencedContent } from "./TranscriptReferencedContent";
 import type {
-  TranscriptBlock,
   TranscriptLiveOverlay,
   TranscriptViewStore,
 } from "./transcriptViewStore";
@@ -47,84 +43,24 @@ function contentReference(value: unknown): TranscriptContentRef | null {
   return reference as TranscriptContentRef;
 }
 
-function TranscriptToolOutput({ store, reference }: Readonly<{
-  store: TranscriptViewStore;
-  reference: TranscriptContentRef;
+function ReferencedContent({ store, reference, mode = "markdown" }: Readonly<{
+  store: TranscriptViewStore; reference: TranscriptContentRef; mode?: "markdown" | "plain" | "output";
 }>) {
-  const { t } = useTranslation();
-  const identity = useSyncExternalStore(
-    store.subscribeList,
-    store.getListSnapshot,
-    store.getListSnapshot,
-  );
-  const [content, setContent] = useState("");
-  const [nextOffset, setNextOffset] = useState("0");
-  const [hasMore, setHasMore] = useState(true);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  async function loadMore() {
-    if (!identity.sessionId || !identity.projectionGeneration || loading || !hasMore) return;
-    const controller = new AbortController();
-    setLoading(true);
-    setError("");
-    try {
-      const page = await loadTranscriptContentRange({
-        sessionId: identity.sessionId,
-        projectionGeneration: identity.projectionGeneration,
-        reference,
-      }, nextOffset, controller.signal);
-      setContent((current) => current + page.content);
-      setNextOffset(page.endOffset);
-      setHasMore(page.hasMore);
-    } catch {
-      setError(t("transcriptBlockContent.unableToLoadToolOutput"));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  return (
-    <details className="workspaceTranscriptToolOutput">
-      <summary>{t("transcriptBlockContent.toolOutputBytes", { value1: reference.byteLength })}</summary>
-      {content ? <pre>{content}</pre> : null}
-      {error ? <span role="alert">{error}</span> : null}
-      {hasMore ? (
-        <button type="button" disabled={loading} onClick={() => { void loadMore(); }}>
-          {loading
-            ? t("transcriptBlockContent.loading")
-            : t("transcriptBlockContent.loadNextValueKiB", {
-                value1: TRANSCRIPT_CONTENT_RANGE_BYTES / 1024,
-              })}
-        </button>
-      ) : null}
-    </details>
-  );
+  const identity = useSyncExternalStore(store.subscribeList, store.getListSnapshot, store.getListSnapshot);
+  if (!identity.sessionId || !identity.projectionGeneration) return null;
+  return <TranscriptReferencedContent
+    key={`${identity.viewEpoch}:${identity.sessionId}:${identity.projectionGeneration}:${reference.refId}:${reference.revision}`}
+    sessionId={identity.sessionId} projectionGeneration={identity.projectionGeneration} reference={reference} mode={mode}
+  />;
 }
 
-function ReferencedContent({ body }: Readonly<{ body: TranscriptBlock["body"] }>) {
-  const reference = body.kind === "tool"
-    ? body.summaryRef
-    : typeof body.content === "object" && body.content !== null && "sourceRef" in body.content
-      ? body.content.sourceRef
-      : null;
-  const refId = typeof reference === "object" && reference !== null && "refId" in reference
-    ? String(reference.refId)
-    : "";
-  const revision = typeof reference === "object" && reference !== null && "revision" in reference
-    ? String(reference.revision)
-    : "";
-  const bytes = typeof reference === "object" && reference !== null && "byteLength" in reference
-    ? String(reference.byteLength)
-    : "";
-  return (
-    <span
-      className="workspaceTranscriptReference"
-      data-transcript-ref-id={refId || undefined}
-      data-transcript-ref-revision={revision || undefined}
-    >
-      {bytes ? `${bytes} bytes` : "Referenced content"}
-    </span>
-  );
+function TranscriptToolOutput({ store, reference }: Readonly<{ store: TranscriptViewStore; reference: TranscriptContentRef }>) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  return <details className="workspaceTranscriptToolOutput" onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary>{t("transcriptBlockContent.toolOutput")}</summary>
+    {open ? <ReferencedContent store={store} reference={reference} mode="output" /> : null}
+  </details>;
 }
 
 export const TranscriptBlockRow = memo(function TranscriptBlockRow({
@@ -137,10 +73,14 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
   const text = body.kind === "tool"
     ? (typeof body.summary === "string" ? body.summary : null)
     : contentText(body.content);
+  const reference = contentReference(body.kind === "tool" ? body.summaryRef
+    : (body.content as { sourceRef?: unknown } | undefined)?.sourceRef);
+  const referenced = reference ? <ReferencedContent store={store} reference={reference}
+    mode={body.kind === "userText" || body.kind === "tool" ? "plain" : "markdown"} /> : null;
   if (body.kind === "userText") {
     return (
       <div className="workspaceTranscriptBlock workspaceTranscriptUser" data-block-id={block.blockId}>
-        <div className="workspaceUserMessage">{text ?? <ReferencedContent body={body} />}</div>
+        <div className="workspaceUserMessage">{text ?? referenced}</div>
       </div>
     );
   }
@@ -148,7 +88,7 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
     return (
       <div className="workspaceTranscriptBlock workspaceTranscriptAssistant" data-block-id={block.blockId}>
         <div className="workspaceTerminalAnswer">
-          {text === null ? <ReferencedContent body={body} /> : <MarkdownContent text={text} />}
+          {text === null ? referenced : <MarkdownContent text={text} />}
         </div>
       </div>
     );
@@ -158,7 +98,7 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
       <details className="workspaceTranscriptBlock workspaceTranscriptReasoning" data-block-id={block.blockId}>
         <summary>Reasoning</summary>
         <div className="workspaceReasoningBody">
-          {text === null ? <ReferencedContent body={body} /> : <MarkdownContent text={text} />}
+          {text === null ? referenced : <MarkdownContent text={text} />}
         </div>
       </details>
     );
@@ -169,7 +109,7 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
       <div className="workspaceTranscriptBlock workspaceActivityGroup" data-block-id={block.blockId}>
         <SquareTerminal aria-hidden="true" />
         <span>
-          {text ?? <ReferencedContent body={body} />}
+          {text ?? referenced}
           {outputReference ? (
             <TranscriptToolOutput
               key={`${outputReference.refId}:${outputReference.revision}`}
@@ -183,7 +123,7 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
   }
   return (
     <div className="workspaceTranscriptBlock workspaceStageSummary" data-block-id={block.blockId}>
-      {text === null ? <ReferencedContent body={body} /> : <MarkdownContent text={text} />}
+      {text === null ? referenced : <MarkdownContent text={text} />}
     </div>
   );
 });

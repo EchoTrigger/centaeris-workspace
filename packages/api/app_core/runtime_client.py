@@ -453,6 +453,29 @@ TRANSCRIPT_PATCH_PAGE_MAX_SERIALIZED_BYTES = 2 * TRANSCRIPT_PATCH_MAX_SERIALIZED
 WORKSPACE_TRANSCRIPT_STREAM_ID = "workspace-transcript.v1"
 
 
+def request_transcript_content(body: dict) -> dict:
+    result = _request_transcript_read("/internal/transcript/content", body)
+    expected = {"schema", "sessionId", "projectionVersion", "projectionGeneration",
+                "refId", "revision", "byteLength", "startOffset", "endOffset", "content", "hasMore"}
+    if (set(result) != expected
+        or result.get("schema") != "transcript.content.range.v1"
+        or any(result.get(key) != body.get(key) for key in
+               ("sessionId", "projectionVersion", "projectionGeneration", "refId", "revision", "byteLength"))
+        or result.get("startOffset") != body.get("offset")
+        or not _canonical_decimal_u64(result.get("endOffset"))
+        or not isinstance(result.get("content"), str)
+        or type(result.get("hasMore")) is not bool):
+        raise RuntimeError("transcript_content_response_invalid")
+    start, end, length = int(result["startOffset"]), int(result["endOffset"]), int(result["byteLength"])
+    if (not start <= end <= length
+        or end - start != len(result["content"].encode("utf-8"))
+        or end - start > body["maxBytes"]
+        or (end == start and end < length)
+        or result["hasMore"] != (end < length)):
+        raise RuntimeError("transcript_content_response_invalid")
+    return result
+
+
 def request_transcript_page(body: dict) -> dict:
     result = _request_transcript_read("/internal/transcript/page", body)
     expected = {
@@ -553,6 +576,8 @@ def _request_transcript_read(path: str, body: dict) -> dict:
 
 
 def _validate_transcript_conflict(payload: dict, request_body: dict) -> dict | None:
+    if payload == {"error": "transcript_content_unavailable"}:
+        return payload
     if payload == {"error": "transcript_view_invalidated"}:
         return payload
     if set(payload) != {

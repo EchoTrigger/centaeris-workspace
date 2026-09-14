@@ -385,7 +385,7 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
             "session_transcript",
             2,
             SessionRecordType::UserMessage,
-            serde_json::json!({"messageId":"message:user","text":"hello","attachments":[]}),
+            serde_json::json!({"messageId":format!("message:{run}:user"),"text":"hello","attachments":[]}),
             2,
         ),
         session_record(
@@ -393,7 +393,7 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
             "session_transcript",
             3,
             SessionRecordType::AssistantMessage,
-            serde_json::json!({"messageId":"message:assistant","modelMarkdown":"done","artifactRefs":[],"status":"done"}),
+            serde_json::json!({"messageId":"message:turn_pg_fenced_terminal:assistant","modelMarkdown":"done","artifactRefs":[],"status":"done"}),
             3,
         ),
         session_record(
@@ -468,6 +468,40 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
         .expect("load projected transcript page");
     assert_eq!(page.work.raw_event_visits, 0);
     assert_eq!(page.page.blocks.len(), 2);
+    let content_request = serde_json::json!({
+        "schema":"transcript.content.range.read.v1", "sessionId":"session_transcript",
+        "projectionVersion":"transcript.projection.v1", "projectionGeneration":"generation-1",
+        "refId":format!("session-event:{}:modelMarkdown", records[2].event.event_id),
+        "revision":"1", "byteLength":"4", "offset":"0", "maxBytes":2
+    });
+    let (status, body) = crate::transcript_protocol::handle(
+        "/internal/transcript/content",
+        &serde_json::to_vec(&content_request).unwrap(),
+        &store,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let content: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(content["content"], "do");
+    assert_eq!(content["hasMore"], true);
+    for (field, value) in [
+        ("sessionId", "foreign"),
+        ("projectionGeneration", "stale"),
+        ("byteLength", "5"),
+    ] {
+        let mut invalid = content_request.clone();
+        invalid[field] = value.into();
+        let (status, _) = crate::transcript_protocol::handle(
+            "/internal/transcript/content",
+            &serde_json::to_vec(&invalid).unwrap(),
+            &store,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(status, 409);
+    }
+
     let patches = store
         .load_transcript_patches(TranscriptPatchReadRequestV1 {
             session_id: "session_transcript".to_string(),
@@ -527,12 +561,21 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
                     "session_transcript",
                     2,
                     SessionRecordType::UserMessage,
-                    serde_json::json!({"messageId":"message:user:next","text":"next","attachments":[]}),
+                    serde_json::json!({"messageId":format!("message:{next_run}:user"),"text":"next","attachments":[]}),
                     6,
                 ),
             ],
         ))
         .expect("append new facts while transcript producer is active");
+    for _ in 0..=2 {
+        if store
+            .catch_up_transcript_projection("session_transcript", "generation-1", 6)
+            .expect("catch up the appended facts in bounded slices")
+            .caught_up
+        {
+            break;
+        }
+    }
     let new_patches = store
         .load_transcript_patches(TranscriptPatchReadRequestV1 {
             session_id: "session_transcript".to_string(),
@@ -581,7 +624,7 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
                     "session_transcript",
                     2,
                     SessionRecordType::UserMessage,
-                    serde_json::json!({"messageId":"message:user:failure","text":"facts survive","attachments":[]}),
+                    serde_json::json!({"messageId":format!("message:{failure_run}:user"),"text":"facts survive","attachments":[]}),
                     8,
                 ),
             ],

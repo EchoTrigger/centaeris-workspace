@@ -54,6 +54,18 @@ Tool blocks contain exactly one of inline `summary` or bounded `summaryRef`;
 large summaries use the same stable `session-event:<eventId>:<field>` reference
 scheme as other transcript text and do not stall page cursors.
 
+`GET /api/sessions/{sessionId}/transcript/content` accepts exactly
+`projectionGeneration`, `refId`, `revision`, `byteLength` and `offset`. It returns
+`transcript.content.range.v1` with at most 64 KiB and a UTF-8 continuation offset.
+Every request rechecks ownership and membership and returns `Cache-Control: no-store`.
+For `session-event:<eventId>:<field>`, the API delegates to Runtime's authenticated
+`/internal/transcript/content` route. Runtime performs a session-scoped event lookup
+bound to the current, valid projection generation; Core resolves the visible field
+and verifies the reference. Existing `tool-output:<callId>` reads retain the scoped
+snapshot path. Message text loads automatically and renders as one Markdown
+document. Tool detail navigation replaces the current range rather than appending
+all previously loaded output.
+
 `GET /api/sessions/{sessionId}/transcript/patches` reads committed display
 patches strictly after `afterSourceHighWater` and through one frozen
 `throughSourceHighWater`. The first request may omit the through-water and lets

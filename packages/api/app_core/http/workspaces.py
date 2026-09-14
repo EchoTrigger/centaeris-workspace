@@ -48,6 +48,7 @@ from app_core.runtime_client import (
     request_execution_profile,
     request_transcript_page,
     request_transcript_patches,
+    request_transcript_content,
     schedule_agent_run_lifecycle,
 )
 from app_core.session_event import (
@@ -813,10 +814,9 @@ def session_transcript_content(request, session_id: str):
     if (
         not generation
         or len(generation) > 160
-        or not ref_id.startswith("tool-output:")
-        or not ref_id.removeprefix("tool-output:")
+        or not ref_id.startswith(("tool-output:", "session-event:"))
         or len(ref_id) > 320
-        or revision != "2"
+        or not _canonical_waterline(revision)
         or not _canonical_waterline(byte_length_raw)
         or byte_length_raw == "0"
         or not _canonical_waterline(offset_raw)
@@ -825,7 +825,26 @@ def session_transcript_content(request, session_id: str):
         return _transcript_json_response(
             {"error": "transcript_content_query_invalid"}, status=400
         )
+    if ref_id.startswith("session-event:"):
+        try:
+            return _transcript_json_response(request_transcript_content({
+                "schema": "transcript.content.range.read.v1",
+                "sessionId": session.id,
+                "projectionVersion": TRANSCRIPT_PROJECTION_VERSION,
+                "projectionGeneration": generation,
+                "refId": ref_id,
+                "revision": revision,
+                "byteLength": byte_length_raw,
+                "offset": offset_raw,
+                "maxBytes": 64 * 1024,
+            }))
+        except TranscriptRuntimeError as error:
+            return _transcript_json_response(error.payload, status=409)
+        except RuntimeError:
+            return _transcript_json_response({"error": "transcript_content_unavailable"}, status=503)
     call_id = ref_id.removeprefix("tool-output:")
+    if not call_id or revision != "2":
+        return _transcript_json_response({"error": "transcript_content_query_invalid"}, status=400)
     candidates = list(
         SessionEvent.objects.filter(
             session=session,

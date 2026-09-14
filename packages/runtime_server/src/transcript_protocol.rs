@@ -64,8 +64,26 @@ pub(crate) fn handle(
     match path {
         "/internal/transcript/page" => Some(page(body, store)),
         "/internal/transcript/patches" => Some(patches(body, store)),
+        "/internal/transcript/content" => Some(content(body, store)),
         _ => None,
     }
+}
+
+fn content(body: &[u8], store: &PostgresRuntimeStore) -> Result<(u16, Vec<u8>), String> {
+    let request = match serde_json::from_slice::<
+        centaeris_core::session::transcript::TranscriptContentRangeReadRequestV1,
+    >(body)
+    {
+        Ok(request) if request.validate().is_ok() && request.event_reference().is_ok() => request,
+        _ => return json_error(400, "transcript_content_request_invalid"),
+    };
+    let response = match store.read_transcript_event_content(&request) {
+        Ok(response) => response,
+        Err(_) => return json_error(409, "transcript_content_unavailable"),
+    };
+    serde_json::to_vec(&response)
+        .map(|body| (200, body))
+        .map_err(|error| format!("encode transcript content failed: {error}"))
 }
 
 fn page(body: &[u8], store: &PostgresRuntimeStore) -> Result<(u16, Vec<u8>), String> {
