@@ -193,9 +193,9 @@ citation contracts against an isolated database.
 The opt-in isolated Docker probes are
 `scripts/platform-material-processing-gate.py`,
 `scripts/platform-material-recovery-gate.py`,
-`scripts/platform-mcp-live-run.py` and
-`scripts/platform-mcp-browser-gate.mjs`. They cover real processing,
-kill/reclaim, model execution, receipts, previews and restart/revocation.
+and `scripts/platform-mcp-live-run.py`. They cover real processing,
+kill/reclaim, model execution, receipts and restart/revocation. Browser preview
+and interaction acceptance is manual.
 Live model credentials are supplied through stdin, never source files or command
 arguments. These probes are not ordinary CI model calls.
 

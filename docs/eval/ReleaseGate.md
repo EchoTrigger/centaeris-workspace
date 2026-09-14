@@ -90,16 +90,14 @@ removes its containers, volumes and temporary API image after testing. Do not ru
 the full Docker release script on a host containing an existing deployment; its
 disposable-host guard remains mandatory.
 
-The local browser gate requires Playwright Chromium (`npx playwright install
-chromium` once after installing dependencies). The local gate includes synthetic
-Plugin isolation coverage: partial MCP/Hook failures, Runtime outages, recovery
-actions, independent credentials, strict enablement, and stale inspection
-responses.
-The browser gate runs the complete Web suite, including context-panel clipping,
-current status placement, streaming Markdown stability, tool disclosures across
-updates and virtualized row recycling, attachment cards, and chat/settings route
-continuity. Authentication, membership changes, and direct settings URLs remain
-covered. It uses synthetic events and isolated API fixtures without model calls.
+The local gate retains Web unit and contract tests. Playwright/E2E and visual
+snapshot tests are not part of the repository; browser layout, interaction,
+authentication, membership, and direct-route acceptance are verified manually.
+GitHub Actions passes `-SkipFrontendTests`, so its Web portion is limited to
+dependency installation, lint, typecheck, and production build. Backend,
+Runtime, protocol, security, deployment, and performance gates remain automated.
+Use [FrontendManualAcceptance.md](FrontendManualAcceptance.md) for the retained
+browser interaction, authorization-UI, and appearance checks.
 
 1. `pwsh -File scripts/ci.ps1`
 2. `node scripts/performance-eval.mjs`; review the independent phase report in
