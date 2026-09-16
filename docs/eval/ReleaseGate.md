@@ -196,3 +196,24 @@ The local gate also checks document streaming beyond 1000 PDF pages/image
 frames, UTF-8 locations, bounded incremental output, and API manifest validation.
 These are synthetic/native-parser checks; they do not replace user acceptance
 with real Office documents or real OCR model measurements.
+
+## Authorization consolidation acceptance (2026-09-15)
+
+`scripts/ci.ps1 -SkipFrontendTests` passed against a dedicated disposable local
+PostgreSQL container: 467 API tests executed with no skips or expected failures,
+Rust workspace checks/tests and PostgreSQL outbox gates, 14 Python-signed Rust
+verification vectors, deployment contracts, migrations, worker/processor tests,
+MCP client checks, Web production build and Compose structure. Frontend unit tests
+were not rerun for this backend change. Core's focused `query_loop` also passed.
+
+The 27 focused Python tests include digest/signature/binding rejection order,
+per-input membership and generation checks, in-place authorization tampering,
+blob disappearance and request-local digest reuse. Rust startup rejection order
+is characterized separately. No real runsc isolation claim is derived from these
+checks. The temporary PostgreSQL container and its volume were removed.
+
+An additional `cargo clippy --workspace --all-targets --locked -- -D warnings`
+run remains blocked by two unchanged `main.rs` findings: `too_many_arguments` in
+`terminalize_agent_run_failure`, and `collapsible_match` in the live reasoning
+handler. They were not suppressed or mixed into this authorization change.
+The Rust toolchain and both pinned Rust build images now use 1.95.0 to match Core.

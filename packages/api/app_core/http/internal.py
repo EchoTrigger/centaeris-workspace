@@ -24,19 +24,20 @@ from app_core.deferred_input import (
     DeferredInputBindingError,
     resolve_deferred_input as resolve_deferred_input_operation,
     resolved_input_storage,
+    input_storage_batch,
 )
 from app_core.models import Session, AgentRun
 from app_core.material_contract import KnowledgeError
 from app_core.runtime_contract import (
+    agent_run_binding_matches,
     authorization_digest,
     require_opaque_ref,
     require_sha256,
     require_string,
     session_workspace_for_session,
-    validate_agent_run_authorization_payload,
     validate_session_workspace,
     validate_virtual_path,
-    verify_agent_run_authorization_signature,
+    _verify_authorization_digest_signature,
 )
 from app_core.runtime_client import (
     build_agent_run_start,
@@ -417,21 +418,16 @@ def _locked_session_workspace_agent_run(body: dict) -> tuple[AgentRun, Session, 
         raise SessionWorkspaceError("session_workspace_session_unavailable") from None
     try:
         authorization = agent_run.authorization
-        validate_agent_run_authorization_payload(authorization.payload)
-        verify_agent_run_authorization_signature(
-            authorization.payload,
+        digest = authorization_digest(authorization.payload)
+        _verify_authorization_digest_signature(
+            digest,
             settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY,
             authorization.signature,
         )
         if (
-            authorization_digest(authorization.payload) != authorization.digest
+            digest != authorization.digest
             or body["authorizationDigest"] != authorization.digest
-            or authorization.payload["agentRunId"] != agent_run.id
-            or authorization.payload["workspaceId"] != agent_run.workspace_id
-            or authorization.payload["userId"] != str(agent_run.user_id)
-            or authorization.payload["agentId"] != session.agent_id
-            or authorization.payload["sessionId"] != agent_run.session_id
-            or authorization.payload["modelConfigRef"] != agent_run.modelConfig_id
+            or not agent_run_binding_matches(authorization.payload, agent_run, session=session)
         ):
             raise ValueError
     except (AttributeError, ValueError):
@@ -998,13 +994,10 @@ def validate_projected_inputs(request):
                 .get(id=str(body["agentRunId"]))
             )
             states = []
+            resolve_storage = input_storage_batch(agent_run, str(body["authorizationDigest"]))
             for expected in body["inputs"]:
                 try:
-                    current, _storage_key = resolved_input_storage(
-                        agent_run,
-                        expected["inputRef"],
-                        str(body["authorizationDigest"]),
-                    )
+                    current, _storage_key = resolve_storage(expected["inputRef"])
                     state = (
                         "active"
                         if all(

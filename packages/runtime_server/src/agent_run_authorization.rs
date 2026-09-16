@@ -150,8 +150,13 @@ impl WorkspaceAgentRunAuthorization {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn digest(&self) -> Result<String, String> {
         self.validate()?;
+        self.digest_validated()
+    }
+
+    fn digest_validated(&self) -> Result<String, String> {
         let value = serde_json::to_value(self).map_err(|error| {
             format!("serialize workspace AgentRun authorization failed: {error}")
         })?;
@@ -181,27 +186,67 @@ impl WorkspaceAgentRunAuthorization {
         ))
     }
 
+    #[cfg(test)]
     pub fn verify_signature(&self, signing_key: &[u8], signature: &str) -> Result<(), String> {
-        let encoded = signature.strip_prefix("hmac-sha256:").ok_or_else(|| {
-            "workspace AgentRun authorization signature format mismatch".to_string()
-        })?;
-        if encoded.len() != 64 {
-            return Err("workspace AgentRun authorization signature format mismatch".to_string());
-        }
-        let bytes = (0..encoded.len())
-            .step_by(2)
-            .map(|index| u8::from_str_radix(&encoded[index..index + 2], 16))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| {
-                "workspace AgentRun authorization signature format mismatch".to_string()
-            })?;
+        let bytes = decode_signature(signature)?;
         let digest = self.digest()?;
+        Self::verify_digest_signature(signing_key, &bytes, &digest)
+    }
+
+    fn verify_digest_signature(
+        signing_key: &[u8],
+        bytes: &[u8],
+        digest: &str,
+    ) -> Result<(), String> {
         let mut mac = Hmac::<Sha256>::new_from_slice(signing_key)
             .map_err(|_| "invalid workspace AgentRun authorization signing key".to_string())?;
         mac.update(AGENT_RUN_AUTHORIZATION_SIGNATURE_DOMAIN.as_bytes());
         mac.update(digest.as_bytes());
-        mac.verify_slice(bytes.as_slice())
+        mac.verify_slice(bytes)
             .map_err(|_| "workspace AgentRun authorization signature mismatch".to_string())
+    }
+}
+
+fn decode_signature(signature: &str) -> Result<Vec<u8>, String> {
+    let encoded = signature
+        .strip_prefix("hmac-sha256:")
+        .ok_or_else(|| "workspace AgentRun authorization signature format mismatch".to_string())?;
+    if encoded.len() != 64 {
+        return Err("workspace AgentRun authorization signature format mismatch".to_string());
+    }
+    let bytes = (0..encoded.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&encoded[index..index + 2], 16))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "workspace AgentRun authorization signature format mismatch".to_string())?;
+    Ok(bytes)
+}
+
+pub(crate) struct ValidatedAuthorization<'a>(&'a WorkspaceAgentRunAuthorization);
+
+impl WorkspaceAgentRunAuthorization {
+    pub(crate) fn checked_binding(
+        &self,
+        agent_run_id: &str,
+    ) -> Result<ValidatedAuthorization<'_>, String> {
+        self.validate_agent_run_binding(agent_run_id)?;
+        Ok(ValidatedAuthorization(self))
+    }
+}
+
+impl ValidatedAuthorization<'_> {
+    pub(crate) fn verify(
+        self,
+        expected_digest: &str,
+        key: &[u8],
+        signature: &str,
+    ) -> Result<(), String> {
+        let digest = self.0.digest_validated()?;
+        if digest != expected_digest {
+            return Err("workspace AgentRun authorization digest mismatch".into());
+        }
+        let bytes = decode_signature(signature)?;
+        WorkspaceAgentRunAuthorization::verify_digest_signature(key, &bytes, &digest)
     }
 }
 

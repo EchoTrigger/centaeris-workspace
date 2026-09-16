@@ -15,7 +15,8 @@ from app_core.models import ModelConfig, AgentRunAuthorization
 from app_core.model_adapter.common import PREPARED_PROMPT_FIELDS
 from app_core.runtime_contract import (
     MODEL_RUN_SCHEMA,
-    authorization_digest,
+    agent_run_binding_matches,
+    _validated_authorization_digest,
     validate_agent_run_authorization_payload,
 )
 from app_core.workspace_access import agent_run_membership_is_current
@@ -127,19 +128,13 @@ def _validate_model_run(body):
         validate_agent_run_authorization_payload(authorization.payload)
     except ValueError:
         return JsonResponse({"error": "agent_run_authorization_invalid"}, status=409)
-    if authorization_digest(authorization.payload) != authorization.digest:
+    if _validated_authorization_digest(authorization.payload) != authorization.digest:
         return JsonResponse(
             {"error": "agent_run_authorization_digest_mismatch"},
             status=409,
         )
     if (
-        authorization.payload["agentRunId"] != authorization.agent_run_id
-        or authorization.payload["workspaceId"] != authorization.agent_run.workspace_id
-        or authorization.payload["userId"] != str(authorization.agent_run.user_id)
-        or authorization.payload["agentId"] != authorization.agent_run.session.agent_id
-        or authorization.payload["sessionId"] != authorization.agent_run.session_id
-        or authorization.payload["modelConfigRef"]
-        != authorization.agent_run.modelConfig_id
+        not agent_run_binding_matches(authorization.payload, authorization.agent_run)
         or str(body.get("modelConfigRef", ""))
         != authorization.payload["modelConfigRef"]
         or body.get("thinkingMode") != authorization.payload["thinkingMode"]
