@@ -12,7 +12,7 @@ from django.core.exceptions import ObjectDoesNotExist
 
 from .material_access import MaterialAccessContext, authorize_material_access
 from .material_contract import KnowledgeError
-from .runtime_contract import verify_agent_run_authorization_signature
+from .runtime_contract import _verify_authorization_digest_signature, agent_run_binding_matches
 
 
 SALT = "centaeris.workspace.platform-mcp.credential.v1"
@@ -36,13 +36,8 @@ def authorize_context(context: MaterialAccessContext):
         access = authorize_material_access(context)
         run = access.agent_run
         payload = run.authorization.payload
-        verify_agent_run_authorization_signature(payload, signing_key(), run.authorization.signature)
-        expected = {
-            "agentRunId": run.id, "workspaceId": run.workspace_id,
-            "sessionId": run.session_id, "userId": str(run.user_id),
-            "agentId": run.session.agent_id, "modelConfigRef": run.modelConfig_id,
-        }
-        if any(payload[key] != value for key, value in expected.items()):
+        _verify_authorization_digest_signature(access.authorization_digest, signing_key(), run.authorization.signature)
+        if not agent_run_binding_matches(payload, run):
             raise CredentialRejected()
         return access
     except (KnowledgeError, ObjectDoesNotExist, ValueError, TypeError, KeyError) as error:

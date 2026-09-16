@@ -127,6 +127,10 @@ def session_workspace_for_session(session) -> dict:
 
 def authorization_digest(payload: dict) -> str:
     validate_agent_run_authorization_payload(payload)
+    return _validated_authorization_digest(payload)
+
+
+def _validated_authorization_digest(payload: dict) -> str:
     canonical = json.dumps(
         payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
     )
@@ -137,6 +141,12 @@ def authorization_signature(payload: dict, signing_key: str) -> str:
     if not signing_key:
         raise ValueError("AgentRun authorization signing key is required")
     digest = authorization_digest(payload)
+    return _authorization_signature_for_digest(digest, signing_key)
+
+
+def _authorization_signature_for_digest(digest: str, signing_key: str) -> str:
+    if not signing_key:
+        raise ValueError("AgentRun authorization signing key is required")
     signature = hmac.new(
         signing_key.encode("utf-8"),
         f"workspace:agent-run-authorization:v1\0{digest}".encode("utf-8"),
@@ -148,8 +158,27 @@ def authorization_signature(payload: dict, signing_key: str) -> str:
 def verify_agent_run_authorization_signature(
     payload: dict, signing_key: str, signature: str
 ) -> None:
-    if not hmac.compare_digest(authorization_signature(payload, signing_key), signature):
+    if not signing_key:
+        raise ValueError("AgentRun authorization signing key is required")
+    _verify_authorization_digest_signature(authorization_digest(payload), signing_key, signature)
+
+
+def _verify_authorization_digest_signature(digest: str, signing_key: str, signature: str) -> None:
+    # Internal consumers pass the digest they just computed from a validated payload,
+    # never an unverified digest from a request.
+    if not hmac.compare_digest(_authorization_signature_for_digest(digest, signing_key), signature):
         raise ValueError("AgentRunAuthorization signature mismatch")
+
+
+def agent_run_binding_matches(payload: dict, agent_run, *, session=None) -> bool:
+    return (
+        payload["agentRunId"] == agent_run.id
+        and payload["workspaceId"] == agent_run.workspace_id
+        and payload["sessionId"] == agent_run.session_id
+        and payload["userId"] == str(agent_run.user_id)
+        and payload["agentId"] == (agent_run.session if session is None else session).agent_id
+        and payload["modelConfigRef"] == agent_run.modelConfig_id
+    )
 
 
 def validate_agent_run_authorization_payload(payload: dict) -> None:

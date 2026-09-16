@@ -9,11 +9,11 @@ Input resolution retains current permission, signature and source identity check
 from dataclasses import dataclass
 
 from .assets import DeferredInputResolutionError
-from .deferred_input import DeferredInputBindingError, resolved_input_storage
+from .deferred_input import DeferredInputBindingError, input_storage_batch
 from .material_contract import BoundInput, KnowledgeError
 from .material_identity import processing_spec_digest, representation_id
 from .models import AgentRun, SessionAssetLink
-from .runtime_contract import authorization_digest, validate_agent_run_authorization_payload
+from .runtime_contract import authorization_digest
 from .workspace_access import agent_run_membership_is_current
 
 
@@ -41,7 +41,6 @@ def authorize_material_access(context: MaterialAccessContext) -> MaterialAccess:
     if not agent_run_membership_is_current(agent_run):
         raise KnowledgeError("knowledge_authorization_mismatch", 403)
     authorization = agent_run.authorization
-    validate_agent_run_authorization_payload(authorization.payload)
     if (
         authorization_digest(authorization.payload) != authorization.digest
         or context.authorization_digest != authorization.digest
@@ -73,6 +72,7 @@ def bind_inputs(agent_run, digest: str, requests: list, spec_digest: str) -> lis
         item["inputRef"]: item for item in agent_run.authorization.payload["assetRefs"]
     }
     bound = []
+    resolve_storage = input_storage_batch(agent_run, digest)
     for request in requests:
         declared = declared_by_ref.get(request["inputRef"])
         if declared is None:
@@ -82,7 +82,7 @@ def bind_inputs(agent_run, digest: str, requests: list, spec_digest: str) -> lis
         if request["representationId"] != expected:
             raise KnowledgeError("knowledge_representation_binding_mismatch")
         try:
-            resolved, storage_key = resolved_input_storage(agent_run, request["inputRef"], digest)
+            resolved, storage_key = resolve_storage(request["inputRef"])
         except DeferredInputResolutionError as error:
             raise KnowledgeError(error.errorCode) from error
         except DeferredInputBindingError as error:

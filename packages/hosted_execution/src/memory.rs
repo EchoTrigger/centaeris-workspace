@@ -118,7 +118,7 @@ pub fn run_memory_file_system_operation(
         operation => run_scoped_execution_file_system_operation(ExecutionFileSystemRequest {
             operation_id: None,
             cwd: PathBuf::from(MEMORY_CONTAINER_ROOT),
-            policy: centaeris_core::execution::sandbox::SandboxPolicy::workspace_write_no_network(
+            policy: centaeris_core::execution::ExecutionPolicy::workspace_write_no_network(
                 MEMORY_CONTAINER_ROOT,
             ),
             model_path: memory_path.relative_path().to_string_lossy().to_string(),

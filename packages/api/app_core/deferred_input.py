@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 from django.conf import settings
 from django.core.files.storage import default_storage
 
@@ -9,8 +11,8 @@ from .assets import (
 from .models import SessionAssetLink
 from .runtime_contract import (
     authorization_digest,
-    validate_agent_run_authorization_payload,
-    verify_agent_run_authorization_signature,
+    _verify_authorization_digest_signature,
+    agent_run_binding_matches,
 )
 from .workspace_access import agent_run_membership_is_current
 
@@ -30,32 +32,40 @@ def resolved_input_storage(
     return current["resolvedInput"], current["storageKey"]
 
 
-def _current_input(agent_run, input_ref: str, expected_authorization_digest: str) -> dict:
+def input_storage_batch(agent_run, expected_authorization_digest: str):
+    """A resolver owned by one request, never shared across tool calls."""
+    verified = []
+
+    def resolve(input_ref):
+        current = _current_input(agent_run, input_ref, expected_authorization_digest, verified)
+        return current["resolvedInput"], current["storageKey"]
+
+    return resolve
+
+
+def _current_input(agent_run, input_ref: str, expected_authorization_digest: str, verified=None) -> dict:
     if not agent_run_membership_is_current(agent_run):
         raise DeferredInputBindingError("AgentRun WorkspaceMembership is no longer current")
     authorization = agent_run.authorization
-    validate_agent_run_authorization_payload(authorization.payload)
-    digest = authorization_digest(authorization.payload)
-    if digest != authorization.digest or digest != expected_authorization_digest:
-        raise DeferredInputBindingError("AgentRun authorization digest mismatch")
-    try:
-        verify_agent_run_authorization_signature(
-            authorization.payload,
-            settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY,
-            authorization.signature,
-        )
-    except ValueError as error:
-        raise DeferredInputBindingError(
-            "AgentRun authorization signature mismatch"
-        ) from error
-    if (
-        authorization.payload["agentRunId"] != agent_run.id
-        or authorization.payload["workspaceId"] != agent_run.workspace_id
-        or authorization.payload["sessionId"] != agent_run.session_id
-        or authorization.payload["userId"] != str(agent_run.user_id)
-        or authorization.payload["agentId"] != agent_run.session.agent_id
-        or authorization.payload["modelConfigRef"] != agent_run.modelConfig_id
-    ):
+    # Cache only signed immutable facts, never membership or resource access.
+    # Detect even in-place payload/signature changes before reusing the proof.
+    candidate = (authorization.payload, authorization.digest, authorization.signature,
+                 settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY, expected_authorization_digest)
+    if verified is None or not verified or verified[0] != candidate:
+        digest = authorization_digest(authorization.payload)
+        if digest != authorization.digest or digest != expected_authorization_digest:
+            raise DeferredInputBindingError("AgentRun authorization digest mismatch")
+        try:
+            _verify_authorization_digest_signature(
+                digest,
+                settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY,
+                authorization.signature,
+            )
+        except ValueError as error:
+            raise DeferredInputBindingError("AgentRun authorization signature mismatch") from error
+        if verified is not None:
+            verified[:] = [deepcopy(candidate)]
+    if not agent_run_binding_matches(authorization.payload, agent_run):
         raise DeferredInputBindingError("AgentRun authorization binding mismatch")
     declared = next(
         (

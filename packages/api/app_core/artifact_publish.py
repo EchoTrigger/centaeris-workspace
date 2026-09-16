@@ -19,7 +19,7 @@ from .models import (
     new_artifact_id,
     new_library_object_id,
 )
-from .runtime_contract import authorization_digest, validate_agent_run_authorization_payload
+from .runtime_contract import authorization_digest
 from .workspace_access import agent_run_membership_is_current
 
 
@@ -314,7 +314,6 @@ def _bound_agent_run(body: dict) -> AgentRun:
         raise ArtifactPublishError("artifact_agent_run_not_found", 404) from error
     if not agent_run_membership_is_current(frozen.agent_run):
         raise ArtifactPublishError("artifact_scope_mismatch", 403)
-    validate_agent_run_authorization_payload(frozen.payload)
     if authorization_digest(frozen.payload) != frozen.digest:
         raise ArtifactPublishError("artifact_agent_run_authorization_invalid")
     if body["authorizationDigest"] != frozen.digest:

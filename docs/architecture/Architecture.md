@@ -242,3 +242,37 @@ Rust packages currently resolve the public Runtime through explicit development
 paths. Compose accepts the same source through a named build context. A release
 must materialize one exact Runtime revision for both build paths; npm and Python
 remain local to this repository.
+
+## Hosted authorization verification
+
+The API owns current membership and resource access. Rust validates the signed
+startup envelope at its own service boundary. Neither boundary trusts a digest
+supplied by a caller without computing it from the strict authorization payload.
+The two implementations retain shared signature vectors and rejection cases.
+
+Within one verification, canonical payload hashing is reused for signature
+verification. API consumers share the six-field run binding (run, workspace,
+session, user, agent and model configuration), while keeping endpoint errors and
+resource-specific checks. The existing endpoint scopes are:
+
+| API consumer | Digest | Signature | Six-field binding | Additional checks retained |
+| --- | --- | --- | --- | --- |
+| Runtime scheduling/start payload | Yes | Receiver verifies | Yes | Current membership, thinking mode |
+| Deferred input | Yes | Yes | Yes | Current membership, declared input, live owner/generation/hash and blob availability |
+| Material access | Yes | MCP credential wrapper verifies | Wrapper/input resolver verifies | Current membership, processing specification and representation |
+| Platform MCP credential | Yes | Yes | Yes | Token scope and lifetime |
+| Model proxy | Yes | No | Yes | Current membership, model/thinking mode and output budgets |
+| Artifact publication | Yes | No | Existing publication/resource binding | Current membership, scope, publication identity and bytes |
+| Workspace snapshot commit | Yes | Yes | Yes | Job lease, active session and compare-and-swap generation |
+
+This consolidation does not add signature requirements to existing API endpoints
+or treat their service authentication as proof of resource access. Snapshot
+commit still checks the locked lease and generation before and after object
+storage I/O. File-mutation event persistence and Memory coordination remain
+separate responsibilities.
+
+Input batch resolvers live for one request. They reuse only a verified snapshot
+of the signed authorization facts, invalidating it when payload, digest,
+signature, key or expected digest changes. Membership, run identity, source access,
+version and storage existence are checked on each input, including after an
+earlier item succeeded. No authorization cache survives into another tool call.

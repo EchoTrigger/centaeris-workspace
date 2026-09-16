@@ -7,8 +7,8 @@ from django.conf import settings
 
 from .runtime_contract import (
     AGENT_RUN_START_SCHEMA,
+    agent_run_binding_matches,
     authorization_digest,
-    validate_agent_run_authorization_payload,
 )
 from .runtime_job_client import schedule_runtime_job
 from .workspace_access import agent_run_membership_is_current
@@ -106,16 +106,10 @@ def _validate_agent_run_binding(agent_run):
     if not agent_run_membership_is_current(agent_run):
         raise RuntimeError("AgentRun WorkspaceMembership is no longer current")
     authorization = agent_run.authorization
-    validate_agent_run_authorization_payload(authorization.payload)
     if authorization_digest(authorization.payload) != authorization.digest:
         raise RuntimeError("AgentRun authorization digest mismatch")
     if (
-        authorization.payload["agentRunId"] != agent_run.id
-        or authorization.payload["sessionId"] != agent_run.session_id
-        or authorization.payload["workspaceId"] != agent_run.workspace_id
-        or authorization.payload["userId"] != str(agent_run.user_id)
-        or authorization.payload["agentId"] != agent_run.session.agent_id
-        or authorization.payload["modelConfigRef"] != agent_run.modelConfig_id
+        not agent_run_binding_matches(authorization.payload, agent_run)
         or authorization.payload["thinkingMode"] != (agent_run.thinkingMode or None)
     ):
         raise RuntimeError("AgentRun authorization binding mismatch")
