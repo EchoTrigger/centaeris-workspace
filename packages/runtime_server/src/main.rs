@@ -2381,7 +2381,7 @@ fn execute_agent_run(
         ExecutionHostMode::Remote,
         docker_execution.clone(),
         workspace_root.clone(),
-        centaeris_core::execution::sandbox::SandboxPolicy::workspace_write_no_network(
+        centaeris_core::execution::ExecutionPolicy::workspace_write_no_network(
             workspace_root.as_path(),
         ),
     )?);
@@ -2458,7 +2458,7 @@ fn execute_agent_run(
         execution_host_binding,
     )?
     .with_dynamic_tool_registry(dynamic_tool_registry)
-    .with_network_policy(centaeris_core::execution::sandbox::NetworkSandboxPolicy::Disabled)
+    .with_network_policy(centaeris_core::execution::NetworkPolicy::Disabled)
     .with_execution_cancellation_probe(cancellation_probe.clone())
     .with_session_id(agent_run_start.authorization.session_id.clone())
     .with_execution_owner(agent_run_start.agent_run_id.clone())
@@ -5758,17 +5758,14 @@ mod tests {
     impl centaeris_core::execution::ExecutionHostRunner for UnavailableTestExecutionHost {
         fn status(
             &self,
-            _policy: &centaeris_core::execution::sandbox::SandboxPolicy,
+            _policy: &centaeris_core::execution::ExecutionPolicy,
         ) -> Result<
             centaeris_core::execution::ExecutionHostStatus,
-            centaeris_core::execution::sandbox::SandboxErr,
+            centaeris_core::execution::ExecutionError,
         > {
-            Err(
-                centaeris_core::execution::sandbox::SandboxErr::Unavailable {
-                    reason: "test execution host is unavailable".to_string(),
-                    sandbox_type: None,
-                },
-            )
+            Err(centaeris_core::execution::ExecutionError::HostUnavailable {
+                reason: "test execution host is unavailable".to_string(),
+            })
         }
 
         fn run_file_system_operation(
@@ -5784,18 +5781,15 @@ mod tests {
         fn run_host_command(
             &self,
             _operation_id: Option<&str>,
-            _request: centaeris_core::execution::sandbox::SandboxTransformRequest,
+            _request: centaeris_core::execution::ExecutionCommandRequest,
             _cancellation_probe: Option<&centaeris_core::execution::ExecutionCancellationProbe>,
         ) -> Result<
             centaeris_core::execution::ExecutionHostCommandOutput,
-            centaeris_core::execution::sandbox::SandboxErr,
+            centaeris_core::execution::ExecutionError,
         > {
-            Err(
-                centaeris_core::execution::sandbox::SandboxErr::Unavailable {
-                    reason: "test execution host is unavailable".to_string(),
-                    sandbox_type: None,
-                },
-            )
+            Err(centaeris_core::execution::ExecutionError::HostUnavailable {
+                reason: "test execution host is unavailable".to_string(),
+            })
         }
     }
 
@@ -5806,7 +5800,7 @@ mod tests {
                 ExecutionHostMode::Remote,
                 Arc::new(UnavailableTestExecutionHost),
                 workspace_root.clone(),
-                centaeris_core::execution::sandbox::SandboxPolicy::workspace_write_no_network(
+                centaeris_core::execution::ExecutionPolicy::workspace_write_no_network(
                     workspace_root,
                 ),
             )

@@ -70,7 +70,7 @@ fn run_file_system_request(
         run_scoped_execution_file_system_operation(ExecutionFileSystemRequest {
             operation_id: None,
             cwd: PathBuf::from(WORKSPACE_DATA_ROOT),
-            policy: centaeris_core::execution::sandbox::SandboxPolicy::workspace_write_no_network(
+            policy: centaeris_core::execution::ExecutionPolicy::workspace_write_no_network(
                 WORKSPACE_DATA_ROOT,
             ),
             model_path: request.path,
@@ -104,9 +104,7 @@ fn run_read_only_file_system_operation(
     run_direct_execution_file_system_operation(ExecutionFileSystemRequest {
         operation_id: None,
         cwd: PathBuf::from(WORKSPACE_DATA_ROOT),
-        policy: centaeris_core::execution::sandbox::SandboxPolicy::read_only_no_network(
-            PLUGIN_ROOT,
-        ),
+        policy: centaeris_core::execution::ExecutionPolicy::read_only_no_network(PLUGIN_ROOT),
         model_path: request.path,
         operation: request.operation,
     })

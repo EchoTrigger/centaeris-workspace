@@ -60,20 +60,20 @@ impl AgentRunStart {
             return Err("turnId must differ from agentRunId".to_string());
         }
         validate_agent_instructions(self.agent_instructions.as_str())?;
-        self.authorization
-            .validate_agent_run_binding(self.agent_run_id.as_str())?;
+        let authorization = self
+            .authorization
+            .checked_binding(self.agent_run_id.as_str())?;
         if self.model_context_tokens == 0
             || self.model_max_output_tokens == 0
             || self.model_max_output_tokens >= self.model_context_tokens
         {
             return Err("model token limits are invalid".to_string());
         }
-        let expected_digest = self.authorization.digest()?;
-        if self.authorization_digest != expected_digest {
-            return Err("workspace AgentRun authorization digest mismatch".to_string());
-        }
-        self.authorization
-            .verify_signature(signing_key, self.authorization_signature.as_str())?;
+        authorization.verify(
+            &self.authorization_digest,
+            signing_key,
+            &self.authorization_signature,
+        )?;
         if let AgentRunTailAction::RewriteLastUser {
             target_message_id,
             expected_tail_message_id,
@@ -276,6 +276,31 @@ mod tests {
 
     fn valid_agent_run_start() -> AgentRunStart {
         serde_json::from_value(valid_agent_run_start_value()).expect("run start")
+    }
+
+    #[test]
+    fn authorization_error_precedence_is_stable() {
+        let mut start = valid_agent_run_start();
+        start.agent_run_id = "other_run".into();
+        start.model_context_tokens = 0;
+        assert!(start
+            .validate(b"key")
+            .unwrap_err()
+            .contains("agentRunId mismatch"));
+        let mut start = valid_agent_run_start();
+        start.model_context_tokens = 0;
+        start.authorization_digest = "wrong".into();
+        assert_eq!(
+            start.validate(b"key").unwrap_err(),
+            "model token limits are invalid"
+        );
+        let mut start = valid_agent_run_start();
+        start.authorization_digest = "wrong".into();
+        start.authorization_signature = "wrong".into();
+        assert!(start
+            .validate(b"key")
+            .unwrap_err()
+            .contains("digest mismatch"));
     }
 
     #[test]

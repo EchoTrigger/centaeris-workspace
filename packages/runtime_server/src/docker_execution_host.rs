@@ -17,10 +17,6 @@ static NEXT_EXECUTION_HOST_INSTANCE: AtomicU64 = AtomicU64::new(1);
 use std::thread;
 use std::time::{Duration, Instant};
 
-use centaeris_core::execution::sandbox::{
-    decode_process_output, NetworkSandboxPolicy, SandboxAttempt, SandboxErr, SandboxPolicy,
-    SandboxPolicySummary, SandboxTransformRequest, SandboxType, SandboxedProcessOutput,
-};
 use centaeris_core::execution::{
     classify_execution_host_failure, ExecutionCancellationProbe, ExecutionFileSystemError,
     ExecutionFileSystemErrorKind, ExecutionFileSystemOperation, ExecutionFileSystemOutput,
@@ -28,6 +24,10 @@ use centaeris_core::execution::{
     ExecutionHostHealth, ExecutionHostRunner, ExecutionHostStatus, ExecutionInputState,
     ExecutionInputStateChange, ExecutionWorkspaceGeneration, MAX_PUBLISHED_ARTIFACT_BYTES,
     WORKSPACE_DATA_ROOT, WORKSPACE_HOME,
+};
+use centaeris_core::execution::{
+    decode_process_output, ExecutionAttempt, ExecutionCommandRequest, ExecutionError,
+    ExecutionPolicy, ExecutionPolicySummary, ExecutionProcessOutput, NetworkPolicy,
 };
 use centaeris_core::extension::hooks::{
     LifecycleHookCommandResultV1, LifecycleHookEventV1, LifecycleHookHandlerV1,
@@ -131,13 +131,6 @@ impl OciRuntime {
         match self {
             Self::Runc => "runc",
             Self::Runsc => "runsc",
-        }
-    }
-
-    pub(crate) fn sandbox_type(self) -> SandboxType {
-        match self {
-            Self::Runc => SandboxType::OciContainer,
-            Self::Runsc => SandboxType::Gvisor,
         }
     }
 
@@ -1477,23 +1470,21 @@ impl DockerExecutionHostRunner {
         Ok(())
     }
 
-    fn validate_policy(&self, policy: &SandboxPolicy) -> Result<(), SandboxErr> {
+    fn validate_policy(&self, policy: &ExecutionPolicy) -> Result<(), ExecutionError> {
         if policy.filesystem.workspace_root != Path::new(WORKSPACE_DATA_ROOT)
-            || policy.network != NetworkSandboxPolicy::Disabled
+            || policy.network != NetworkPolicy::Disabled
         {
-            return Err(SandboxErr::Denied {
+            return Err(ExecutionError::Denied {
                 reason: "Docker execution requires /mnt/data and disabled network policy"
                     .to_string(),
-                sandbox_type: self.oci_runtime.sandbox_type(),
             });
         }
         Ok(())
     }
 
-    fn unavailable(&self, reason: impl Into<String>) -> SandboxErr {
-        SandboxErr::Unavailable {
+    fn unavailable(&self, reason: impl Into<String>) -> ExecutionError {
+        ExecutionError::PolicyUnavailable {
             reason: reason.into(),
-            sandbox_type: Some(self.oci_runtime.sandbox_type()),
         }
     }
 
@@ -1507,7 +1498,9 @@ impl DockerExecutionHostRunner {
         Ok(inventory)
     }
 
-    fn refresh_materialized_inputs(&self) -> Result<Vec<ExecutionInputStateChange>, SandboxErr> {
+    fn refresh_materialized_inputs(
+        &self,
+    ) -> Result<Vec<ExecutionInputStateChange>, ExecutionError> {
         let _guard = self
             .input_lock
             .lock()
@@ -1517,7 +1510,7 @@ impl DockerExecutionHostRunner {
 
     fn refresh_materialized_inputs_locked(
         &self,
-    ) -> Result<Vec<ExecutionInputStateChange>, SandboxErr> {
+    ) -> Result<Vec<ExecutionInputStateChange>, ExecutionError> {
         let active = self
             .materialized_inputs
             .lock()
@@ -1588,7 +1581,7 @@ impl DockerExecutionHostRunner {
         &self,
         input: &SandboxMaterializedInput,
         state: ExecutionInputState,
-    ) -> Result<(), SandboxErr> {
+    ) -> Result<(), ExecutionError> {
         let body = serde_json::to_vec(&SandboxInputRevokeRequest {
             input_ref: input.input_ref.clone(),
             virtual_path: input.virtual_path.clone(),
@@ -1702,7 +1695,7 @@ impl LifecycleHookRunner for DockerExecutionHostRunner {
 }
 
 impl ExecutionHostRunner for DockerExecutionHostRunner {
-    fn status(&self, policy: &SandboxPolicy) -> Result<ExecutionHostStatus, SandboxErr> {
+    fn status(&self, policy: &ExecutionPolicy) -> Result<ExecutionHostStatus, ExecutionError> {
         self.validate_policy(policy)?;
         let facts = inspect_container(self.container_name.as_str())
             .map_err(|error| self.unavailable(error))?
@@ -1726,7 +1719,7 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
             return Err(self.unavailable("sandbox container identity mismatch"));
         }
         Ok(ExecutionHostStatus::remote(
-            self.oci_runtime.sandbox_type(),
+            true,
             ExecutionHostHealth::Ready,
             None,
         ))
@@ -1865,9 +1858,9 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
     fn run_host_command(
         &self,
         _operation_id: Option<&str>,
-        request: SandboxTransformRequest,
+        request: ExecutionCommandRequest,
         cancellation_probe: Option<&ExecutionCancellationProbe>,
-    ) -> Result<ExecutionHostCommandOutput, SandboxErr> {
+    ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
         self.status(&request.policy)?;
         self.recovery_activity
             .invalidate_before_dispatch()
@@ -1898,10 +1891,7 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
 
         let mut child = command
             .spawn()
-            .map_err(|error| SandboxErr::CancellationIndeterminate {
-                reason: error,
-                sandbox_type: Some(self.oci_runtime.sandbox_type()),
-            })?;
+            .map_err(|error| ExecutionError::CancellationIndeterminate { reason: error })?;
         child.stdin.take();
         let stdout = child
             .stdout
@@ -1932,9 +1922,8 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
                         Err(error) => {
                             child.disconnect();
                             let _ = child.wait();
-                            return Err(SandboxErr::CancellationIndeterminate {
+                            return Err(ExecutionError::CancellationIndeterminate {
                                 reason: error,
-                                sandbox_type: Some(self.oci_runtime.sandbox_type()),
                             });
                         }
                     }
@@ -1948,19 +1937,17 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
                     let teardown = Self::teardown(self.agent_run_id.as_str());
                     child.disconnect();
                     let _ = child.wait();
-                    return Err(SandboxErr::CancellationIndeterminate {
+                    return Err(ExecutionError::CancellationIndeterminate {
                         reason: teardown.err().unwrap_or_else(|| {
                             "docker exec exceeded its confirmed deadline".to_string()
                         }),
-                        sandbox_type: Some(self.oci_runtime.sandbox_type()),
                     });
                 }
                 Err(error) => {
                     child.disconnect();
                     let _ = child.wait();
-                    return Err(SandboxErr::CancellationIndeterminate {
+                    return Err(ExecutionError::CancellationIndeterminate {
                         reason: format!("poll docker exec failed: {error}"),
-                        sandbox_type: Some(self.oci_runtime.sandbox_type()),
                     });
                 }
             }
@@ -1973,9 +1960,8 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
             .map_err(|_| self.unavailable("exec stderr reader panicked"))?;
         if !cancelled {
             if let Some(error) = stdout.error.as_ref().or(stderr.error.as_ref()) {
-                return Err(SandboxErr::CancellationIndeterminate {
+                return Err(ExecutionError::CancellationIndeterminate {
                     reason: error.clone(),
-                    sandbox_type: Some(self.oci_runtime.sandbox_type()),
                 });
             }
         }
@@ -1992,7 +1978,7 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
         ] {
             if captured.total_bytes > captured.bytes.len() {
                 decoded.text.push_str("\n[output truncated at 8 MiB]");
-                diagnostics.push(centaeris_core::execution::sandbox::RuntimeOutputDiagnostic {
+                diagnostics.push(centaeris_core::execution::RuntimeOutputDiagnostic {
                     source: "execution_host".into(), stream: stream.into(), severity: "warning".into(),
                     code: "output_truncated".into(), message: "Output exceeded the per-stream retention limit".into(),
                     details: Some(serde_json::json!({"retainedBytes":captured.bytes.len(), "rawBytes":captured.total_bytes})),
@@ -2016,17 +2002,16 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
             )
         };
         Ok(ExecutionHostCommandOutput {
-            process: SandboxedProcessOutput {
+            process: ExecutionProcessOutput {
                 exit_code,
                 stdout: stdout_decoded.text,
                 stderr: stderr_decoded.text,
                 stdout_decode: stdout_decoded.summary,
                 stderr_decode: stderr_decoded.summary,
                 timed_out,
-                attempt: SandboxAttempt {
-                    sandbox_type: self.oci_runtime.sandbox_type(),
+                attempt: ExecutionAttempt {
                     transition_reason: self.oci_runtime.transition_reason().to_string(),
-                    policy: policy_summary(self.oci_runtime.sandbox_type(), &request.policy),
+                    policy: policy_summary(&request.policy),
                 },
                 runtime_diagnostics: diagnostics,
             },
@@ -2483,9 +2468,8 @@ pub(crate) fn bounded_diagnostic(bytes: &[u8]) -> String {
         .to_string()
 }
 
-fn policy_summary(sandbox_type: SandboxType, policy: &SandboxPolicy) -> SandboxPolicySummary {
-    SandboxPolicySummary {
-        sandbox_type,
+fn policy_summary(policy: &ExecutionPolicy) -> ExecutionPolicySummary {
+    ExecutionPolicySummary {
         enforced: true,
         network: policy.network.clone(),
         workspace_root: WORKSPACE_DATA_ROOT.to_string(),
@@ -3380,7 +3364,6 @@ mod tests {
     fn oci_runtime_runc_maps_to_oci_container_and_docker_runc() {
         let runtime = OciRuntime::parse("runc").expect("runc");
         assert_eq!(runtime.docker_runtime_name(), "runc");
-        assert_eq!(runtime.sandbox_type(), SandboxType::OciContainer);
         assert_eq!(runtime.transition_reason(), "docker_runc");
     }
 
@@ -3388,7 +3371,6 @@ mod tests {
     fn oci_runtime_runsc_maps_to_gvisor_and_docker_runsc() {
         let runtime = OciRuntime::parse("runsc").expect("runsc");
         assert_eq!(runtime.docker_runtime_name(), "runsc");
-        assert_eq!(runtime.sandbox_type(), SandboxType::Gvisor);
         assert_eq!(runtime.transition_reason(), "docker_runsc");
     }
 
@@ -3412,14 +3394,14 @@ mod tests {
     }
 
     #[test]
-    fn policy_summary_preserves_the_reported_oci_sandbox_type() {
-        let policy = SandboxPolicy::workspace_write_no_network(std::path::PathBuf::from(
+    fn policy_summary_preserves_enforcement_without_backend_identity() {
+        let policy = ExecutionPolicy::workspace_write_no_network(std::path::PathBuf::from(
             WORKSPACE_DATA_ROOT,
         ));
-        let summary = policy_summary(SandboxType::OciContainer, &policy);
-        assert_eq!(summary.sandbox_type, SandboxType::OciContainer);
+        let summary = policy_summary(&policy);
+        assert!(summary.enforced);
         assert_eq!(summary.workspace_root, WORKSPACE_DATA_ROOT);
-        assert_eq!(summary.network, NetworkSandboxPolicy::Disabled);
+        assert_eq!(summary.network, NetworkPolicy::Disabled);
         assert_eq!(SANDBOX_NETWORK_MODE, "none");
     }
 
@@ -3635,9 +3617,9 @@ mod tests {
     }
 
     impl ExecutionHostRunner for ActivatedPluginReadRunner {
-        fn status(&self, _policy: &SandboxPolicy) -> Result<ExecutionHostStatus, SandboxErr> {
+        fn status(&self, _policy: &ExecutionPolicy) -> Result<ExecutionHostStatus, ExecutionError> {
             Ok(ExecutionHostStatus::remote(
-                SandboxType::OciContainer,
+                true,
                 ExecutionHostHealth::Ready,
                 None,
             ))
@@ -3672,9 +3654,9 @@ mod tests {
         fn run_host_command(
             &self,
             _operation_id: Option<&str>,
-            _request: SandboxTransformRequest,
+            _request: ExecutionCommandRequest,
             _cancellation_probe: Option<&ExecutionCancellationProbe>,
-        ) -> Result<ExecutionHostCommandOutput, SandboxErr> {
+        ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
             unreachable!("plugin Skill read must not invoke Bash")
         }
     }
@@ -3707,7 +3689,7 @@ mod tests {
                 ExecutionHostMode::Remote,
                 runner.clone(),
                 workspace.clone(),
-                SandboxPolicy::workspace_write_no_network(workspace),
+                ExecutionPolicy::workspace_write_no_network(workspace),
             )
             .expect("remote plugin execution host"),
         );
@@ -3934,7 +3916,7 @@ mod tests {
             .run_file_system_operation(ExecutionFileSystemRequest {
                 operation_id: None,
                 cwd: PathBuf::from(WORKSPACE_DATA_ROOT),
-                policy: SandboxPolicy::workspace_write_no_network(WORKSPACE_DATA_ROOT),
+                policy: ExecutionPolicy::workspace_write_no_network(WORKSPACE_DATA_ROOT),
                 model_path: "banana://workspace/file.md".to_string(),
                 operation: ExecutionFileSystemOperation::InspectMutationPath,
             })

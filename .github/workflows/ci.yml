@@ -79,8 +79,7 @@ jobs:
       - name: Set up Rust
         shell: bash
         run: |
-          rustup toolchain install 1.94.1 --profile minimal
-          rustup override set 1.94.1
+          rustup show active-toolchain
 
       - name: Run source and web static gate
         shell: pwsh

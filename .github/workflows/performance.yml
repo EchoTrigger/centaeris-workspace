@@ -8,6 +8,7 @@ on:
       - .github/workflows/resolve-core-revision.yml
       - scripts/resolve-core-revision.mjs
       - scripts/core-revision.test.mjs
+      - scripts/rust-toolchain.test.mjs
       - Cargo.lock
       - Cargo.toml
       - rust-toolchain.toml
@@ -24,6 +25,7 @@ on:
       - .github/workflows/resolve-core-revision.yml
       - scripts/resolve-core-revision.mjs
       - scripts/core-revision.test.mjs
+      - scripts/rust-toolchain.test.mjs
       - Cargo.lock
       - Cargo.toml
       - rust-toolchain.toml
@@ -77,8 +79,8 @@ jobs:
       - name: Install pinned Rust toolchain
         shell: bash
         run: |
-          rustup toolchain install 1.94.1 --profile minimal
-          rustup override set 1.94.1
+          rustup show active-toolchain
+          node --test scripts/rust-toolchain.test.mjs
 
       - name: Run observation storage evaluation
         shell: bash

@@ -1,4 +1,4 @@
-FROM rust:1.94.1-bookworm@sha256:6ae102bdbf528294bc79ad6e1fae682f6f7c2a6e6621506ba959f9685b308a55 AS build
+FROM rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1 AS build
 
 WORKDIR /src
 COPY --from=centaeris Cargo.toml Cargo.lock rust-toolchain.toml /centaeris/

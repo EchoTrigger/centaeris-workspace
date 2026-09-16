@@ -1,7 +1,7 @@
 """Characterize the authorization boundary before extracting platform services."""
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from django.test import SimpleTestCase
 
@@ -34,15 +34,16 @@ class MaterialAccessContractTests(SimpleTestCase):
         patches = {
             "query": patch.object(access.AgentRun.objects, "select_related"),
             "membership": patch.object(access, "agent_run_membership_is_current", return_value=True),
-            "payload": patch.object(access, "validate_agent_run_authorization_payload"),
             "digest": patch.object(access, "authorization_digest", return_value=self.authorization.digest),
             "specification": patch.object(access, "processing_spec_digest", return_value=self.spec_digest),
-            "storage": patch.object(access, "resolved_input_storage", return_value=({"objectRef": "source_1"}, "private/source")),
+            "batch": patch.object(access, "input_storage_batch"),
             "links": patch.object(access.SessionAssetLink.objects, "select_related"),
         }
         for name, patcher in patches.items():
             setattr(self, name, patcher.start())
             self.addCleanup(patcher.stop)
+        self.storage = Mock(return_value=({"objectRef": "source_1"}, "private/source"))
+        self.batch.return_value = self.storage
         self.query.return_value.get.return_value = self.run
         self.owner = SimpleNamespace(id="source_1")
         self.links.return_value.get.return_value = SimpleNamespace(
