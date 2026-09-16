@@ -14,6 +14,7 @@ function Run([string]$Name, [scriptblock]$Command) {
 }
 
 Run "Public Core revision" { node --test scripts/core-revision.test.mjs }
+Run "Rust toolchain consistency" { node --test scripts/rust-toolchain.test.mjs }
 Run "Rust check" { cargo check --workspace --locked }
 Run "Rust tests" { cargo test --workspace --locked }
 Run "Outbox gate isolation and discovery guards" { python scripts/test_runtime_outbox_gate.py }
