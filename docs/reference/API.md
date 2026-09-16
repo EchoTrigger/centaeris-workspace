@@ -7,6 +7,18 @@ Browser REST and SSE routes are rooted at `/api`. Postgres is truth; Redis holds
 bounded transient live projection. Unknown fields and schemas fail. Public
 Runtime event and tool semantics belong only to the exact public Cargo revision.
 
+The Rust Host consumes Core's generic `ExecutionPolicy`,
+`ExecutionCommandRequest`, and `ExecutionError` contracts. Docker runtime names
+remain Host-private configuration/diagnostics. Host status uses `policyEnforced`;
+process summaries retain `enforced` and no longer carry `sandboxType`.
+Permission denial, policy enforcement unavailable, and Host unavailable are
+explicit categories rather than inferred from an OCI backend name. Core and
+these consumers must be upgraded together; no old-field aliases are accepted.
+Historical Host details remain stored JSON facts; the durable tool error retains
+the canonical `sandbox_unavailable` category for receipt recovery. Old results
+are not replayed or rewritten. Container selection and authorization checks are
+unchanged; nono is not introduced into hosted execution.
+
 ## Model input images
 
 Internal model requests consume Core's `prepared_prompt.v1`.
