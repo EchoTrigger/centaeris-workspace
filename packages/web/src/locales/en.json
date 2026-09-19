@@ -817,5 +817,8 @@
   "toolGroup.taskOutput.one": "task result",
   "toolGroup.taskOutput.other": "task results",
   "toolGroup.join": ", ",
-  "toolGroup.unknown": "Tool calls"
+  "toolGroup.unknown": "Tool calls",
+  "appRoute.streamReconnecting": "Reconnecting… Your conversation remains available.",
+  "appRoute.streamPaused": "Live updates paused. You can keep reading or reconnect.",
+  "appRoute.retryStream": "Reconnect"
 }
