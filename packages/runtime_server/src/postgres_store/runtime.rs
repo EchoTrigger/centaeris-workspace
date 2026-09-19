@@ -578,7 +578,9 @@ struct ModelObservationManifest {
 #[derive(Clone, Debug)]
 struct PreparedSessionRow {
     record: CommittedSessionRecord,
-    agent_run_sequence: i32,
+    agent_run_id: String,
+    agent_run_sequence: Option<i32>,
+    session_level: bool,
     projects_to_agent_run_stream: bool,
     payload: String,
     commit_payload: String,
@@ -589,6 +591,17 @@ struct PreparedSessionAppend {
     rows: Vec<PreparedSessionRow>,
     contents: Vec<ModelObservationContent>,
     manifests: Vec<ModelObservationManifest>,
+}
+
+/// One admission-time event. Session-level closures keep the originating run id
+/// but carry no run sequence; new-run first-batch records keep their run
+/// sequence. `agent_run_id` is per row, not per batch.
+#[derive(Clone, Debug)]
+struct AdmissionEntry {
+    event: centaeris_core::session::SessionLogRecord,
+    agent_run_id: String,
+    agent_run_sequence: Option<i32>,
+    session_level: bool,
 }
 
 fn sha256_json(domain: &[u8], json: &str) -> String {
@@ -1413,7 +1426,7 @@ impl PostgresSessionLog {
                     (None, Vec::new())
                 },
             )?;
-            self.insert_session_append(&mut tx, agent_run_id, &prepared)?;
+            self.insert_session_append(&mut tx, &prepared)?;
             consume_waits_for_terminal_batch(&mut tx, &self.session_id, agent_run_id, events)?;
             let records = prepared.rows.into_iter().map(|row| row.record).collect();
             if !tombstoned_event_ids.is_empty() {
@@ -1606,7 +1619,7 @@ impl PostgresSessionLog {
         use centaeris_core::session::SessionRecordType as Type;
         let rows = tx
             .query(
-                "SELECT payload::text FROM app_core_sessionevent WHERE agent_run_id=$1 ORDER BY agent_run_sequence",
+                "SELECT payload::text FROM app_core_sessionevent WHERE agent_run_id=$1 AND session_level=false ORDER BY agent_run_sequence",
                 &[&agent_run_id],
             )
             .map_err(|error| format!("load session AgentRun state failed: {error}"))?;
@@ -1757,7 +1770,9 @@ impl PostgresSessionLog {
                     sequence,
                     event: event.clone(),
                 },
-                agent_run_sequence,
+                agent_run_id: agent_run_id.to_string(),
+                agent_run_sequence: Some(agent_run_sequence),
+                session_level: false,
                 projects_to_agent_run_stream: session_record_projects_to_agent_run_stream(
                     event.event_type,
                 ),
@@ -1775,7 +1790,6 @@ impl PostgresSessionLog {
     fn insert_session_append(
         &self,
         tx: &mut Transaction<'_>,
-        agent_run_id: &str,
         prepared: &PreparedSessionAppend,
     ) -> Result<(), String> {
         if !prepared.manifests.is_empty() {
@@ -1895,6 +1909,11 @@ impl PostgresSessionLog {
             .iter()
             .map(|row| row.record.event.event_id.clone())
             .collect::<Vec<_>>();
+        let row_agent_run_ids = prepared
+            .rows
+            .iter()
+            .map(|row| row.agent_run_id.clone())
+            .collect::<Vec<_>>();
         let sequences = prepared
             .rows
             .iter()
@@ -1905,6 +1924,11 @@ impl PostgresSessionLog {
             .rows
             .iter()
             .map(|row| row.agent_run_sequence)
+            .collect::<Vec<_>>();
+        let session_levels = prepared
+            .rows
+            .iter()
+            .map(|row| row.session_level)
             .collect::<Vec<_>>();
         let projections = prepared
             .rows
@@ -1923,8 +1947,19 @@ impl PostgresSessionLog {
             .collect::<Vec<_>>();
         let inserted = tx
             .execute(
-                "INSERT INTO app_core_sessionevent(\"eventId\",workspace_id,session_id,agent_run_id,sequence,agent_run_sequence,projects_to_agent_run_stream,payload,\"createdAtMs\",\"insertedAt\") SELECT batch.event_id,$1,$2,$3,batch.sequence,batch.agent_run_sequence,batch.projects_to_agent_run_stream,batch.payload::jsonb,batch.created_at_ms,clock_timestamp() FROM UNNEST($4::text[],$5::integer[],$6::integer[],$7::boolean[],$8::text[],$9::bigint[]) batch(event_id,sequence,agent_run_sequence,projects_to_agent_run_stream,payload,created_at_ms)",
-                &[&self.workspace_id, &self.session_id, &agent_run_id, &event_ids, &sequences, &agent_run_sequences, &projections, &payloads, &created_at_ms],
+                "INSERT INTO app_core_sessionevent(\"eventId\",workspace_id,session_id,agent_run_id,sequence,agent_run_sequence,session_level,projects_to_agent_run_stream,payload,\"createdAtMs\",\"insertedAt\") SELECT batch.event_id,$1,$2,batch.agent_run_id,batch.sequence,batch.agent_run_sequence,batch.session_level,batch.projects_to_agent_run_stream,batch.payload::jsonb,batch.created_at_ms,clock_timestamp() FROM UNNEST($3::text[],$4::text[],$5::integer[],$6::integer[],$7::boolean[],$8::boolean[],$9::text[],$10::bigint[]) batch(event_id,agent_run_id,sequence,agent_run_sequence,session_level,projects_to_agent_run_stream,payload,created_at_ms)",
+                &[
+                    &self.workspace_id,
+                    &self.session_id,
+                    &event_ids,
+                    &row_agent_run_ids,
+                    &sequences,
+                    &agent_run_sequences,
+                    &session_levels,
+                    &projections,
+                    &payloads,
+                    &created_at_ms,
+                ],
             )
             .map_err(|error| format!("append session record batch failed: {error}"))?;
         if inserted != prepared.rows.len() as u64 {
@@ -1941,14 +1976,321 @@ impl PostgresSessionLog {
             .collect::<Vec<_>>();
         let inserted = tx
             .execute(
-                "INSERT INTO runtime.runtime_events(event_id,session_id,task_id,event_type,at_ms,visibility,payload_json) SELECT batch.event_id,$1,$2,'session_record_committed',batch.created_at_ms,'internal',batch.payload_json FROM UNNEST($3::text[],$4::bigint[],$5::text[]) batch(event_id,created_at_ms,payload_json)",
-                &[&self.session_id, &agent_run_id, &commit_event_ids, &created_at_ms, &commit_payloads],
+                "INSERT INTO runtime.runtime_events(event_id,session_id,task_id,event_type,at_ms,visibility,payload_json) SELECT batch.event_id,$1,batch.agent_run_id,'session_record_committed',batch.created_at_ms,'internal',batch.payload_json FROM UNNEST($2::text[],$3::text[],$4::bigint[],$5::text[]) batch(event_id,agent_run_id,created_at_ms,payload_json)",
+                &[
+                    &self.session_id,
+                    &commit_event_ids,
+                    &row_agent_run_ids,
+                    &created_at_ms,
+                    &commit_payloads,
+                ],
             )
             .map_err(|error| format!("append session runtime commit batch failed: {error}"))?;
         if inserted != prepared.rows.len() as u64 {
             return Err("append session runtime commit batch count mismatch".to_string());
         }
         Ok(())
+    }
+
+    fn prepare_admission_append(
+        &self,
+        entries: &[AdmissionEntry],
+        mut next_session_sequence: i32,
+    ) -> Result<PreparedSessionAppend, String> {
+        let mut rows = Vec::with_capacity(entries.len());
+        for entry in entries {
+            centaeris_core::session::validate_event_shape(&entry.event)?;
+            next_session_sequence = next_session_sequence
+                .checked_add(1)
+                .ok_or_else(|| "session record sequence overflow".to_string())?;
+            let sequence = u64::try_from(next_session_sequence)
+                .map_err(|_| "session record sequence overflow".to_string())?;
+            let wire = wire_record_value(&SequencedSessionRecord {
+                sequence,
+                event: entry.event.clone(),
+            })
+            .map_err(|error| error.to_string())?;
+            let payload = serde_json::to_string(&wire)
+                .map_err(|error| format!("serialize session record failed: {error}"))?;
+            let commit_payload = serde_json::json!({
+                "sessionRecordId": entry.event.event_id,
+                "sessionRecordType": entry.event.event_type.as_str(),
+                "sequence": sequence,
+                "agentRunSequence": entry.agent_run_sequence,
+            })
+            .to_string();
+            rows.push(PreparedSessionRow {
+                record: CommittedSessionRecord {
+                    sequence,
+                    event: entry.event.clone(),
+                },
+                agent_run_id: entry.agent_run_id.clone(),
+                agent_run_sequence: entry.agent_run_sequence,
+                session_level: entry.session_level,
+                projects_to_agent_run_stream: session_record_projects_to_agent_run_stream(
+                    entry.event.event_type,
+                ),
+                payload,
+                commit_payload,
+            });
+        }
+        Ok(PreparedSessionAppend {
+            rows,
+            contents: Vec::new(),
+            manifests: Vec::new(),
+        })
+    }
+
+    fn load_admission_idempotent_batch(
+        &self,
+        tx: &mut Transaction<'_>,
+        entries: &[AdmissionEntry],
+    ) -> Result<Option<SessionCommitReceipt>, String> {
+        let event_ids = entries
+            .iter()
+            .map(|entry| entry.event.event_id.clone())
+            .collect::<Vec<_>>();
+        let rows = tx
+            .query(
+                "SELECT \"eventId\",workspace_id,session_id,agent_run_id,sequence,agent_run_sequence,session_level,payload::text FROM app_core_sessionevent WHERE \"eventId\"=ANY($1)",
+                &[&event_ids],
+            )
+            .map_err(|error| format!("query admission batch ids failed: {error}"))?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        if rows.len() != entries.len() {
+            return Err("new user turn admission batch partially overlaps committed facts".to_string());
+        }
+        let mut existing = rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get::<_, String>(0),
+                    (
+                        row.get::<_, String>(1),
+                        row.get::<_, String>(2),
+                        row.get::<_, String>(3),
+                        row.get::<_, i32>(4),
+                        row.get::<_, Option<i32>>(5),
+                        row.get::<_, bool>(6),
+                        row.get::<_, String>(7),
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut records = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let row = existing
+                .remove(entry.event.event_id.as_str())
+                .ok_or_else(|| "new user turn admission batch contains duplicate event ids".to_string())?;
+            let wire = serde_json::from_str::<serde_json::Value>(row.6.as_str())
+                .map_err(|error| format!("decode stored session record failed: {error}"))?;
+            let stored = parse_wire_record(&wire).map_err(|error| error.to_string())?;
+            let sequence = u64::try_from(row.3)
+                .map_err(|_| "stored session sequence is invalid".to_string())?;
+            let stored_run_sequence = row.4;
+            let same = row.0 == self.workspace_id
+                && row.1 == self.session_id
+                && row.2 == entry.agent_run_id
+                && stored_run_sequence == entry.agent_run_sequence
+                && row.5 == entry.session_level
+                && stored.sequence == sequence
+                && stored.event == entry.event;
+            if !same {
+                return Err(format!(
+                    "new user turn admission idempotency conflict: {}",
+                    entry.event.event_id
+                ));
+            }
+            records.push(CommittedSessionRecord {
+                sequence,
+                event: entry.event.clone(),
+            });
+        }
+        Ok(Some(SessionCommitReceipt { records }))
+    }
+
+    /// Session-level atomic admission: commits the recovery closures for an
+    /// older terminal AgentRun and the new AgentRun's first batch in one
+    /// transaction. Ordinary appends stay single-run; only this entry may mix
+    /// records owned by different runs.
+    pub fn append_new_user_turn_admission_blocking(
+        &self,
+        new_agent_run_id: &str,
+        new_run_events: &[SequencedSessionRecord],
+        closure_events: &[centaeris_core::session::SessionLogRecord],
+        plan: &centaeris_core::runtime::contracts::NewUserTurnClosurePlanV1,
+        fence: &RuntimeJobLeaseFence,
+    ) -> Result<SessionCommitReceipt, String> {
+        validate_sequenced_session_records(new_run_events)?;
+        if plan.session_id != self.session_id || plan.trigger_agent_run_id != new_agent_run_id {
+            return Err("new user turn admission plan binding mismatch".to_string());
+        }
+        if closure_events.len() != plan.closures.len() {
+            return Err("new user turn admission closure count mismatch".to_string());
+        }
+        let _append_guard = self
+            .append_lock
+            .lock()
+            .map_err(|_| "session record append lock poisoned".to_string())?;
+        self.connections.with_client(|client| {
+            let mut tx = client
+                .transaction()
+                .map_err(|error| format!("begin session admission failed: {error}"))?;
+            let session = tx
+                .query_opt(
+                    "SELECT workspace_id FROM app_core_session WHERE id=$1 FOR UPDATE",
+                    &[&self.session_id],
+                )
+                .map_err(|error| format!("lock chat session failed: {error}"))?
+                .ok_or_else(|| "chat session not found".to_string())?;
+            if session.get::<_, String>(0) != self.workspace_id {
+                return Err("chat session workspace binding mismatch".to_string());
+            }
+            let lease_is_current = tx
+                .query_opt(
+                    "SELECT 1 FROM runtime.runtime_jobs WHERE job_id=$1 AND job_kind=$2 AND status='running' AND lease_owner=$3 AND session_id=$4 AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint FOR UPDATE",
+                    &[&fence.job_id, &fence.job_kind, &fence.lease_owner, &self.session_id],
+                )
+                .map_err(|error| format!("lock runtime job lease fence failed: {error}"))?
+                .is_some();
+            if !lease_is_current {
+                return Err(RUNTIME_JOB_LEASE_FENCE_REJECTED.to_string());
+            }
+            let mut entries = Vec::with_capacity(closure_events.len() + new_run_events.len());
+            for closure_event in closure_events {
+                entries.push(AdmissionEntry {
+                    event: closure_event.clone(),
+                    agent_run_id: closure_event
+                        .agent_run_id
+                        .clone()
+                        .ok_or_else(|| "admission closure has no owning AgentRun".to_string())?,
+                    agent_run_sequence: None,
+                    session_level: true,
+                });
+            }
+            for item in new_run_events {
+                entries.push(AdmissionEntry {
+                    event: item.event.clone(),
+                    agent_run_id: new_agent_run_id.to_string(),
+                    agent_run_sequence: Some(
+                        i32::try_from(item.sequence)
+                            .map_err(|_| "session record AgentRun sequence overflow".to_string())?,
+                    ),
+                    session_level: false,
+                });
+            }
+            // Re-delivery of an already committed batch must return the stored
+            // receipt before the head-comparison, which necessarily advanced.
+            if let Some(receipt) = self.load_admission_idempotent_batch(&mut tx, &entries)? {
+                tx.commit()
+                    .map_err(|error| format!("commit idempotent admission failed: {error}"))?;
+                return Ok(receipt);
+            }
+            let head = tx
+                .query_one(
+                    "SELECT COALESCE(MAX(sequence), 0) FROM app_core_sessionevent WHERE session_id=$1",
+                    &[&self.session_id],
+                )
+                .map_err(|error| format!("load session head failed: {error}"))?
+                .get::<_, i32>(0);
+            if u64::try_from(head).map_err(|_| "session head is invalid".to_string())?
+                != plan.expected_session_sequence
+            {
+                return Err("new user turn admission plan is stale: session head changed".to_string());
+            }
+            for precondition in &plan.evidence_preconditions {
+                if precondition.receipt_present {
+                    let receipt_event_id = precondition
+                        .receipt_event_id
+                        .as_deref()
+                        .ok_or_else(|| "admission evidence receipt id is missing".to_string())?;
+                    let exists = tx
+                        .query_opt(
+                            "SELECT 1 FROM runtime.runtime_events WHERE event_id=$1",
+                            &[&receipt_event_id],
+                        )
+                        .map_err(|error| format!("verify admission receipt failed: {error}"))?
+                        .is_some();
+                    if !exists {
+                        return Err("new user turn admission evidence receipt is missing".to_string());
+                    }
+                } else if let Some(expected) = precondition.expected_receipt_event_id.as_deref() {
+                    let appeared = tx
+                        .query_opt(
+                            "SELECT 1 FROM runtime.runtime_events WHERE event_id=$1",
+                            &[&expected],
+                        )
+                        .map_err(|error| format!("verify admission evidence failed: {error}"))?
+                        .is_some();
+                    if appeared {
+                        return Err(
+                            "new user turn admission evidence advanced after planning".to_string()
+                        );
+                    }
+                }
+            }
+            for (closure_event, closure) in closure_events.iter().zip(plan.closures.iter()) {
+                if closure_event.event_type != SessionRecordType::ToolCallClosure
+                    || closure_event.session_id != self.session_id
+                {
+                    return Err("new user turn admission closure identity mismatch".to_string());
+                }
+                let closure_run_id = closure_event
+                    .agent_run_id
+                    .as_deref()
+                    .ok_or_else(|| "admission closure has no owning AgentRun".to_string())?;
+                let payload = closure_event
+                    .payload
+                    .as_object()
+                    .ok_or_else(|| "admission closure payload must be an object".to_string())?;
+                if closure_run_id != closure.agent_run_id
+                    || payload.get("callId").and_then(serde_json::Value::as_str)
+                        != Some(closure.call.id.as_str())
+                    || payload.get("recovery").and_then(serde_json::Value::as_str)
+                        != Some(closure.recovery.as_str())
+                    || payload
+                        .get("triggerAgentRunId")
+                        .and_then(serde_json::Value::as_str)
+                        != Some(new_agent_run_id)
+                {
+                    return Err(
+                        "new user turn admission closure does not match its plan".to_string()
+                    );
+                }
+                let terminal = tx
+                    .query_opt(
+                        "SELECT 1 FROM app_core_sessionevent WHERE session_id=$1 AND agent_run_id=$2 AND session_level=false AND payload->>'type' IN ('agent_run_completed','agent_run_failed','agent_run_interrupted') LIMIT 1",
+                        &[&self.session_id, &closure_run_id],
+                    )
+                    .map_err(|error| format!("verify closure owner terminal state failed: {error}"))?
+                    .is_some();
+                if !terminal {
+                    return Err(
+                        "new user turn admission closure owner is not terminal".to_string()
+                    );
+                }
+            }
+            for item in new_run_events {
+                if item.event.agent_run_id.as_deref() != Some(new_agent_run_id) {
+                    return Err("new user turn admission batch AgentRun mismatch".to_string());
+                }
+            }
+            let prepared = self.prepare_admission_append(&entries, head)?;
+            self.insert_session_append(&mut tx, &prepared)?;
+            consume_waits_for_terminal_batch(
+                &mut tx,
+                &self.session_id,
+                new_agent_run_id,
+                new_run_events,
+            )?;
+            tx.commit()
+                .map_err(|error| format!("commit session admission failed: {error}"))?;
+            Ok(SessionCommitReceipt {
+                records: prepared.rows.into_iter().map(|row| row.record).collect(),
+            })
+        })
     }
 }
 

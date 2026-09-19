@@ -27,7 +27,19 @@ use std::time::{Duration, Instant};
 
 use super::PostgresRuntimeStore;
 
-const WORKSPACE_TRANSCRIPT_INITIAL_GENERATION_V1: &str = "generation-1";
+/// Bump whenever the stored `TranscriptBlockV1` / `TranscriptTextContentV1`
+/// encoding changes. A different value yields a distinct projection generation,
+/// so projections written by an older encoding are invalidated and rebuilt
+/// instead of being decoded under the new field names.
+const WORKSPACE_TRANSCRIPT_BLOCK_SCHEMA_VERSION: u32 = 1;
+
+fn workspace_transcript_initial_generation() -> String {
+    if WORKSPACE_TRANSCRIPT_BLOCK_SCHEMA_VERSION <= 1 {
+        "generation-1".to_string()
+    } else {
+        format!("generation-1.blocks{WORKSPACE_TRANSCRIPT_BLOCK_SCHEMA_VERSION}")
+    }
+}
 const WORKSPACE_TRANSCRIPT_STREAM_ID_V1: &str = "workspace-transcript.v1";
 static TRANSCRIPT_REBUILDS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
@@ -67,8 +79,15 @@ impl PostgresRuntimeStore {
         session_id: &str,
     ) -> Result<TranscriptProjectionCurrentGenerationV1, String> {
         require_nonempty(session_id, "sessionId")?;
+        let initial_generation = workspace_transcript_initial_generation();
         if let Some(current) = self.load_current_transcript_projection_generation(session_id)? {
-            return Ok(current);
+            if current.projection_generation == initial_generation {
+                return Ok(current);
+            }
+            // The stored projection was written by a different block encoding.
+            // Drop only the derived transcript state; source session events and
+            // AgentRun control-plane data are untouched.
+            self.invalidate_transcript_projection(session_id)?;
         }
         self.with_client(|client| {
             let mut tx = client.transaction().map_err(|error| {
@@ -76,12 +95,12 @@ impl PostgresRuntimeStore {
             })?;
             tx.execute(
                 "INSERT INTO runtime.transcript_projection_heads(session_id,projection_version,projection_generation,source_high_water,invalidation_reason) VALUES($1,$2,$3,0,NULL) ON CONFLICT DO NOTHING",
-                &[&session_id, &TRANSCRIPT_PROJECTION_VERSION_V1, &WORKSPACE_TRANSCRIPT_INITIAL_GENERATION_V1],
+                &[&session_id, &TRANSCRIPT_PROJECTION_VERSION_V1, &initial_generation],
             )
             .map_err(|error| format!("create initial transcript projection head failed: {error}"))?;
             tx.execute(
                 "INSERT INTO runtime.transcript_projection_current_generations(session_id,projection_version,projection_generation,source_high_water) VALUES($1,$2,$3,0) ON CONFLICT DO NOTHING",
-                &[&session_id, &TRANSCRIPT_PROJECTION_VERSION_V1, &WORKSPACE_TRANSCRIPT_INITIAL_GENERATION_V1],
+                &[&session_id, &TRANSCRIPT_PROJECTION_VERSION_V1, &initial_generation],
             )
             .map_err(|error| format!("publish initial transcript generation failed: {error}"))?;
             let row = tx
@@ -101,6 +120,33 @@ impl PostgresRuntimeStore {
                 format!("commit initial transcript generation publication failed: {error}")
             })?;
             Ok(current)
+        })
+    }
+
+    /// Deletes only the derived transcript projection for a session. It never
+    /// touches source session events, jobs, or snapshots.
+    fn invalidate_transcript_projection(&self, session_id: &str) -> Result<(), String> {
+        self.with_client(|client| {
+            let mut tx = client
+                .transaction()
+                .map_err(|error| format!("begin transcript invalidation failed: {error}"))?;
+            for table in [
+                "transcript_projection_current_recoveries",
+                "transcript_resume_cursors",
+                "transcript_block_versions",
+                "transcript_block_identities",
+                "transcript_projection_commits",
+                "transcript_projection_current_generations",
+                "transcript_projection_heads",
+            ] {
+                tx.execute(
+                    &format!("DELETE FROM runtime.{table} WHERE session_id=$1"),
+                    &[&session_id],
+                )
+                .map_err(|error| format!("invalidate transcript projection failed: {error}"))?;
+            }
+            tx.commit()
+                .map_err(|error| format!("commit transcript invalidation failed: {error}"))
         })
     }
 
@@ -180,10 +226,7 @@ impl PostgresRuntimeStore {
                 .parse::<u64>()
                 .map_err(|_| "stored transcript sourceHighWater exceeds u64".to_string())
         })?;
-        if projected_high_water > source_high_water {
-            return Err("transcript projection head exceeds source high-water".to_string());
-        }
-        if projected_high_water == source_high_water {
+        if projected_high_water >= source_high_water {
             return Ok(TranscriptCatchUpProgress {
                 source_high_water,
                 projected_high_water,
@@ -489,6 +532,21 @@ impl TranscriptProjectionStorePort for PostgresRuntimeStore {
             let mut tx = client
                 .transaction()
                 .map_err(|error| format!("begin transcript projection commit failed: {error}"))?;
+            if expected == 0 {
+                tx.execute(
+                    "INSERT INTO runtime.transcript_projection_heads(session_id,projection_version,projection_generation,source_high_water,invalidation_reason) VALUES($1,$2,$3,0,NULL) ON CONFLICT DO NOTHING",
+                    &[&commit.session_id, &commit.projection_version, &commit.projection_generation],
+                )
+                .map_err(|error| format!("create transcript projection head failed: {error}"))?;
+            }
+            // Serialize writers before checking deduplication: a competing writer may
+            // commit the same event while this transaction waits for the head lock.
+            let current = tx
+                .query_opt(
+                    "SELECT source_high_water,invalidation_reason FROM runtime.transcript_projection_heads WHERE session_id=$1 AND projection_version=$2 AND projection_generation=$3 FOR UPDATE",
+                    &[&commit.session_id, &commit.projection_version, &commit.projection_generation],
+                )
+                .map_err(|error| format!("load transcript projection head failed: {error}"))?;
             if let Some(row) = tx
                 .query_opt(
                     "SELECT commit_json FROM runtime.transcript_projection_commits WHERE commit_id=$1",
@@ -510,12 +568,6 @@ impl TranscriptProjectionStorePort for PostgresRuntimeStore {
                     commit.commit_id
                 ));
             }
-            let current = tx
-                .query_opt(
-                    "SELECT source_high_water,invalidation_reason FROM runtime.transcript_projection_heads WHERE session_id=$1 AND projection_version=$2 AND projection_generation=$3 FOR UPDATE",
-                    &[&commit.session_id, &commit.projection_version, &commit.projection_generation],
-                )
-                .map_err(|error| format!("load transcript projection head failed: {error}"))?;
             let current_high_water = match current {
                 Some(row) if row.get::<_, Option<String>>(1).is_some() => {
                     return Err(format!(
@@ -524,14 +576,6 @@ impl TranscriptProjectionStorePort for PostgresRuntimeStore {
                     ));
                 }
                 Some(row) => row.get::<_, i64>(0),
-                None if expected == 0 => {
-                    tx.execute(
-                        "INSERT INTO runtime.transcript_projection_heads(session_id,projection_version,projection_generation,source_high_water,invalidation_reason) VALUES($1,$2,$3,0,NULL)",
-                        &[&commit.session_id, &commit.projection_version, &commit.projection_generation],
-                    )
-                    .map_err(|error| format!("create transcript projection head failed: {error}"))?;
-                    0
-                }
                 None => {
                     return Err(
                         "transcript projection sourceHighWater conflict: projection head is missing"

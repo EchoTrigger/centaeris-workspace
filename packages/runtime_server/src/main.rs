@@ -1934,31 +1934,28 @@ fn terminalize_agent_run_failure(
     );
     let mut committed_sequence = load_existing_session_sequence(job_store, agent_run_start)?;
     let assistant_text = AssistantTextProjection::default();
-    let mut events = if committed_sequence.is_empty() {
-        started_session_records(agent_run_start, &mut committed_sequence, now_ms()?)?
-    } else {
-        Vec::new()
-    };
-    events.extend(failed_session_records(
+    let events = failed_session_records(
         agent_run_start,
         transition_reason,
         &assistant_text,
         &mut committed_sequence,
         now_ms()?,
-    )?);
-    let receipt = append_agent_run_session_records(
-        runtime,
-        &session_log,
-        agent_run_start,
-        events.as_slice(),
-        &RuntimeJobLeaseFence {
-            job_id: lifecycle_job_id.to_string(),
-            job_kind: AGENT_RUN_LIFECYCLE_JOB_KIND.to_string(),
-            lease_owner: lifecycle_lease_owner.to_string(),
-        },
     )?;
-    let mut stream = None;
-    accept_session_commit(&mut committed_sequence, &mut stream, &receipt)?;
+    if !events.is_empty() {
+        let receipt = append_agent_run_session_records(
+            runtime,
+            &session_log,
+            agent_run_start,
+            events.as_slice(),
+            &RuntimeJobLeaseFence {
+                job_id: lifecycle_job_id.to_string(),
+                job_kind: AGENT_RUN_LIFECYCLE_JOB_KIND.to_string(),
+                lease_owner: lifecycle_lease_owner.to_string(),
+            },
+        )?;
+        let mut stream = None;
+        accept_session_commit(&mut committed_sequence, &mut stream, &receipt)?;
+    }
     Ok(AgentRunStepOutcome {
         retry_at_ms: None,
         disposition: "terminal",
@@ -2745,13 +2742,28 @@ fn execute_agent_run(
             None,
             started_at_ms,
         )?);
-        let receipt = append_agent_run_session_records(
-            runtime.as_ref(),
-            &session_log,
-            &agent_run_start,
-            events.as_slice(),
-            &terminal_lease_fence,
-        )?;
+        let receipt = if matches!(
+            agent_run_start.tail_action,
+            AgentRunTailAction::RewriteLastUser { .. }
+        ) {
+            append_agent_run_session_records(
+                runtime.as_ref(),
+                &session_log,
+                &agent_run_start,
+                events.as_slice(),
+                &terminal_lease_fence,
+            )?
+        } else {
+            commit_new_user_turn_admission(
+                job_store.as_ref(),
+                &session_log,
+                &agent_runtime,
+                &agent_run_start,
+                events.as_slice(),
+                &terminal_lease_fence,
+                started_at_ms,
+            )?
+        };
         accept_session_commit(
             &mut committed_sequence,
             &mut *session_stream_guard(&session_stream)?,
@@ -4075,15 +4087,17 @@ fn commit_failed_agent_run(
         &mut committed_sequence,
         now_ms()?,
     )?;
-    let receipt = append_agent_run_session_records(
-        runtime,
-        session_log,
-        agent_run_start,
-        events.as_slice(),
-        lease_fence,
-    )?;
-    accept_session_commit(&mut committed_sequence, session_stream, &receipt)?;
-    *session_record_sequence = committed_sequence;
+    if !events.is_empty() {
+        let receipt = append_agent_run_session_records(
+            runtime,
+            session_log,
+            agent_run_start,
+            events.as_slice(),
+            lease_fence,
+        )?;
+        accept_session_commit(&mut committed_sequence, session_stream, &receipt)?;
+        *session_record_sequence = committed_sequence;
+    }
     Ok(AgentRunStepOutcome {
         retry_at_ms: None,
         disposition: "terminal",
@@ -4145,15 +4159,17 @@ fn commit_interrupted_agent_run(
             retryable,
         },
     )?;
-    let receipt = append_agent_run_session_records(
-        runtime,
-        session_log,
-        agent_run_start,
-        events.as_slice(),
-        lease_fence,
-    )?;
-    accept_session_commit(&mut committed_sequence, session_stream, &receipt)?;
-    *session_record_sequence = committed_sequence;
+    if !events.is_empty() {
+        let receipt = append_agent_run_session_records(
+            runtime,
+            session_log,
+            agent_run_start,
+            events.as_slice(),
+            lease_fence,
+        )?;
+        accept_session_commit(&mut committed_sequence, session_stream, &receipt)?;
+        *session_record_sequence = committed_sequence;
+    }
     Ok(AgentRunStepOutcome {
         retry_at_ms: None,
         disposition: "terminal",
@@ -4176,11 +4192,12 @@ fn interrupted_session_records(
     created_at_ms: i64,
     interruption: Interruption<'_>,
 ) -> Result<Vec<SequencedSessionRecord>, String> {
-    let mut events = if sequence.is_empty() {
-        started_session_records(agent_run_start, sequence, created_at_ms)?
-    } else {
-        Vec::new()
-    };
+    if sequence.is_empty() {
+        // Pre-admission cancellation/interruption: keep the input in the
+        // control plane and do not enter the model history.
+        return Ok(Vec::new());
+    }
+    let mut events = Vec::new();
     if assistant_text
         .responses
         .iter()
@@ -4353,6 +4370,70 @@ fn append_agent_run_session_records(
                 error
             }
         })
+}
+
+fn commit_new_user_turn_admission(
+    job_store: &PostgresRuntimeStore,
+    session_log: &PostgresSessionLog,
+    agent_runtime: &AgentRuntime<RuntimeStoreActor>,
+    agent_run_start: &AgentRunStart,
+    new_run_events: &[SequencedSessionRecord],
+    lease_fence: &RuntimeJobLeaseFence,
+    now_ms: i64,
+) -> Result<SessionCommitReceipt, String> {
+    let session_id = agent_run_start.authorization.session_id.as_str();
+    let session_head = job_store.with_client(|client| {
+        client
+            .query_one(
+                "SELECT COALESCE(MAX(sequence), 0) FROM app_core_sessionevent WHERE session_id=$1",
+                &[&session_id],
+            )
+            .map_err(|error| format!("load admission session head failed: {error}"))
+            .map(|row| row.get::<_, i32>(0))
+    })?;
+    let plan = if session_head == 0 {
+        centaeris_core::runtime::contracts::NewUserTurnClosurePlanV1 {
+            session_id: session_id.to_string(),
+            expected_session_sequence: 0,
+            trigger_agent_run_id: agent_run_start.agent_run_id.clone(),
+            trigger_turn_id: agent_run_start.turn_id.clone(),
+            evidence_preconditions: Vec::new(),
+            closures: Vec::new(),
+        }
+    } else {
+        let records = load_recovery_session_events(job_store, session_id, session_head)?;
+        agent_runtime.plan_new_user_turn_closures(
+            session_id,
+            records.as_slice(),
+            agent_run_start.agent_run_id.as_str(),
+            agent_run_start.turn_id.as_str(),
+            u64::try_from(session_head)
+                .map_err(|_| "admission session head is invalid".to_string())?,
+            now_ms,
+        )?
+    };
+    let mut closure_events = Vec::with_capacity(plan.closures.len());
+    for closure in &plan.closures {
+        closure_events.push(centaeris_core::runtime::canonical_tool_call_closure_record(
+            session_id,
+            closure.turn_id.as_str(),
+            closure.agent_run_id.as_str(),
+            &closure.call,
+            &closure.result,
+            closure.recovery.as_str(),
+            closure.call_event_id.as_deref(),
+            closure.trigger_agent_run_id.as_str(),
+            closure.trigger_turn_id.as_str(),
+            now_ms,
+        )?);
+    }
+    session_log.append_new_user_turn_admission_blocking(
+        agent_run_start.agent_run_id.as_str(),
+        new_run_events,
+        closure_events.as_slice(),
+        &plan,
+        lease_fence,
+    )
 }
 
 fn append_assistant_progress_records(
@@ -4605,11 +4686,13 @@ fn failed_session_records(
     sequence: &mut AgentRunSessionState,
     created_at_ms: i64,
 ) -> Result<Vec<SequencedSessionRecord>, String> {
-    let mut events = if sequence.is_empty() {
-        started_session_records(agent_run_start, sequence, created_at_ms)?
-    } else {
-        Vec::new()
-    };
+    if sequence.is_empty() {
+        // The new user turn was never admitted (no closure + first batch
+        // committed). A pre-admission failure must not fabricate model-history
+        // messages; it stays in the durable AgentRun control plane.
+        return Ok(Vec::new());
+    }
+    let mut events = Vec::new();
     if assistant_text
         .responses
         .iter()
@@ -4889,7 +4972,7 @@ fn load_existing_session_sequence(
     store.with_client(|client| {
     let rows = client
         .query(
-            "SELECT agent_run_sequence, \"eventId\", payload->>'type', session_id, payload::text FROM app_core_sessionevent WHERE agent_run_id = $1 ORDER BY agent_run_sequence",
+            "SELECT agent_run_sequence, \"eventId\", payload->>'type', session_id, payload::text FROM app_core_sessionevent WHERE agent_run_id = $1 AND session_level = false ORDER BY agent_run_sequence",
             &[&agent_run_start.agent_run_id],
         )
         .map_err(|error| format!("query existing session sequence failed: {error}"))?;
@@ -6385,7 +6468,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_failure_still_persists_user_message_and_terminal_error() {
+    fn pre_admission_startup_failure_writes_no_session_records() {
         let agent_run_start = agent_run_start();
         let failed = failed_session_records(
             &agent_run_start,
@@ -6395,22 +6478,9 @@ mod tests {
             1,
         )
         .expect("startup failure records");
-        assert_eq!(
-            failed
-                .iter()
-                .map(|item| item.event.event_type)
-                .collect::<Vec<_>>(),
-            vec![
-                SessionRecordType::AgentRunStarted,
-                SessionRecordType::UserMessage,
-                SessionRecordType::AgentRunFailed,
-            ]
-        );
-        assert_eq!(failed[1].event.payload["text"], "hello");
-        assert_eq!(
-            failed[2].event.payload["message"],
-            "AgentRun did not complete. Retry the request."
-        );
+        // The new user turn was never admitted, so nothing enters the model
+        // history; the failure stays in the AgentRun control plane.
+        assert!(failed.is_empty());
     }
 
     #[test]
@@ -6810,7 +6880,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_agent_run_before_sandbox_prepare_starts_then_interrupts() {
+    fn cancelled_agent_run_before_admission_writes_no_session_records() {
         let agent_run_start = agent_run_start();
         let mut sequence = agent_run_session_state(&agent_run_start);
         let cancelled = interrupted_session_records(
@@ -6827,19 +6897,8 @@ mod tests {
         )
         .expect("cancelled events");
 
-        assert_eq!(cancelled.len(), 3);
-        assert_eq!(
-            cancelled[0].event.event_type,
-            SessionRecordType::AgentRunStarted
-        );
-        assert_eq!(
-            cancelled[1].event.event_type,
-            SessionRecordType::UserMessage
-        );
-        assert_eq!(
-            cancelled[2].event.event_type,
-            SessionRecordType::AgentRunInterrupted
-        );
+        // Pre-admission cancellation must not enter the model history.
+        assert!(cancelled.is_empty());
     }
 
     #[test]
