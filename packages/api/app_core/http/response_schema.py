@@ -664,3 +664,20 @@ class AgentRunSupplementResponse(StrictSchema):
     supplement_id: str = Field(alias="supplementId")
     disposition: Literal["accepted", "duplicate"]
     queued_count: int = Field(alias="queuedCount", ge=0, le=8)
+
+
+class TranscriptPublishedArtifact(StrictSchema):
+    artifact_ref: str = Field(alias="artifactRef")
+    filename: str
+    download_url: str = Field(alias="downloadUrl")
+
+
+class TranscriptTurnMetadata(StrictSchema):
+    anchor_sequence: str = Field(alias="anchorSequence")
+    started_at_ms: int = Field(alias="startedAtMs")
+    completed_at_ms: int | None = Field(alias="completedAtMs")
+    artifacts: list[TranscriptPublishedArtifact]
+
+
+class TranscriptTurnMetadataResponse(StrictSchema):
+    turns: list[TranscriptTurnMetadata]

@@ -16,6 +16,7 @@ from app_core.execution_admission import queued_admission_error
 from app_core.agent_identity import validate_agent_id
 from app_core.models import (
     Agent,
+    Artifact,
     Session,
     SessionProject,
     ModelConfig,
@@ -71,6 +72,7 @@ from .response_schema import (
     SessionProjectsEnvelope,
     SessionContextUsageEnvelope,
     TranscriptContentRangeResponse,
+    TranscriptTurnMetadataResponse,
     AgentRunAcceptedResponse,
     AgentRunCancellationResponse,
     AgentRunSupplementResponse,
@@ -920,6 +922,37 @@ def session_transcript_content(request, session_id: str):
             "hasMore": end_offset < byte_length,
         }
     )
+
+
+@router.get("/sessions/{session_id}/transcript/turn-metadata", auth=session_auth,
+    response={200: TranscriptTurnMetadataResponse, **COMMON_ERROR_RESPONSES})
+def session_transcript_turn_metadata(request, session_id: str):
+    session = _authorized_transcript_session(request.user, session_id)
+    if session is None:
+        return _transcript_json_response({"error": "session_not_found"}, status=404)
+    values = request.GET.getlist("sequence")
+    if (set(request.GET) != {"sequence"} or not 1 <= len(values) <= 128
+            or not all(_canonical_waterline(value) for value in values)):
+        return _transcript_json_response({"error": "transcript_turn_metadata_query_invalid"}, status=400)
+    anchors = dict(SessionEvent.objects.filter(session=session,
+        sequence__in=[int(value) for value in values]).values_list("sequence", "agent_run_id"))
+    run_ids = set(anchors.values())
+    starts = dict(SessionEvent.objects.filter(session=session, agent_run_id__in=run_ids,
+        payload__type="user_message").values_list("agent_run_id", "createdAtMs"))
+    terminals = dict(SessionEvent.objects.filter(session=session, agent_run_id__in=run_ids,
+        payload__type__in={"agent_run_completed", "agent_run_failed", "agent_run_interrupted"},
+    ).values_list("agent_run_id", "createdAtMs"))
+    artifacts = {}
+    for artifact in Artifact.objects.filter(session=session, agent_run_id__in=run_ids,
+            status="published", deletedAt__isnull=True).order_by("publishedAt", "id"):
+        artifacts.setdefault(artifact.agent_run_id, []).append({
+            "artifactRef": f"artifact:{artifact.id}", "filename": artifact.safeFilename,
+            "downloadUrl": f"/api/artifacts/{artifact.id}/download",
+        })
+    times = [{"anchorSequence": str(sequence), "startedAtMs": starts[run_id],
+        "completedAtMs": terminals.get(run_id), "artifacts": artifacts.get(run_id, [])}
+        for sequence, run_id in sorted(anchors.items()) if run_id in starts]
+    return _transcript_json_response({"turns": times})
 
 
 @router.get(

@@ -10,7 +10,7 @@
     "lint": "npm --prefix ../.. run lint",
     "lint:hooks": "npm --prefix ../.. run lint:hooks",
     "lint:unused": "npm --prefix ../.. run lint:unused",
-    "test:unit": "node --test tests/unit/transcript-content-reader.test.mjs tests/unit/chat-runtime.test.mjs tests/unit/transcript-page-client.test.mjs tests/unit/transcript-golden.test.mjs tests/unit/transcript-no-full-history-fallback.test.mjs tests/unit/lint-config.test.mjs tests/unit/i18n.test.mjs tests/unit/citation-snapshot.test.mjs tests/unit/office-preview.test.mjs tests/unit/code-preview.test.mjs tests/unit/tool-group-title.test.mjs",
+    "test:unit": "node --test tests/unit/transcript-content-reader.test.mjs tests/unit/chat-runtime.test.mjs tests/unit/transcript-page-client.test.mjs tests/unit/transcript-golden.test.mjs tests/unit/transcript-no-full-history-fallback.test.mjs tests/unit/lint-config.test.mjs tests/unit/i18n.test.mjs tests/unit/citation-snapshot.test.mjs tests/unit/office-preview.test.mjs tests/unit/code-preview.test.mjs tests/unit/tool-group-title.test.mjs tests/unit/work-progress.test.mjs",
     "typecheck": "tsc -p tsconfig.json --pretty false"
   },
   "dependencies": {
