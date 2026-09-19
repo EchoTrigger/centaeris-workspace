@@ -821,5 +821,10 @@
   "appRoute.streamReconnecting": "Reconnecting… Your conversation remains available.",
   "appRoute.streamPaused": "Live updates paused. You can keep reading or reconnect.",
   "appRoute.retryStream": "Reconnect",
+  "workProgress.working": "Working",
+  "workProgress.worked": "Worked",
+  "workProgress.hours": "{{count}}h",
+  "workProgress.minutes": "{{count}}m",
+  "workProgress.seconds": "{{count}}s",
   "appRoute.runNotAdmitted": "The task could not start. Your unsent message has been restored; please try again."
 }

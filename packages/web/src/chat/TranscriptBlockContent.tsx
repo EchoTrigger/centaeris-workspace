@@ -5,7 +5,6 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
-  type ComponentType,
 } from "react";
 import {
   Bot,
@@ -20,7 +19,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useTranslation } from "../i18n";
-import { MarkdownContent, StreamingMarkdownContent } from "./MarkdownContent";
+import { MarkdownContent } from "./MarkdownContent";
 import { reasoningPreview } from "./reasoningPreview";
 import { useStickToBottom } from "./useStickToBottom";
 import { TranscriptContentReader } from "./transcriptContentReader";
@@ -31,10 +30,6 @@ import type { TranscriptContentRef } from "./transcriptContract";
 import type { TranscriptToolOperationRegistry } from "./transcriptToolOperations";
 import type { TranscriptLiveOverlay, TranscriptViewStore } from "./transcriptViewStore";
 
-const LiveMarkdownContent = StreamingMarkdownContent as ComponentType<{
-  text: string;
-  finalized?: boolean;
-}>;
 
 const TOOL_GROUP_ICONS: Record<ToolGroupCategory, LucideIcon> = {
   edit: SquarePen,
@@ -411,6 +406,13 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
       </div>
     );
   }
+  if (kind === "notice" && body.noticeType === "turn_supplement") {
+    return <div className="workspaceTranscriptBlock workspaceSupplement" data-block-id={block.blockId}>
+      {text === null
+        ? (reference ? <ReferencedContent store={store} reference={reference} mode="markdown" /> : null)
+        : <MarkdownContent text={text} />}
+    </div>;
+  }
   return (
     <div className="workspaceTranscriptBlock workspaceStageSummary" data-block-id={block.blockId}>
       {text === null
@@ -428,8 +430,9 @@ export const TranscriptLiveTail = memo(function TranscriptLiveTail({ live }: Rea
   const reasoningBodyRef = useStickToBottom<HTMLDivElement>(expanded);
   const reasoningText = live.reasoning?.text ?? "";
   const preview = reasoningText ? reasoningPreview(reasoningText) : "";
+  if (!reasoningText) return null;
   return (
-    <div className="workspaceTranscriptLive" data-block-id={`live:${live.messageId}`}>
+    <div className="workspaceTranscriptLive" data-block-id={`live:${live.messageId}:reasoning`}>
       {reasoningText ? (
         <div className="workspaceReasoning">
           <button
@@ -455,9 +458,6 @@ export const TranscriptLiveTail = memo(function TranscriptLiveTail({ live }: Rea
           ) : null}
         </div>
       ) : null}
-      {live.text ? <div className="workspaceAnswerText isStreaming">
-        <LiveMarkdownContent text={live.text} finalized={false} />
-      </div> : null}
     </div>
   );
 });

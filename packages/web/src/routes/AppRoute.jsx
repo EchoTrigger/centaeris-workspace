@@ -131,6 +131,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   const [pendingUserMessage, setPendingUserMessage] = useState(null);
   const pendingUserMessageRef = useRef(null);
   useEffect(() => { pendingUserMessageRef.current = pendingUserMessage; }, [pendingUserMessage]);
+  const [workTime, setWorkTime] = useState(null);
   const enterStartsNewLine = useEnterStartsNewLine(user.id);
   const [error, setError] = useState("");
   const [streamIssue, setStreamIssue] = useState(null);
@@ -412,6 +413,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         setPendingUserMessage(null);
         updateActiveTranscriptRun(null);
         setStreamIssue(null);
+        setWorkTime(null);
         setError(t("appRoute.runNotAdmitted"));
         return;
       }
@@ -513,6 +515,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       signal: abortController.signal,
       onCommittedEvent: (event) => toolOperations.applyEvent(event),
       onTerminal: () => {
+        if (activeSessionIdRef.current === targetSessionId) setWorkTime((value) => value ? { ...value, completedAtMs: Date.now() } : null);
         if (activeSessionIdRef.current === targetSessionId) updateActiveTranscriptRun(null);
       },
     });
@@ -738,7 +741,9 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     setError("");
     if (targetSessionId === "new") composerStartRectRef.current = composerRef.current?.getBoundingClientRect() || null;
     const baselineUserBlocks = transcriptList.blockIds.filter((blockId) => blockId.endsWith(":user")).length;
-    setPendingUserMessage({ text, baselineUserBlocks });
+    const startedAtMs = Date.now();
+    setWorkTime({ startedAtMs, sessionId: targetSessionId });
+    setPendingUserMessage({ text, baselineUserBlocks, startedAtMs });
     setDraft("");
     try {
       let body;
@@ -789,6 +794,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         ),
       );
       if (!sessionId) {
+        setWorkTime((value) => value ? { ...value, sessionId: resolvedSessionId } : null);
         acceptedSessionRef.current = { sessionId: resolvedSessionId, agentRunId: messageData.agentRunId };
         acceptedRouteSessionIdRef.current = resolvedSessionId;
         setSessionId(resolvedSessionId);
@@ -945,7 +951,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     });
   }
 
-  // biome-ignore lint/correctness/noUnusedVariables: The existing authorized preview remains until transcript resource rows are bound.
+  // biome-ignore lint/correctness/noUnusedVariables: Citation preview awaits transcript resource binding.
   async function showCitation(citation, origin) {
     const requestId = previewRequestIdRef.current + 1;
     previewRequestIdRef.current = requestId;
@@ -1014,7 +1020,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     }
   }
 
-  // biome-ignore lint/correctness/noUnusedVariables: The existing authorized preview remains until transcript resource rows are bound.
   async function showArtifact(artifact, origin) {
     const requestId = previewRequestIdRef.current + 1;
     previewRequestIdRef.current = requestId;
@@ -1285,7 +1290,11 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
             loadingOlderHistory={loadingOlderHistory}
             onLoadOlderHistory={loadOlderHistory}
             emptyState={isHome ? <HomePlane agent={activeAgent} /> : null}
+            onShowArtifact={(artifact) => showArtifact(artifact, "conversation")}
             pendingUserMessage={pendingUserMessage}
+            running={hasActiveAgentRun || sending}
+            startedAtMs={workTime?.sessionId === sessionId ? workTime.startedAtMs : undefined}
+            completedAtMs={workTime?.sessionId === sessionId ? workTime.completedAtMs : undefined}
           />
 
           {streamIssue?.sessionId === sessionId ? (
