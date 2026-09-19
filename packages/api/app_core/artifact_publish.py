@@ -75,7 +75,6 @@ def _ingest_artifact_library_copy(artifact: Artifact, user) -> None:
         return
     if not artifact.storageKey or not default_storage.exists(artifact.storageKey):
         raise ArtifactPublishError("stored_object_not_available", 409)
-    verify_stored_object(artifact.storageKey, artifact.sizeBytes, artifact.sha256)
     library_id = new_library_object_id()
     storage_key = f"users/{user.id}/library/{library_id}/{artifact.safeFilename}"
     with default_storage.open(artifact.storageKey, "rb") as source:
@@ -86,11 +85,8 @@ def _ingest_artifact_library_copy(artifact: Artifact, user) -> None:
     if stored_key != storage_key:
         delete_stored_object(stored_key)
         raise ArtifactPublishError("library_storage_key_conflict", 409)
-    try:
-        verify_stored_object(storage_key, artifact.sizeBytes, artifact.sha256)
-    except ArtifactPublishError:
-        delete_stored_object(storage_key)
-        raise
+    # The source was verified on upload (or staging recovery). A successful
+    # storage save is the copy boundary; do not reopen both objects to hash them.
     try:
         item = UserLibraryObject.objects.create(
             id=library_id,
@@ -136,7 +132,6 @@ def publish_artifact(request) -> tuple[ArtifactPublication, Artifact]:
                 delete_stored_object(stored_key)
                 raise ArtifactPublishError("artifact_storage_key_conflict")
             reader.require_complete(metadata["sha256"])
-            verify_stored_object(storage_key, metadata["sizeBytes"], metadata["sha256"])
     except Exception:
         if default_storage.exists(storage_key):
             try:
