@@ -2773,7 +2773,8 @@ impl centaeris_core::model::ModelClient for RecordingModelClient {
     fn generate<'a>(
         &'a self,
         _request: &'a centaeris_core::model::ModelClientRequest,
-    ) -> centaeris_core::model::ModelClientFuture<'a, centaeris_core::model::ModelClientResponse> {
+    ) -> centaeris_core::model::ModelClientFuture<'a, centaeris_core::model::ModelClientResponse>
+    {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async {
             Err(centaeris_core::model::ModelClientError::new(
@@ -3092,18 +3093,19 @@ fn postgres_transcript_generation_rotation_switches_pointer_without_deleting_old
             target_source_high_water: "9".to_string(),
         },
     );
-    assert!(rejected.is_err(), "rotation must require a built next generation");
+    assert!(
+        rejected.is_err(),
+        "rotation must require a built next generation"
+    );
 
     let disposition = store
-        .rotate_current_transcript_projection_generation(
-            TranscriptProjectionGenerationRotationV1 {
-                session_id: "session_rotate".to_string(),
-                projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
-                expected_current_generation: Some("generation-1".to_string()),
-                next_generation: "generation-2".to_string(),
-                target_source_high_water: "9".to_string(),
-            },
-        )
+        .rotate_current_transcript_projection_generation(TranscriptProjectionGenerationRotationV1 {
+            session_id: "session_rotate".to_string(),
+            projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
+            expected_current_generation: Some("generation-1".to_string()),
+            next_generation: "generation-2".to_string(),
+            target_source_high_water: "9".to_string(),
+        })
         .expect("rotate generation");
     assert!(matches!(
         disposition,
@@ -3173,7 +3175,9 @@ fn postgres_new_user_turn_admission_commits_closure_and_run_atomically() {
 
     let old_run = "agent_run_admission_old";
     let mut old = AgentRunSessionState::new(session_id, old_run).expect("old run state");
-    let mut old_records = old.start(old_run, "旧请求", Vec::new(), 1).expect("old start");
+    let mut old_records = old
+        .start(old_run, "旧请求", Vec::new(), 1)
+        .expect("old start");
     let call = ToolCallEnvelope {
         id: "call_admission".to_string(),
         name: "bash".to_string(),
@@ -3194,7 +3198,12 @@ fn postgres_new_user_turn_admission_commits_closure_and_run_atomically() {
     old_records.push(
         old.record(
             centaeris_core::session::failed_agent_run_record(
-                session_id, "turn_old", old_run, "execution_failed", "boom", 3,
+                session_id,
+                "turn_old",
+                old_run,
+                "execution_failed",
+                "boom",
+                3,
             )
             .expect("failed record"),
         )
@@ -3216,8 +3225,9 @@ fn postgres_new_user_turn_admission_commits_closure_and_run_atomically() {
         tool_call_id: call.id.clone(),
         tool_name: call.name.clone(),
         status: "blocked".to_string(),
-        content: "The previous unpaired tool call was closed before execution; it was not replayed."
-            .to_string(),
+        content:
+            "The previous unpaired tool call was closed before execution; it was not replayed."
+                .to_string(),
         details: serde_json::json!({"schema": "tool_result_tombstone_v1", "status": "blocked"}),
         facts: Vec::new(),
         error: None,
@@ -3254,7 +3264,9 @@ fn postgres_new_user_turn_admission_commits_closure_and_run_atomically() {
     .expect("closure record");
 
     let mut next = AgentRunSessionState::new(session_id, new_run).expect("new run state");
-    let new_records = next.start(new_run, "继续", Vec::new(), 5).expect("new start");
+    let new_records = next
+        .start(new_run, "继续", Vec::new(), 5)
+        .expect("new start");
     let plan = NewUserTurnClosurePlanV1 {
         session_id: session_id.to_string(),
         expected_session_sequence: 4,
@@ -3330,7 +3342,8 @@ fn postgres_new_user_turn_admission_commits_closure_and_run_atomically() {
     // A stale plan over an uncommitted batch is rejected: its expected head no
     // longer matches the confirmed session head.
     let stale_run = "agent_run_admission_stale";
-    let mut stale_state = AgentRunSessionState::new(session_id, stale_run).expect("stale run state");
+    let mut stale_state =
+        AgentRunSessionState::new(session_id, stale_run).expect("stale run state");
     let stale_records = stale_state
         .start(stale_run, "继续", Vec::new(), 8)
         .expect("stale start");
@@ -3343,13 +3356,7 @@ fn postgres_new_user_turn_admission_commits_closure_and_run_atomically() {
         closures: Vec::new(),
     };
     assert!(log
-        .append_new_user_turn_admission_blocking(
-            stale_run,
-            &stale_records,
-            &[],
-            &stale,
-            &fence,
-        )
+        .append_new_user_turn_admission_blocking(stale_run, &stale_records, &[], &stale, &fence,)
         .is_err());
 
     // The closure updates the original tool block in the session transcript,

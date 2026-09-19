@@ -509,3 +509,14 @@ test("optional tool detail failures do not block committed text or advance the c
   assert.equal(store.getBlockSnapshot("next").blockRevision, "1");
   assert.deepEqual(detailErrors, ["tool operation call binding mismatch"]);
 });
+
+
+test("admission failure restores control to the caller without recovery swallowing it", async () => {
+  const controller = { sessionId, agentRunId: "run:1", lastCursor: "0-0",
+    acceptWithBackpressure: async () => {}, whenIdle: async () => {}, setCursor() {} };
+  await assert.rejects(streamWorkspaceAgentRun({ controller, signal: new AbortController().signal,
+    onConnection() {}, request: async () => { throw new ApiError("agent_run_not_admitted", 409); },
+    recover: async () => { throw new Error("must not recover an unadmitted run"); },
+    wait: async () => { throw new Error("must not wait"); },
+  }), /agent_run_not_admitted/);
+});
