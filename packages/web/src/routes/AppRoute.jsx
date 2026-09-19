@@ -128,8 +128,10 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   const [pendingAttachmentIds, setPendingAttachmentIds] = useState([]);
   const [pendingUploadFiles, setPendingUploadFiles] = useState([]);
   const [draft, setDraft] = useState("");
+  const [pendingUserMessage, setPendingUserMessage] = useState(null);
   const enterStartsNewLine = useEnterStartsNewLine(user.id);
   const [error, setError] = useState("");
+  const [streamIssue, setStreamIssue] = useState(null);
   const [sending, setSending] = useState(false);
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [attachmentPreview, setAttachmentPreview] = useState(null);
@@ -401,22 +403,45 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   function handleAgentRunStreamFailure(errorValue, agentRunId) {
     if (errorValue?.name === "AbortError") return;
     if (activeTranscriptRunRef.current?.agentRunId === agentRunId) {
-      setError(t("appRoute.someConversationsAreTemporarilyUnavailableRefreshThePageAnd"));
+      console.error("Transcript stream stopped", { agentRunId, error: errorValue });
+      setStreamIssue({ sessionId: activeSessionIdRef.current, agentRunId, error: errorValue, reconnecting: false });
     }
   }
 
-  async function refreshAgentRunResumeState(agentRunId, _targetWorkspaceId, targetSessionId, identity) {
-    const sourceHighWater = transcriptStore.getListSnapshot().appliedSourceHighWater;
-    const envelope = await transcriptTransport.loadActiveAgentRun({
-      ...identity,
+  async function reloadTranscriptStream(agentRunId, targetSessionId, signal) {
+    const tail = await transcriptTransport.loadTail(targetSessionId, signal);
+    const identity = {
       sessionId: targetSessionId,
-      sourceHighWater,
-    }, streamAbortRef.current?.signal || new AbortController().signal);
-    if (!envelope.agentRun || envelope.agentRun.agentRunId !== agentRunId) {
-      return { status: "completed", streamCursor: "0-0" };
+      projectionVersion: tail.projectionVersion,
+      projectionGeneration: tail.projectionGeneration,
+    };
+    const envelope = await transcriptTransport.loadActiveAgentRun({
+      ...identity, sourceHighWater: tail.sourceHighWater,
+    }, signal);
+    if (signal.aborted || activeSessionIdRef.current !== targetSessionId) {
+      throw new DOMException("Aborted", "AbortError");
     }
+    // Keep the displayed snapshot until both replacement reads have succeeded.
+    const viewEpoch = transcriptStore.openTail(tail);
     updateActiveTranscriptRun(envelope.agentRun);
-    return envelope.agentRun;
+    setStreamIssue(null);
+    if (!envelope.agentRun || envelope.agentRun.agentRunId !== agentRunId) return null;
+    return { identity, viewEpoch, cursor: envelope.agentRun.streamCursor };
+  }
+
+  async function retryTranscriptStream() {
+    const issue = streamIssue;
+    if (!issue || issue.reconnecting || issue.sessionId !== activeSessionIdRef.current) return;
+    stopActiveStream();
+    const abortController = new AbortController();
+    streamAbortRef.current = abortController;
+    setStreamIssue({ ...issue, reconnecting: true });
+    try {
+      const resume = await reloadTranscriptStream(issue.agentRunId, issue.sessionId, abortController.signal);
+      if (resume) await connectAgentRun(issue.agentRunId, workspace.id, issue.sessionId, abortController, resume);
+    } catch (errorValue) {
+      handleAgentRunStreamFailure(errorValue, issue.agentRunId);
+    }
   }
 
   async function refreshSessions(targetWorkspaceId) {
@@ -424,6 +449,20 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     const data = await response.json();
     setSessions(data.sessions);
     return data.sessions;
+  }
+
+  async function refreshAgentRunResumeState(agentRunId, _targetWorkspaceId, targetSessionId) {
+    const snapshot = transcriptStore.getListSnapshot();
+    const envelope = await transcriptTransport.loadActiveAgentRun({
+      sessionId: targetSessionId,
+      projectionVersion: snapshot.projectionVersion,
+      projectionGeneration: snapshot.projectionGeneration,
+      sourceHighWater: snapshot.appliedSourceHighWater,
+    }, streamAbortRef.current?.signal || new AbortController().signal);
+    if (activeSessionIdRef.current === targetSessionId
+      && activeTranscriptRunRef.current?.agentRunId === agentRunId) {
+      updateActiveTranscriptRun(envelope.agentRun);
+    }
   }
 
   async function updateSession(targetSessionId, metadata) {
@@ -453,12 +492,12 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     if (!resume.identity || !Number.isInteger(resume.viewEpoch)) {
       throw new Error("transcript stream identity is missing");
     }
-    const controller = new WorkspaceTranscriptController({
+    const createController = (snapshot) => new WorkspaceTranscriptController({
       store: transcriptStore,
-      viewEpoch: resume.viewEpoch,
-      identity: resume.identity,
+      viewEpoch: snapshot.viewEpoch,
+      identity: snapshot.identity,
       agentRunId,
-      initialCursor: resume.cursor || "0-0",
+      initialCursor: snapshot.cursor || "0-0",
       transport: transcriptTransport,
       signal: abortController.signal,
       onCommittedEvent: (event) => toolOperations.applyEvent(event),
@@ -466,26 +505,36 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         if (activeSessionIdRef.current === targetSessionId) updateActiveTranscriptRun(null);
       },
     });
+    let controller = createController(resume);
     chatControllerRef.current = controller;
     let streamCompleted = false;
     try {
       await streamWorkspaceAgentRun({
         controller,
         signal: abortController.signal,
-        onConnection: () => {},
-        refreshResumeState: () => refreshAgentRunResumeState(
-          agentRunId,
-          targetWorkspaceId,
-          targetSessionId,
-          resume.identity,
-        ),
+        onConnection: (connection) => {
+          if (abortController.signal.aborted || activeSessionIdRef.current !== targetSessionId) return;
+          setStreamIssue(connection === "reconnecting"
+            ? { sessionId: targetSessionId, agentRunId, reconnecting: true } : null);
+        },
+        recover: async (errorValue) => {
+          console.error("Transcript stream resynchronizing", {
+            sessionId: targetSessionId, agentRunId, cursor: controller.lastCursor, error: errorValue,
+          });
+          await controller.whenIdle().catch(() => {});
+          controller.dispose();
+          const snapshot = await reloadTranscriptStream(agentRunId, targetSessionId, abortController.signal);
+          if (!snapshot) return null;
+          controller = createController(snapshot);
+          chatControllerRef.current = controller;
+          return controller;
+        },
       });
       streamCompleted = true;
     } finally {
       try {
-        await controller.whenIdle();
         if (streamCompleted && !abortController.signal.aborted) {
-          updateActiveTranscriptRun(null);
+          if (activeTranscriptRunRef.current?.agentRunId === agentRunId) updateActiveTranscriptRun(null);
           try {
             const nextSessions = await refreshSessions(targetWorkspaceId);
             const current = nextSessions.find((item) => item.id === targetSessionId);
@@ -677,6 +726,9 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     const uploadFiles = pendingUploadFiles;
     setError("");
     if (targetSessionId === "new") composerStartRectRef.current = composerRef.current?.getBoundingClientRect() || null;
+    const baselineUserBlocks = transcriptList.blockIds.filter((blockId) => blockId.endsWith(":user")).length;
+    setPendingUserMessage({ text, baselineUserBlocks });
+    setDraft("");
     try {
       let body;
       if (targetSessionId === "new" && uploadFiles.length) {
@@ -716,7 +768,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         throw new Error("AgentRun acceptance identity is invalid");
       }
       const resolvedSessionId = messageData.sessionId;
-      setDraft("");
       setPendingAttachmentIds([]);
       setPendingUploadFiles([]);
       setSessions((items) =>
@@ -763,6 +814,8 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       }
     } catch (errorValue) {
       if (!isCurrentRequest()) return;
+      setPendingUserMessage(null);
+      setDraft(text);
       showStreamError(errorValue);
     } finally {
       if (isCurrentRequest()) setSending(false);
@@ -1030,6 +1083,11 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       { transform: "translate(0, 0)" },
     ], { duration: 320, easing: "cubic-bezier(.2, .8, .2, 1)" });
   }, [isHome]);
+  useEffect(() => {
+    if (!pendingUserMessage) return;
+    const userBlocks = transcriptList.blockIds.filter((blockId) => blockId.endsWith(":user")).length;
+    if (userBlocks > pendingUserMessage.baselineUserBlocks) setPendingUserMessage(null);
+  }, [pendingUserMessage, transcriptList.blockIds]);
   const updateBrowserPanelWidth = useCallback((widthPx) => {
     const maxWidthPx = Math.max(480, Math.floor(window.innerWidth * 0.75));
     setBrowserPanelWidthPx(Math.min(maxWidthPx, Math.max(480, Math.round(widthPx))));
@@ -1197,7 +1255,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       </header>
 
       <section className="workspaceChatColumn">
-        {error || groupedSessions.projectionError ? <div className="errorBanner" role="alert">{error || t("appRoute.someConversationsAreTemporarilyUnavailableRefreshThePageAnd")}</div> : null}
+        {error ? <div className="errorBanner" role="alert">{error}</div> : null}
 
         <div className={`workspaceConversationPlane ${isHome ? "isEmpty" : ""}`}>
           {transcriptManagedBytes >= TRANSCRIPT_MEMORY_WARNING_BYTES ? (
@@ -1216,8 +1274,17 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
             loadingOlderHistory={loadingOlderHistory}
             onLoadOlderHistory={loadOlderHistory}
             emptyState={isHome ? <HomePlane agent={activeAgent} /> : null}
+            pendingUserMessage={pendingUserMessage}
           />
 
+          {streamIssue?.sessionId === sessionId ? (
+            <div className="transcriptStreamStatus" role="status">
+              {t(streamIssue.reconnecting ? "appRoute.streamReconnecting" : "appRoute.streamPaused")}
+              {!streamIssue.reconnecting ? (
+                <button type="button" onClick={() => void retryTranscriptStream()}>{t("appRoute.retryStream")}</button>
+              ) : null}
+            </div>
+          ) : null}
           <WorkspaceComposer
             formRef={composerRef}
             fileInputRef={fileInputRef}

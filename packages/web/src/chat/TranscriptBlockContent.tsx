@@ -22,6 +22,7 @@ import {
 import { useTranslation } from "../i18n";
 import { MarkdownContent, StreamingMarkdownContent } from "./MarkdownContent";
 import { reasoningPreview } from "./reasoningPreview";
+import { useStickToBottom } from "./useStickToBottom";
 import { TranscriptContentReader } from "./transcriptContentReader";
 import { loadTranscriptContentRange } from "./transcriptContentRanges";
 import { TranscriptReferencedContent } from "./TranscriptReferencedContent";
@@ -106,6 +107,7 @@ function TranscriptReasoning({ store, body }: Readonly<{
 }>) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
+  const bodyRef = useStickToBottom<HTMLDivElement>(expanded);
   const { text, reference } = textSource(body);
   const running = body.status === "queued" || body.status === "running";
   const label = running ? t("reasoningBlock.thinking") : t("reasoningBlock.thoughts");
@@ -129,7 +131,7 @@ function TranscriptReasoning({ store, body }: Readonly<{
         <ChevronDown className={`workspaceActivityGroupChevron ${expanded ? "isExpanded" : ""}`} aria-hidden="true" />
       </button>
       {expanded ? (
-        <div className="workspaceReasoningBody" role="region" aria-label={t("reasoningBlock.thinkingContent")} tabIndex={0}>
+        <div className="workspaceReasoningBody" role="region" aria-label={t("reasoningBlock.thinkingContent")} tabIndex={0} ref={bodyRef}>
           {text === null
             ? (reference ? <ReferencedContent store={store} reference={reference} mode="markdown" /> : null)
             : <MarkdownContent text={text} />}
@@ -422,15 +424,35 @@ export const TranscriptLiveTail = memo(function TranscriptLiveTail({ live }: Rea
   live: TranscriptLiveOverlay;
 }>) {
   const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const reasoningBodyRef = useStickToBottom<HTMLDivElement>(expanded);
+  const reasoningText = live.reasoning?.text ?? "";
+  const preview = reasoningText ? reasoningPreview(reasoningText) : "";
   return (
     <div className="workspaceTranscriptLive" data-block-id={`live:${live.messageId}`}>
-      {live.reasoning?.text ? (
+      {reasoningText ? (
         <div className="workspaceReasoning">
-          <div className="workspaceActivityGroup" role="status">
+          <button
+            type="button"
+            className="workspaceActivityGroup"
+            aria-label={t("reasoningBlock.thinking")}
+            aria-expanded={expanded}
+            onClick={() => setExpanded((value) => !value)}
+          >
             <Brain aria-hidden="true" />
             <span className="statusShimmer">{t("reasoningBlock.thinking")}</span>
-          </div>
-          <div className="workspaceReasoningBody"><MarkdownContent text={live.reasoning.text} /></div>
+            {!expanded && preview ? (
+              <span className="reasoningPreview" aria-hidden="true">
+                <span className="reasoningPreviewText">{preview}</span>
+              </span>
+            ) : null}
+            <ChevronDown className={`workspaceActivityGroupChevron ${expanded ? "isExpanded" : ""}`} aria-hidden="true" />
+          </button>
+          {expanded ? (
+            <div className="workspaceReasoningBody" role="region" aria-label={t("reasoningBlock.thinkingContent")} tabIndex={0} ref={reasoningBodyRef}>
+              <MarkdownContent text={reasoningText} />
+            </div>
+          ) : null}
         </div>
       ) : null}
       {live.text ? <div className="workspaceAnswerText isStreaming">

@@ -81,6 +81,14 @@ history. The browser consumes API projections and never reads Redis directly.
 
 ## New user turn admission
 
+The web transcript keeps its last readable snapshot when live updates fail.
+Optional tool-detail projection cannot block canonical transcript patches.
+Stream recovery reads a validated tail and active-run cursor before replacing
+the view, then reconnects with bounded backoff; it never replays tool execution.
+After repeated failures, only the current conversation offers a reconnect action.
+Errors retain their original cause in developer diagnostics rather than becoming
+a generic page-wide failure. Invalid transport identities still fail validation.
+
 A new user turn is admitted only after Core has closed any unpaired tool call at
 the tail of the session history. Hosts persist the accepted input (prompt,
 attachments, identities), read the execution evidence, and ask Core for a
