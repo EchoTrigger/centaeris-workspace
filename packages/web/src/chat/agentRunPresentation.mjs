@@ -20,12 +20,6 @@ const TOOL_ICONS = {
   read: "search", taskOutput: "listChecks", webSearch: "globe",
 };
 
-const DYNAMIC_TOOL_ATOM = Object.freeze({
-  kind: "dynamicTool", title: "Used tools", detailRendererKind: "none",
-  runningVerb: "Using", completedVerb: "Used", failedVerb: "Tool failed",
-  pathOpenable: false, expandable: false, icon: "plug", detail: "none",
-});
-
 const identity = (text) => text;
 
 function webToolAtom(atom, translate = identity) {
@@ -41,7 +35,7 @@ export function activityToolAtom(toolName, providerId, translate = identity) {
     return toolAtom(toolName, translate);
   } catch (error) {
     if (!providerId || providerId === "centaeris.builtin" || !(error instanceof Error) || !error.message.startsWith("unsupported tool activity:")) throw error;
-    return webToolAtom(DYNAMIC_TOOL_ATOM, translate);
+    return webToolAtom(TOOL_ACTIVITY_DEFINITIONS.bash, translate);
   }
 }
 

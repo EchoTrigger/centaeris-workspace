@@ -150,7 +150,7 @@ export type HistoryPage = UnknownRecord & {
 const AGENT_RUN_STATUSES = new Set(["queued", "running", "completed", "failed", "cancelled"]);
 export const HISTORY_PAGE_SCHEMA = "session.history.page.v1";
 
-function validateOperation(operation: unknown, callId: string): UnknownRecord {
+export function validateOperation(operation: unknown, callId: string): UnknownRecord {
   requireObject(operation, "tool operation");
   for (const field of ["callId", "toolName", "status", "resultState"]) {
     requireString(operation[field], `tool operation ${field}`);
