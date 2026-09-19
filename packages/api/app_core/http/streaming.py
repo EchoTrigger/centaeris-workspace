@@ -2,7 +2,7 @@ from asgiref.sync import sync_to_async
 from django.http import JsonResponse
 from ninja import Router
 
-from app_core.models import AgentRun
+from app_core.models import AgentRun, SessionEvent
 from app_core.agent_run_stream import (
     parse_last_event_cursor,
     require_cursor_not_future,
@@ -77,4 +77,8 @@ def _prepare_agent_run_stream(
         require_cursor_not_future(agent_run, cursor)
     except ValueError as error:
         return JsonResponse({"error": str(error)}, status=400)
+    if agent_run.status in {"failed", "cancelled"} and not SessionEvent.objects.filter(
+        agent_run=agent_run, payload__type="user_message",
+    ).exists():
+        return JsonResponse({"error": "agent_run_not_admitted"}, status=409)
     return agent_run, cursor

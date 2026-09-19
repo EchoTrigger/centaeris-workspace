@@ -820,5 +820,6 @@
   "toolGroup.unknown": "Tool calls",
   "appRoute.streamReconnecting": "Reconnecting… Your conversation remains available.",
   "appRoute.streamPaused": "Live updates paused. You can keep reading or reconnect.",
-  "appRoute.retryStream": "Reconnect"
+  "appRoute.retryStream": "Reconnect",
+  "appRoute.runNotAdmitted": "The task could not start. Your unsent message has been restored; please try again."
 }
