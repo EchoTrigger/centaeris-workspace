@@ -3183,6 +3183,31 @@ class ApiVerticalSliceTests(TransactionTestCase):
         self.assertEqual(async_to_sync(agent_run_stream._load_terminal_sequence)(run.id), 0)
         self.assertFalse(SessionEvent.objects.filter(agent_run=run).exists())
 
+    def test_transcript_work_times_restore_the_original_run_clock(self):
+        owner = User.objects.create_user(username="work-clock@example.com", password="password")
+        workspace = Workspace.objects.create(name="Work clock", createdBy=owner)
+        workspace.members.add(owner)
+        session = create_session(workspace=workspace, owner=owner)
+        run = AgentRun.objects.create(workspace=workspace, session=session, user=owner,
+            modelConfig=ModelConfig.objects.create(displayName="Clock"), prompt="hello")
+        append_started(run)
+        append_completed(run)
+        artifact = Artifact.objects.create(workspace=workspace, session=session, agent_run=run,
+            createdBy=owner, displayName="Report", safeFilename="report.docx", sizeBytes=4,
+            sha256="sha256:" + "a" * 64, storageKey="report", status="published", publishedAt=timezone.now())
+        self.client.force_login(owner)
+        url = f"/api/sessions/{session.id}/transcript/turn-metadata"
+        response = self.client.get(url, {"sequence": ["2", "3"]})
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json(), {"turns": [
+            {"anchorSequence": str(sequence), "startedAtMs": 2, "completedAtMs": 4, "artifacts": [{"artifactRef": f"artifact:{artifact.id}", "filename": "report.docx",
+                "downloadUrl": f"/api/artifacts/{artifact.id}/download"}]}
+            for sequence in [2, 3]
+        ]})
+        self.assertEqual(self.client.get(url, {"sequence": ["2"] * 129}).status_code, 400)
+        workspace.members.remove(owner)
+        self.assertEqual(self.client.get(url, {"sequence": "2"}).status_code, 404)
+
     def test_transcript_active_run_uses_the_frozen_session_waterline_without_loading_history(self):
         owner = User.objects.create_user(username="active-transcript@example.com", password="password")
         workspace = Workspace.objects.create(name="Active transcript", createdBy=owner)

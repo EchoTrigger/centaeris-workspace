@@ -8,6 +8,9 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
+import { useTranscriptTurnMetadata } from "./useTranscriptTurnMetadata";
+import { WorkProgress } from "./WorkProgress";
+import { groupTranscriptTurns, shouldLoadEarlier } from "./transcriptTurns";
 import { ChevronDown } from "lucide-react";
 import { useTranslation } from "../i18n";
 import { TranscriptBlockRow, TranscriptLiveTail, TranscriptToolGroupCard } from "./TranscriptBlockContent";
@@ -15,7 +18,6 @@ import type { TranscriptToolOperationRegistry } from "./transcriptToolOperations
 import type { TranscriptViewStore } from "./transcriptViewStore";
 
 const END_TOLERANCE_PX = 2;
-const LOAD_OLDER_PX = 180;
 
 type Props = Readonly<{
   store: TranscriptViewStore;
@@ -25,7 +27,11 @@ type Props = Readonly<{
   loadingOlderHistory: boolean;
   onLoadOlderHistory(): Promise<void>;
   emptyState?: ReactNode;
-  pendingUserMessage?: Readonly<{ text: string }> | null;
+  pendingUserMessage?: Readonly<{ text: string; startedAtMs: number }> | null;
+  onShowArtifact?(artifact: import("./useTranscriptTurnMetadata").PublishedArtifact): void;
+  running?: boolean;
+  startedAtMs?: number;
+  completedAtMs?: number;
 }>;
 
 function useTranscriptList(store: TranscriptViewStore) {
@@ -77,11 +83,17 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   onLoadOlderHistory,
   emptyState,
   pendingUserMessage,
+  onShowArtifact,
+  running = false,
+  startedAtMs,
+  completedAtMs,
 }: Props) {
   const { t } = useTranslation();
   const { blockIds, hasOlder } = useTranscriptList(store);
   const live = useTranscriptLive(store);
-  const entries = useMemo(() => groupTranscriptBlocks(store, blockIds), [store, blockIds]);
+  const turns = useMemo(() => groupTranscriptTurns(blockIds, store.getBlockSnapshot), [store, blockIds]);
+  const turnAnchors = turns.map((turn) => store.getBlockSnapshot(turn.userBlockId ?? turn.processIds[0] ?? turn.answerIds[0])?.orderKey.sourceSequence ?? "");
+  const workTimes = useTranscriptTurnMetadata(sessionId, turnAnchors.filter(Boolean).join(","), running);
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const programmaticScrollRef = useRef(false);
@@ -169,6 +181,11 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
     upwardIntentRef.current = true;
     followingLatestRef.current = false;
     setFollowingLatest(false);
+    const element = scrollRef.current;
+    if (element && shouldLoadEarlier(element.scrollTop, hasOlder, loadingOlderHistory)) {
+      upwardIntentRef.current = false;
+      void requestOlder();
+    }
   }
 
   function handleScroll() {
@@ -186,7 +203,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
       followingLatestRef.current = atEnd;
       setFollowingLatest(atEnd);
     }
-    if (element.scrollTop <= LOAD_OLDER_PX && upwardIntentRef.current) {
+    if (shouldLoadEarlier(element.scrollTop, hasOlder, loadingOlderHistory) && upwardIntentRef.current) {
       upwardIntentRef.current = false;
       void requestOlder();
     }
@@ -237,28 +254,35 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
       >
         {loadingHistory ? <div className="workspaceEmptyState" role="status">{t("virtualAgentRunList.loadingConversation")}</div> : null}
         {!loadingHistory && blockIds.length === 0 && live === null ? (emptyState || null) : null}
-        {!loadingHistory && hasOlder ? (
-          <button
-            className="workspaceTranscriptLoadOlder"
-            type="button"
-            disabled={loadingOlderHistory}
-            onClick={() => { upwardIntentRef.current = false; void requestOlder(); }}
-          >
-            {loadingOlderHistory
-              ? t("virtualAgentRunList.loadingEarlierMessages")
-              : t("virtualAgentRunList.loadEarlierMessages")}
-          </button>
-        ) : null}
         <div className="workspaceTranscriptBlocks" ref={contentRef}>
-          {entries.map((entry) => entry.kind === "tool"
-            ? <TranscriptToolGroupCard store={store} blockIds={entry.blockIds} toolOperations={toolOperations} key={`tool:${entry.blockIds[0]}`} />
-            : <TranscriptBlockRow store={store} blockId={entry.blockId} key={entry.blockId} />)}
+          {turns.map((turn, index) => {
+            const isLast = index === turns.length - 1 && !pendingUserMessage;
+            const turnLive = isLast ? live : null;
+            const time = workTimes.get(turnAnchors[index]);
+            return <div className="workspaceTranscriptTurn" key={turn.id}>
+              {turn.userBlockId ? <TranscriptBlockRow store={store} blockId={turn.userBlockId} /> : null}
+              <WorkProgress running={isLast && running} finalStarted={turn.answerIds.length > 0}
+                startedAtMs={time?.startedAtMs ?? (isLast ? startedAtMs : undefined)} completedAtMs={time?.completedAtMs ?? (isLast ? completedAtMs : undefined)}>
+                {groupTranscriptBlocks(store, turn.processIds).map((entry) => entry.kind === "tool"
+                  ? <TranscriptToolGroupCard store={store} blockIds={entry.blockIds} toolOperations={toolOperations} key={`tool:${entry.blockIds[0]}`} />
+                  : <TranscriptBlockRow store={store} blockId={entry.blockId} key={entry.blockId} />)}
+                {turnLive ? <TranscriptLiveTail live={turnLive} /> : null}
+              </WorkProgress>
+              {turn.answerIds.map((blockId) => <TranscriptBlockRow store={store} blockId={blockId} key={blockId} />)}
+              {time?.artifacts.length ? <div className="workspaceArtifactInline" aria-label={t("agentRunRow.generatedFiles")}>
+                {time.artifacts.map((artifact) => <span className="workspaceArtifactInlineRow" key={artifact.artifactRef}>
+                  <span className="workspaceArtifactPlus" aria-hidden="true">+</span>
+                  <a href={artifact.downloadUrl} onClick={onShowArtifact ? (event) => { event.preventDefault(); onShowArtifact(artifact); } : undefined}>{artifact.filename}</a>
+                </span>)}
+              </div> : null}
+            </div>;
+          })}
           {pendingUserMessage ? (
             <div className="workspaceTranscriptBlock workspaceTranscriptUser" data-block-id="pending:user">
               <div className="workspaceUserMessage">{pendingUserMessage.text}</div>
             </div>
           ) : null}
-          {live === null ? null : <TranscriptLiveTail live={live} />}
+          {pendingUserMessage ? <WorkProgress running finalStarted={false} startedAtMs={pendingUserMessage.startedAtMs} /> : null}
         </div>
       </div>
       {!followingLatest && (blockIds.length > 0 || live !== null) ? (
