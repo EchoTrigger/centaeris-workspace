@@ -1,22 +1,19 @@
 type Range = Readonly<{ content: string; startOffset: string; endOffset: string; hasMore: boolean }>;
-type Snapshot = Range & Readonly<{ loading: boolean; error: boolean; hasPrevious: boolean }>;
+type Snapshot = Readonly<{ content: string; loading: boolean; error: boolean; hasMore: boolean }>;
+
+// Tool output can be arbitrarily large. Stop automatic continuation once this
+// many bytes have been read; the caller still holds what was already loaded.
+const MAX_ACCUMULATED_BYTES = 16 * 1024 * 1024;
 
 export class TranscriptContentReader {
-  private snapshot: Snapshot = {
-    content: "", startOffset: "0", endOffset: "0", hasMore: true,
-    loading: false, error: false, hasPrevious: false,
-  };
+  private snapshot: Snapshot = { content: "", loading: false, error: false, hasMore: true };
   private readonly listeners = new Set<() => void>();
   private readonly controller = new AbortController();
-  private readonly offsets = ["0"];
-  private index = 0;
-  private requestedIndex = 0;
+  private endOffset = "0";
   private readonly read: (offset: string, signal: AbortSignal) => Promise<Range>;
-  private readonly mode: "text" | "output";
 
-  constructor(read: (offset: string, signal: AbortSignal) => Promise<Range>, mode: "text" | "output") {
+  constructor(read: (offset: string, signal: AbortSignal) => Promise<Range>) {
     this.read = read;
-    this.mode = mode;
   }
 
   getSnapshot = () => this.snapshot;
@@ -31,44 +28,40 @@ export class TranscriptContentReader {
     this.listeners.forEach((listener) => listener());
   }
 
-  async load(index = this.requestedIndex) {
-    if (this.snapshot.loading || this.controller.signal.aborted) return;
-    this.requestedIndex = index;
+  async loadMore() {
+    if (this.snapshot.loading || this.controller.signal.aborted || !this.snapshot.hasMore) return;
+    if (BigInt(this.endOffset) >= BigInt(MAX_ACCUMULATED_BYTES)) {
+      this.publish({ hasMore: false });
+      return;
+    }
     this.publish({ loading: true, error: false });
     try {
-      let offset = this.offsets[index];
-      const parts: string[] = [];
-      while (true) {
-        const page = await this.read(offset, this.controller.signal);
-        if (this.controller.signal.aborted) return;
-        if (page.startOffset !== offset || (page.hasMore && BigInt(page.endOffset) <= BigInt(offset))) {
-          throw new Error("transcript content continuation made no progress");
-        }
-        if (this.mode === "output") {
-          this.index = index;
-          this.publish({ ...page, hasPrevious: index > 0 });
-          break;
-        }
-        parts.push(page.content);
-        if (!page.hasMore) {
-          // Transport chunks are not Markdown boundaries. Publish one complete document.
-          this.publish({ ...page, content: parts.join(""), startOffset: "0" });
-          break;
-        }
-        offset = page.endOffset;
+      const page = await this.read(this.endOffset, this.controller.signal);
+      if (this.controller.signal.aborted) return;
+      if (page.startOffset !== this.endOffset
+        || (page.hasMore && BigInt(page.endOffset) <= BigInt(this.endOffset))) {
+        throw new Error("transcript content continuation made no progress");
       }
+      this.endOffset = page.endOffset;
+      this.publish({
+        content: this.snapshot.content + page.content,
+        hasMore: page.hasMore,
+        loading: false,
+      });
     } catch {
-      this.publish({ error: true });
-    } finally {
-      this.publish({ loading: false });
+      if (this.controller.signal.aborted) return;
+      this.publish({ loading: false, error: true });
     }
   }
-  async next() {
-    if (this.snapshot.loading || !this.snapshot.hasMore) return;
-    this.offsets[this.index + 1] = this.snapshot.endOffset;
-    await this.load(this.index + 1);
+
+  async loadAll() {
+    while (this.snapshot.hasMore && !this.snapshot.error) {
+      await this.loadMore();
+    }
   }
-  async previous() {
-    if (this.index > 0) await this.load(this.index - 1);
+
+  retry() {
+    this.publish({ error: false });
+    return this.loadMore();
   }
 }

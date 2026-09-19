@@ -247,7 +247,7 @@ test("activity disclosures survive row recycling and refresh without changing ru
   assert.equal(store.getActivityDisclosures(agentRunId).size, 0);
 });
 
-test("contracted dynamic tools use generic presentation without weakening built-in loud-fail", () => {
+test("contracted dynamic tools present as commands without weakening built-in loud-fail", () => {
   const agentRun = validateHistoryPage(page(historyAgentRun([
     event("agent_run_started", 1, { userObjective: "research" }),
     event("user_message", 2, { messageId: "message:user", text: "research", attachments: [] }),
@@ -262,10 +262,10 @@ test("contracted dynamic tools use generic presentation without weakening built-
   ]))).agentRuns[0];
 
   const group = buildAgentRunSections(agentRun.messages, agentRun.activities)[0].items[0].group;
-  assert.equal(group.presentation.title, "Used tools");
+  assert.equal(group.presentation.title, "Ran commands");
   assert.deepEqual(runningActivityPresentation(agentRun.activities[0]), {
-    icon: "plug",
-    label: "Using 上海市中小学手机管理规范",
+    icon: "terminal",
+    label: "Running 上海市中小学手机管理规范",
   });
   assert.throws(() => runningActivityPresentation({
     ...agentRun.activities[0],

@@ -1,4 +1,4 @@
-import type { StreamEntry } from "./streamTypes.ts";
+import type { SessionStreamEvent, StreamEntry } from "./streamTypes.ts";
 import type { TranscriptViewStore } from "./transcriptViewStore.ts";
 import type { createWorkspaceTranscriptTransport } from "./transcriptTransport.ts";
 
@@ -31,6 +31,7 @@ type ControllerOptions = Readonly<{
   signal?: AbortSignal;
   scheduleFrame?: (callback: () => void | Promise<void>) => number;
   cancelFrame?: (frameId: number) => void;
+  onCommittedEvent?: (event: SessionStreamEvent) => void;
   onTerminal?: () => void;
 }>;
 
@@ -51,6 +52,7 @@ export class WorkspaceTranscriptController {
   readonly signal: AbortSignal;
   readonly scheduleFrame: NonNullable<ControllerOptions["scheduleFrame"]>;
   readonly cancelFrame: NonNullable<ControllerOptions["cancelFrame"]>;
+  readonly onCommittedEvent: NonNullable<ControllerOptions["onCommittedEvent"]>;
   readonly onTerminal: NonNullable<ControllerOptions["onTerminal"]>;
   lastCursor: string;
   receivedCursor: string;
@@ -73,6 +75,7 @@ export class WorkspaceTranscriptController {
     signal = new AbortController().signal,
     scheduleFrame = (callback) => requestAnimationFrame(() => { void callback(); }),
     cancelFrame = (frameId) => cancelAnimationFrame(frameId),
+    onCommittedEvent = () => {},
     onTerminal = () => {},
   }: ControllerOptions) {
     if (!agentRunId || !initialCursor || !identity.sessionId
@@ -90,6 +93,7 @@ export class WorkspaceTranscriptController {
     this.signal = signal;
     this.scheduleFrame = scheduleFrame;
     this.cancelFrame = cancelFrame;
+    this.onCommittedEvent = onCommittedEvent;
     this.onTerminal = onTerminal;
   }
 
@@ -135,6 +139,9 @@ export class WorkspaceTranscriptController {
     this.queueOffset += batch.length;
     try {
       if (batch.some((entry) => entry.item.kind === "committed")) {
+        for (const entry of batch) {
+          if (entry.item.kind === "committed") this.onCommittedEvent(entry.item.event);
+        }
         const afterSourceHighWater = this.store.getListSnapshot().appliedSourceHighWater;
         await this.transport.loadPatches({
           ...this.identity,
