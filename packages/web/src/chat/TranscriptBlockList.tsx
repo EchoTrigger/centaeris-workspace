@@ -1,6 +1,7 @@
 import {
   memo,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -8,7 +9,8 @@ import {
 } from "react";
 import { ChevronDown } from "lucide-react";
 import { useTranslation } from "../i18n";
-import { TranscriptBlockRow, TranscriptLiveTail } from "./TranscriptBlockContent";
+import { TranscriptBlockRow, TranscriptLiveTail, TranscriptToolGroupCard } from "./TranscriptBlockContent";
+import type { TranscriptToolOperationRegistry } from "./transcriptToolOperations";
 import type { TranscriptViewStore } from "./transcriptViewStore";
 
 const END_TOLERANCE_PX = 2;
@@ -16,6 +18,7 @@ const LOAD_OLDER_PX = 180;
 
 type Props = Readonly<{
   store: TranscriptViewStore;
+  toolOperations?: TranscriptToolOperationRegistry;
   sessionId: string | null;
   loadingHistory: boolean;
   loadingOlderHistory: boolean;
@@ -31,8 +34,41 @@ function useTranscriptLive(store: TranscriptViewStore) {
   return useSyncExternalStore(store.subscribeLive, store.getLiveSnapshot, store.getLiveSnapshot);
 }
 
+type TranscriptListEntry =
+  | Readonly<{ kind: "block"; blockId: string }>
+  | Readonly<{ kind: "tool"; blockIds: string[] }>;
+
+// Consecutive tool blocks share one card, mirroring how the desktop host
+// groups consecutive tool tasks.
+function groupTranscriptBlocks(
+  store: TranscriptViewStore,
+  blockIds: readonly string[],
+): TranscriptListEntry[] {
+  const entries: TranscriptListEntry[] = [];
+  let pendingTools: string[] = [];
+  const flushTools = () => {
+    if (pendingTools.length > 0) {
+      entries.push({ kind: "tool", blockIds: pendingTools });
+      pendingTools = [];
+    }
+  };
+  for (const blockId of blockIds) {
+    const block = store.getBlockSnapshot(blockId);
+    const body = block?.body as { kind?: unknown } | undefined;
+    if (body && body.kind === "tool") {
+      pendingTools.push(blockId);
+      continue;
+    }
+    flushTools();
+    entries.push({ kind: "block", blockId });
+  }
+  flushTools();
+  return entries;
+}
+
 export const TranscriptBlockList = memo(function TranscriptBlockList({
   store,
+  toolOperations,
   sessionId,
   loadingHistory,
   loadingOlderHistory,
@@ -42,6 +78,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   const { t } = useTranslation();
   const { blockIds, hasOlder } = useTranscriptList(store);
   const live = useTranscriptLive(store);
+  const entries = useMemo(() => groupTranscriptBlocks(store, blockIds), [store, blockIds]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const touchYRef = useRef<number | null>(null);
   const upwardIntentRef = useRef(false);
@@ -165,7 +202,9 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
           </button>
         ) : null}
         <div className="workspaceTranscriptBlocks">
-          {blockIds.map((blockId) => <TranscriptBlockRow store={store} blockId={blockId} key={blockId} />)}
+          {entries.map((entry) => entry.kind === "tool"
+            ? <TranscriptToolGroupCard store={store} blockIds={entry.blockIds} toolOperations={toolOperations} key={`tool:${entry.blockIds[0]}`} />
+            : <TranscriptBlockRow store={store} blockId={entry.blockId} key={entry.blockId} />)}
           {live === null ? null : <TranscriptLiveTail live={live} />}
         </div>
       </div>

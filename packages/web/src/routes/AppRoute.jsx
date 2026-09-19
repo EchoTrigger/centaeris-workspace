@@ -11,6 +11,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { useModalDialog } from "../components/useModalDialog";
 import { streamWorkspaceAgentRun } from "../chat/workspaceWebTransport";
 import { createTranscriptViewStore } from "../chat/transcriptViewStore";
+import { TranscriptToolOperationRegistry } from "../chat/transcriptToolOperations";
 import { createWorkspaceTranscriptTransport } from "../chat/transcriptTransport";
 import { WorkspaceTranscriptController } from "../chat/workspaceTranscriptController";
 import { TranscriptBlockList } from "../chat/TranscriptBlockList";
@@ -108,6 +109,9 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   const transcriptStoreRef = useRef(null);
   if (!transcriptStoreRef.current) transcriptStoreRef.current = createTranscriptViewStore();
   const transcriptStore = transcriptStoreRef.current;
+  const toolOperationsRef = useRef(null);
+  if (!toolOperationsRef.current) toolOperationsRef.current = new TranscriptToolOperationRegistry();
+  const toolOperations = toolOperationsRef.current;
   const transcriptTransportRef = useRef(null);
   if (!transcriptTransportRef.current) transcriptTransportRef.current = createWorkspaceTranscriptTransport();
   const transcriptTransport = transcriptTransportRef.current;
@@ -213,6 +217,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   }, []);
   const clearConversationProjection = useCallback(() => {
     transcriptStore.clear();
+    toolOperations.clear();
     clearTranscriptContentRangeCache();
     updateActiveTranscriptRun(null);
     olderHistoryRequestRef.current?.controller.abort();
@@ -220,7 +225,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     setAssets([]);
     setPendingAttachmentIds([]);
     setPendingUploadFiles([]);
-  }, [transcriptStore, updateActiveTranscriptRun]);
+  }, [transcriptStore, toolOperations, updateActiveTranscriptRun]);
   const stopActiveStream = useCallback(() => {
     streamAbortRef.current?.abort();
     chatControllerRef.current?.dispose();
@@ -334,6 +339,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     streamAbortRef.current = controller;
     let active = true;
     transcriptStore.clear();
+    toolOperations.clear();
     updateActiveTranscriptRun(null);
     setLoadingHistory(true);
     setError("");
@@ -385,7 +391,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       controller.abort();
       chatControllerRef.current?.dispose();
     };
-  }, [sessionId, workspace?.id, clearConversationProjection, stopActiveStream, transcriptStore, transcriptTransport, updateActiveTranscriptRun]);
+  }, [sessionId, workspace?.id, clearConversationProjection, stopActiveStream, transcriptStore, transcriptTransport, toolOperations, updateActiveTranscriptRun]);
 
   function showStreamError(errorValue) {
     if (errorValue?.name === "AbortError") return;
@@ -455,6 +461,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       initialCursor: resume.cursor || "0-0",
       transport: transcriptTransport,
       signal: abortController.signal,
+      onCommittedEvent: (event) => toolOperations.applyEvent(event),
       onTerminal: () => {
         if (activeSessionIdRef.current === targetSessionId) updateActiveTranscriptRun(null);
       },
@@ -1203,6 +1210,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
           ) : null}
           <TranscriptBlockList
             store={transcriptStore}
+            toolOperations={toolOperations}
             sessionId={sessionId || null}
             loadingHistory={loadingHistory}
             loadingOlderHistory={loadingOlderHistory}

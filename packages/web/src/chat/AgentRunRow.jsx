@@ -1,7 +1,7 @@
 
 import { useTranslation } from "../i18n";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Bot, Check, ChevronDown, Copy, FileOutput, FileText, Globe, ListChecks, Pencil, Plug, Search, SquareTerminal } from "lucide-react";
+import { Bot, Check, ChevronDown, Copy, FileOutput, FileText, Globe, ListChecks, Pencil, Search, SquareTerminal } from "lucide-react";
 import { useActivityDisclosures, useAgentRun } from "./chatStoreHooks";
 import { isAgentRunActive } from "./sessionEvents";
 import { activityTarget, activityToolAtom, buildAgentRunSections, formatPhaseElapsed, referenceCitations, runningActivityPresentation } from "./agentRunPresentation.mjs";
@@ -9,7 +9,7 @@ import { MarkdownContent, StreamingMarkdownContent } from "./MarkdownContent";
 import { AttachmentCard } from "./AttachmentCard";
 import { ReasoningBlock } from "./ReasoningBlock";
 
-const TOOL_ICONS = { agent: Bot, terminal: SquareTerminal, edit: Pencil, search: Search, globe: Globe, listChecks: ListChecks, plug: Plug, fileOutput: FileOutput };
+const TOOL_ICONS = { agent: Bot, terminal: SquareTerminal, edit: Pencil, search: Search, globe: Globe, listChecks: ListChecks, fileOutput: FileOutput };
 
 function DiffPreview({ content }) {
   useTranslation();
