@@ -329,8 +329,6 @@ fn atomic_write_at(
         )?;
         Ok(ExecutionFileWriteOutput {
             identity: memory_identity(memory_path),
-            previous_file_hash,
-            file_hash: sha256(content),
             created: !existed,
         })
     })();
@@ -522,7 +520,7 @@ mod tests {
 
         let left_root = root.clone();
         let right_root = root.clone();
-        let expected = first.file_hash.clone();
+        let expected = sha256(b"first");
         let left_expected = expected.clone();
         let left = std::thread::spawn(move || {
             atomic_write_at(
