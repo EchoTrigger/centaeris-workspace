@@ -330,7 +330,8 @@ class Migration(migrations.Migration):
             fields=[
                 ('eventId', models.CharField(max_length=160, primary_key=True, serialize=False)),
                 ('sequence', models.PositiveIntegerField()),
-                ('agent_run_sequence', models.PositiveIntegerField()),
+                ('agent_run_sequence', models.PositiveIntegerField(blank=True, null=True)),
+                ('session_level', models.BooleanField(db_default=False, default=False)),
                 ('projects_to_agent_run_stream', models.BooleanField()),
                 ('payload', models.JSONField()),
                 ('createdAtMs', models.BigIntegerField()),
@@ -740,6 +741,14 @@ class Migration(migrations.Migration):
         migrations.AddConstraint(
             model_name='sessionevent',
             constraint=models.UniqueConstraint(fields=('agent_run', 'agent_run_sequence'), name='unique_session_event_agent_run_sequence'),
+        ),
+        migrations.AddConstraint(
+            model_name='sessionevent',
+            constraint=models.CheckConstraint(condition=models.Q(models.Q(('agent_run_sequence__isnull', True), ('projects_to_agent_run_stream', False), ('session_level', True)), models.Q(('agent_run_sequence__gt', 0), ('agent_run_sequence__isnull', False), ('session_level', False)), _connector='OR'), name='session_event_level_shape'),
+        ),
+        migrations.AddConstraint(
+            model_name='sessionevent',
+            constraint=models.CheckConstraint(condition=models.Q(models.Q(('payload__type', 'tool_call_closure'), ('session_level', True)), models.Q(('session_level', False), models.Q(('payload__type', 'tool_call_closure'), _negated=True)), _connector='OR'), name='session_event_session_level_matches_type'),
         ),
         migrations.AddConstraint(
             model_name='sessionassetlink',

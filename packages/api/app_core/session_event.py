@@ -12,15 +12,29 @@ TERMINAL_STATES = {
 }
 
 
-def _committed_events(agent_run: AgentRun) -> list[SessionEvent]:
-    return list(
-        SessionEvent.objects.filter(agent_run=agent_run).order_by("agent_run_sequence")
+def _run_records(agent_run: AgentRun):
+    """Run-level execution facts only.
+
+    Session-level recovery facts (``session_level=True``, e.g. tool_call_closure)
+    live in the same session log and model history, but they are not part of the
+    AgentRun execution sequence: they carry no ``agent_run_sequence`` and must
+    never drive run ordering, terminal state, or run-scoped citation coverage.
+    """
+    return SessionEvent.objects.filter(
+        workspace_id=agent_run.workspace_id,
+        session_id=agent_run.session_id,
+        agent_run_id=agent_run.id,
+        session_level=False,
     )
+
+
+def _committed_events(agent_run: AgentRun) -> list[SessionEvent]:
+    return list(_run_records(agent_run).order_by("agent_run_sequence"))
 
 
 def committed_session_terminal_state(agent_run: AgentRun) -> str | None:
     terminal = (
-        SessionEvent.objects.filter(agent_run=agent_run)
+        _run_records(agent_run)
         .order_by("-agent_run_sequence")
         .values_list("payload__type", flat=True)
         .first()
@@ -112,7 +126,7 @@ def rebuild_agent_run_citation_projection(
 def citation_snapshot(agent_run: AgentRun) -> dict:
     """Platform presentation snapshot; never creates Core Session events."""
     agent_run = AgentRun.objects.select_for_update(of=("self",), no_key=True).get(pk=agent_run.pk)
-    through = SessionEvent.objects.filter(agent_run=agent_run).order_by("-sequence").values_list("sequence", flat=True).first() or 0
+    through = _run_records(agent_run).order_by("-sequence").values_list("sequence", flat=True).first() or 0
     citations = rebuild_agent_run_citation_projection(agent_run, through)
     return {"schema": "workspace.citations.v1", "agentRunId": agent_run.id,
         "sessionId": agent_run.session_id, "throughSequence": through,

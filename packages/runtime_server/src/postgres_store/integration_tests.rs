@@ -338,6 +338,104 @@ fn reset_store(url: &str) {
 
 #[test]
 #[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_transcript_concurrent_duplicate_commit_is_idempotent() {
+    use centaeris_core::session::transcript::{
+        TranscriptProjectionCommitDispositionV1, TranscriptProjectionCommitV1,
+    };
+    let _guard = TEST_LOCK.lock().unwrap();
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    let mut commit = TranscriptProjectionCommitV1 {
+        commit_id: "first".into(),
+        session_id: "race-session".into(),
+        projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.into(),
+        projection_generation: "generation-1".into(),
+        expected_source_high_water: "0".into(),
+        source_high_water: "1".into(),
+        upserts: vec![],
+        resume_cursors: vec![],
+        checkpoint: None,
+        frontier: None,
+        invalidation_reason: None,
+    };
+    store.commit_transcript_projection(commit.clone()).unwrap();
+    commit.commit_id = "second".into();
+    commit.expected_source_high_water = "1".into();
+    commit.source_high_water = "2".into();
+    let mut blocker = Client::connect(&url, NoTls).unwrap();
+    let mut tx = blocker.transaction().unwrap();
+    tx.query("SELECT source_high_water FROM runtime.transcript_projection_heads WHERE session_id='race-session' FOR UPDATE", &[]).unwrap();
+    let workers = (0..2)
+        .map(|_| {
+            let store = store.clone();
+            let commit = commit.clone();
+            std::thread::spawn(move || store.commit_transcript_projection(commit))
+        })
+        .collect::<Vec<_>>();
+    let mut observer = Client::connect(&url, NoTls).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let both_waiting = loop {
+        let waiting: i64 = observer.query_one("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%runtime.transcript_projection_heads%'", &[]).unwrap().get(0);
+        if waiting == 2 {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    tx.commit().unwrap();
+    let outcomes = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect::<Vec<_>>();
+    assert!(both_waiting, "both writers must contend on the same head");
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|r| matches!(r, Ok(TranscriptProjectionCommitDispositionV1::Applied)))
+            .count(),
+        1,
+        "{outcomes:?}"
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|r| matches!(
+                r,
+                Ok(TranscriptProjectionCommitDispositionV1::AlreadyApplied)
+            ))
+            .count(),
+        1,
+        "{outcomes:?}"
+    );
+    assert_eq!(
+        store
+            .load_transcript_projection_head("race-session", "generation-1")
+            .unwrap()
+            .unwrap()
+            .source_high_water,
+        "2"
+    );
+    let progress = store
+        .catch_up_transcript_projection("race-session", "generation-1", 1)
+        .expect("a concurrent writer already satisfied the requested waterline");
+    assert!(progress.caught_up);
+    commit.source_high_water = "3".into();
+    assert!(store
+        .commit_transcript_projection(commit.clone())
+        .unwrap_err()
+        .contains("commitId conflict"));
+    commit.commit_id = "different-commit".into();
+    assert!(store
+        .commit_transcript_projection(commit)
+        .unwrap_err()
+        .contains("sourceHighWater conflict"));
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
 fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_state() {
     let _guard = TEST_LOCK.lock().expect("Postgres test lock");
     let url = test_url();
@@ -352,7 +450,8 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
             CREATE TABLE public.app_core_sessionevent(
                 "eventId" varchar(160) PRIMARY KEY,workspace_id varchar(64) NOT NULL,
                 session_id varchar(64) NOT NULL,agent_run_id varchar(64) NOT NULL,
-                sequence integer NOT NULL,agent_run_sequence integer NOT NULL,
+                sequence integer NOT NULL,agent_run_sequence integer,
+                session_level boolean NOT NULL DEFAULT false,
                 projects_to_agent_run_stream boolean NOT NULL,payload jsonb NOT NULL,
                 "createdAtMs" bigint NOT NULL,"insertedAt" timestamptz NOT NULL DEFAULT clock_timestamp(),
                 UNIQUE(session_id,sequence),UNIQUE(agent_run_id,agent_run_sequence)
@@ -1853,7 +1952,8 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
                 session_id varchar(64) NOT NULL,
                 agent_run_id varchar(64) NOT NULL,
                 sequence integer NOT NULL,
-                agent_run_sequence integer NOT NULL,
+                agent_run_sequence integer,
+                session_level boolean NOT NULL DEFAULT false,
                 projects_to_agent_run_stream boolean NOT NULL,
                 payload jsonb NOT NULL,
                 "createdAtMs" bigint NOT NULL,
@@ -2222,7 +2322,8 @@ fn postgres_model_request_batch_deduplicates_and_hydrates_observations() {
                 session_id varchar(64) NOT NULL,
                 agent_run_id varchar(64) NOT NULL,
                 sequence integer NOT NULL,
-                agent_run_sequence integer NOT NULL,
+                agent_run_sequence integer,
+                session_level boolean NOT NULL DEFAULT false,
                 projects_to_agent_run_stream boolean NOT NULL,
                 payload jsonb NOT NULL,
                 "createdAtMs" bigint NOT NULL,
@@ -2662,4 +2763,682 @@ fn hosted_execution_capacity_is_shared_across_replicas_and_released_on_yield() {
     );
     assert_eq!(claim(&replicas[1], 101).unwrap().len(), 1);
     assert!(claim(&replicas[0], 102).unwrap().is_empty());
+}
+
+struct RecordingModelClient {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl centaeris_core::model::ModelClient for RecordingModelClient {
+    fn generate<'a>(
+        &'a self,
+        _request: &'a centaeris_core::model::ModelClientRequest,
+    ) -> centaeris_core::model::ModelClientFuture<'a, centaeris_core::model::ModelClientResponse> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async {
+            Err(centaeris_core::model::ModelClientError::new(
+                centaeris_core::model::ModelClientErrorKind::Provider,
+                "model must not be invoked while admitting a new user turn".to_string(),
+                false,
+            ))
+        })
+    }
+}
+
+struct UnavailableExecutionHost;
+
+impl centaeris_core::execution::ExecutionHostRunner for UnavailableExecutionHost {
+    fn status(
+        &self,
+        _policy: &centaeris_core::execution::ExecutionPolicy,
+    ) -> Result<
+        centaeris_core::execution::ExecutionHostStatus,
+        centaeris_core::execution::ExecutionError,
+    > {
+        Err(centaeris_core::execution::ExecutionError::HostUnavailable {
+            reason: "test execution host is unavailable".to_string(),
+        })
+    }
+
+    fn run_file_system_operation(
+        &self,
+        _request: centaeris_core::execution::ExecutionFileSystemRequest,
+    ) -> Result<
+        centaeris_core::execution::ExecutionFileSystemOutput,
+        centaeris_core::execution::ExecutionFileSystemError,
+    > {
+        panic!("test does not execute filesystem operations")
+    }
+
+    fn run_host_command(
+        &self,
+        _operation_id: Option<&str>,
+        _request: centaeris_core::execution::ExecutionCommandRequest,
+        _cancellation_probe: Option<&centaeris_core::execution::ExecutionCancellationProbe>,
+    ) -> Result<
+        centaeris_core::execution::ExecutionHostCommandOutput,
+        centaeris_core::execution::ExecutionError,
+    > {
+        Err(centaeris_core::execution::ExecutionError::HostUnavailable {
+            reason: "test execution host is unavailable".to_string(),
+        })
+    }
+}
+
+fn unavailable_tool_layer() -> centaeris_core::tool::layer::ToolLayer {
+    let workspace_root = std::env::temp_dir();
+    let binding = std::sync::Arc::new(
+        centaeris_core::execution::ExecutionHostBinding::new(
+            centaeris_core::execution::ExecutionHostMode::Remote,
+            std::sync::Arc::new(UnavailableExecutionHost),
+            workspace_root.clone(),
+            centaeris_core::execution::ExecutionPolicy::workspace_write_no_network(workspace_root),
+        )
+        .expect("test execution host binding"),
+    );
+    centaeris_core::tool::layer::ToolLayer::try_new_with_skill_catalog_config_and_execution_host_binding(
+        centaeris_core::extension::skills::SkillCatalogLoadConfig::default(),
+        binding,
+    )
+    .expect("test tool layer")
+}
+
+// A run that terminates with an assistant tool call but no tool result leaves an
+// unpaired tail. Hosted persists the next user turn before Core closes that tail,
+// so the durable history becomes illegal and Core must reject the new turn.
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_new_user_turn_after_unpaired_tool_call_fails_admission() {
+    use centaeris_core::model::ToolCallEnvelope;
+    use centaeris_core::runtime::{
+        AgentRunRequest, AgentRuntime, AgentRuntimeConfig, ToolConcurrencyCoordinator, TurnUpdate,
+    };
+    use std::sync::atomic::Ordering;
+
+    let _guard = TEST_LOCK.lock().expect("Postgres test lock");
+    let url = test_url();
+    reset_store(&url);
+
+    let session_id = "session_unpaired";
+    let workspace_id = "workspace_unpaired";
+    let mut setup = Client::connect(&url, NoTls).expect("connect setup");
+    setup
+        .batch_execute(
+            r#"
+            DROP TABLE IF EXISTS public.app_core_sessionevent;
+            DROP TABLE IF EXISTS public.app_core_session CASCADE;
+            CREATE TABLE public.app_core_session(id varchar(64) PRIMARY KEY,workspace_id varchar(64) NOT NULL);
+            CREATE TABLE public.app_core_sessionevent(
+                "eventId" varchar(160) PRIMARY KEY,workspace_id varchar(64) NOT NULL,
+                session_id varchar(64) NOT NULL,agent_run_id varchar(64) NOT NULL,
+                sequence integer NOT NULL,agent_run_sequence integer,
+                session_level boolean NOT NULL DEFAULT false,
+                projects_to_agent_run_stream boolean NOT NULL,payload jsonb NOT NULL,
+                "createdAtMs" bigint NOT NULL,"insertedAt" timestamptz NOT NULL DEFAULT clock_timestamp(),
+                UNIQUE(session_id,sequence),UNIQUE(agent_run_id,agent_run_sequence)
+            );
+            INSERT INTO public.app_core_session(id,workspace_id) VALUES('session_unpaired','workspace_unpaired');
+            "#,
+        )
+        .expect("create session source tables");
+    drop(setup);
+
+    let store = PostgresRuntimeStore::new(&url).expect("open Postgres store");
+    let old_log = store.session_log(
+        workspace_id.to_string(),
+        session_id.to_string(),
+        "旧请求".to_string(),
+    );
+    let new_log = store.session_log(
+        workspace_id.to_string(),
+        session_id.to_string(),
+        "继续".to_string(),
+    );
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+
+    let old_run = "agent_run_unpaired_old";
+    let mut old = centaeris_core::session::AgentRunSessionState::new(session_id, old_run)
+        .expect("old run state");
+    let mut old_records = old
+        .start(old_run, "旧请求", Vec::new(), 1)
+        .expect("old started records");
+    let call = ToolCallEnvelope {
+        id: "call_open".to_string(),
+        name: "bash".to_string(),
+        args_json: "{\"command\":\"ls\"}".to_string(),
+    };
+    old_records.extend(
+        old.record_tool_call(
+            "turn_old",
+            &call,
+            "centaeris.builtin",
+            format!("sha256:{}", "c".repeat(64)).as_str(),
+            "bash",
+            2,
+        )
+        .expect("record tool call")
+        .into_iter(),
+    );
+    old_records.push(
+        old.record(
+            centaeris_core::session::failed_agent_run_record(
+                session_id,
+                "turn_old",
+                old_run,
+                "execution_failed",
+                "boom",
+                3,
+            )
+            .expect("failed record"),
+        )
+        .expect("record terminal"),
+    );
+    runtime
+        .block_on(old_log.append_session_records(old_run, &old_records))
+        .expect("append old run");
+
+    // Hosted's first commit for the new run writes the user turn before Core runs.
+    let new_run = "agent_run_unpaired_new";
+    let mut next = centaeris_core::session::AgentRunSessionState::new(session_id, new_run)
+        .expect("new run state");
+    let new_records = next
+        .start(new_run, "继续", Vec::new(), 4)
+        .expect("new started records");
+    runtime
+        .block_on(new_log.append_session_records(new_run, &new_records))
+        .expect("append new run");
+
+    let mut audit = Client::connect(&url, NoTls).expect("connect audit");
+    let rows = audit
+        .query(
+            "SELECT payload::text FROM public.app_core_sessionevent WHERE session_id=$1 ORDER BY sequence",
+            &[&session_id],
+        )
+        .expect("read session log");
+    let mut wires = rows
+        .iter()
+        .map(|row| {
+            serde_json::from_str::<serde_json::Value>(row.get::<_, String>(0).as_str())
+                .expect("wire json")
+        })
+        .collect::<Vec<_>>();
+    super::runtime::hydrate_session_wire_values(&mut audit, &mut wires).expect("hydrate wires");
+    let events = wires
+        .iter()
+        .map(|wire| {
+            centaeris_core::session::parse_wire_record(wire)
+                .expect("parse wire")
+                .event
+        })
+        .collect::<Vec<_>>();
+    let snapshot =
+        centaeris_core::session::restore_runtime_snapshot_from_session_records(session_id, &events)
+            .expect("rebuild Core history from durable records");
+    centaeris_core::session::manager::SessionManager::new(store.clone())
+        .save_session(&snapshot)
+        .expect("materialize Core session snapshot");
+
+    let tool_concurrency =
+        ToolConcurrencyCoordinator::global_for_scope(format!("test:{session_id}"), 4)
+            .expect("tool concurrency");
+    let agent_runtime = AgentRuntime::new(
+        store.clone(),
+        unavailable_tool_layer(),
+        AgentRuntimeConfig::default(),
+        tool_concurrency,
+    );
+    let model_client = RecordingModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let config_store = centaeris_core::model::EmptyModelSessionConfigStore::new();
+    let mut stream = |_update: TurnUpdate| {};
+    let cancellation = || Ok(None);
+    let mut safe_point = |_point: centaeris_core::runtime::ToolSafePoint| Ok(());
+    let result = runtime.block_on(
+        agent_runtime
+            .process_turn_loop_online_with_model_client_stream_cancellable_and_tool_safe_point_async(
+                AgentRunRequest {
+                    session_id: session_id.to_string(),
+                    initial_turn_id: "turn_new".to_string(),
+                    user_message: "继续".to_string(),
+                    agent_run_identity: Some(
+                        centaeris_core::runtime::contracts::RuntimeAgentRunIdentityV1 {
+                            agent_run_id: new_run.to_string(),
+                            execution_id: "execution_unpaired".to_string(),
+                            authorization_digest: format!("sha256:{}", "a".repeat(64)),
+                        },
+                    ),
+                    runtime_scope:
+                        centaeris_core::model::prompt::PromptCompactionScopeV1::main(),
+                    resume_from_turn_id: None,
+                    auto_continue_after_resume_wait: None,
+                },
+                &model_client,
+                &config_store,
+                &mut stream,
+                &cancellation,
+                &mut safe_point,
+            ),
+    );
+
+    let error = result.expect_err("an unpaired tool call must block the new user turn");
+    assert!(
+        error.contains("context_window_materialization_invalid_tool_pairing"),
+        "unexpected admission error: {error}"
+    );
+    assert_eq!(
+        model_client.calls.load(Ordering::SeqCst),
+        0,
+        "the model must not be called while admitting the new user turn"
+    );
+}
+
+// Confirms the transcript generation rotation contract the block-schema guard
+// will rely on: rotation is a blue/green pointer switch over a pre-built,
+// complete next generation. It does not build the next generation and it does
+// not delete the previous generation's derived rows.
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_transcript_generation_rotation_switches_pointer_without_deleting_old_rows() {
+    use centaeris_core::session::transcript::{
+        TranscriptProjectionGenerationRotationDispositionV1,
+        TranscriptProjectionGenerationRotationV1, TranscriptProjectionGenerationStorePortV1,
+    };
+
+    let _guard = TEST_LOCK.lock().expect("Postgres test lock");
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new(&url).expect("open Postgres store");
+    let mut setup = Client::connect(&url, NoTls).expect("connect setup");
+    setup
+        .batch_execute(
+            r#"
+            DROP TABLE IF EXISTS public.app_core_sessionevent;
+            DROP TABLE IF EXISTS public.app_core_session CASCADE;
+            CREATE TABLE public.app_core_session(id varchar(64) PRIMARY KEY,workspace_id varchar(64) NOT NULL);
+            CREATE TABLE public.app_core_sessionevent(
+                "eventId" varchar(160) PRIMARY KEY,workspace_id varchar(64) NOT NULL,
+                session_id varchar(64) NOT NULL,agent_run_id varchar(64) NOT NULL,
+                sequence integer NOT NULL,agent_run_sequence integer,
+                session_level boolean NOT NULL DEFAULT false,
+                projects_to_agent_run_stream boolean NOT NULL,payload jsonb NOT NULL,
+                "createdAtMs" bigint NOT NULL,"insertedAt" timestamptz NOT NULL DEFAULT clock_timestamp(),
+                UNIQUE(session_id,sequence),UNIQUE(agent_run_id,agent_run_sequence)
+            );
+            INSERT INTO public.app_core_session(id,workspace_id) VALUES('session_rotate','workspace_rotate');
+            "#,
+        )
+        .expect("create rotation source tables");
+    setup
+        .execute(
+            "INSERT INTO runtime.transcript_projection_heads(session_id,projection_version,projection_generation,source_high_water,invalidation_reason) VALUES('session_rotate',$1,'generation-1',5,NULL),('session_rotate',$1,'generation-2',9,NULL)",
+            &[&TRANSCRIPT_PROJECTION_VERSION_V1],
+        )
+        .expect("seed generation heads");
+    setup
+        .execute(
+            "INSERT INTO runtime.transcript_projection_current_generations(session_id,projection_version,projection_generation,source_high_water) VALUES('session_rotate',$1,'generation-1',5)",
+            &[&TRANSCRIPT_PROJECTION_VERSION_V1],
+        )
+        .expect("seed current generation");
+
+    // A rotation whose next generation is missing or incomplete must be rejected.
+    let rejected = store.rotate_current_transcript_projection_generation(
+        TranscriptProjectionGenerationRotationV1 {
+            session_id: "session_rotate".to_string(),
+            projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
+            expected_current_generation: Some("generation-1".to_string()),
+            next_generation: "generation-3".to_string(),
+            target_source_high_water: "9".to_string(),
+        },
+    );
+    assert!(rejected.is_err(), "rotation must require a built next generation");
+
+    let disposition = store
+        .rotate_current_transcript_projection_generation(
+            TranscriptProjectionGenerationRotationV1 {
+                session_id: "session_rotate".to_string(),
+                projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
+                expected_current_generation: Some("generation-1".to_string()),
+                next_generation: "generation-2".to_string(),
+                target_source_high_water: "9".to_string(),
+            },
+        )
+        .expect("rotate generation");
+    assert!(matches!(
+        disposition,
+        TranscriptProjectionGenerationRotationDispositionV1::Applied
+    ));
+    let current = store
+        .load_current_transcript_projection_generation("session_rotate")
+        .expect("load current generation")
+        .expect("current generation exists");
+    assert_eq!(current.projection_generation, "generation-2");
+    assert_eq!(current.source_high_water, "9");
+    let old_heads = setup
+        .query_one(
+            "SELECT count(*) FROM runtime.transcript_projection_heads WHERE session_id='session_rotate' AND projection_generation='generation-1'",
+            &[],
+        )
+        .expect("count old generation heads")
+        .get::<_, i64>(0);
+    assert_eq!(
+        old_heads, 1,
+        "rotation must not delete the previous generation's derived rows"
+    );
+}
+
+// Positive admission: a session-level closure and the new run's first batch are
+// committed in one transaction, re-delivery is idempotent, and a stale plan is
+// rejected.
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_new_user_turn_admission_commits_closure_and_run_atomically() {
+    use centaeris_core::model::ToolCallEnvelope;
+    use centaeris_core::runtime::contracts::{NewUserTurnClosurePlanV1, UnpairedToolCallClosureV1};
+    use centaeris_core::session::AgentRunSessionState;
+    use centaeris_core::tool::layer::ToolExecutionResult;
+
+    let _guard = TEST_LOCK.lock().expect("Postgres test lock");
+    let url = test_url();
+    reset_store(&url);
+
+    let store = PostgresRuntimeStore::new(&url).expect("open Postgres store");
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let session_id = "session_admission";
+    let workspace_id = "workspace_admission";
+    let mut setup = Client::connect(&url, NoTls).expect("connect setup");
+    setup
+        .batch_execute(
+            r#"
+            DROP TABLE IF EXISTS public.app_core_sessionevent;
+            DROP TABLE IF EXISTS public.app_core_session CASCADE;
+            CREATE TABLE public.app_core_session(id varchar(64) PRIMARY KEY,workspace_id varchar(64) NOT NULL);
+            CREATE TABLE public.app_core_sessionevent(
+                "eventId" varchar(160) PRIMARY KEY,workspace_id varchar(64) NOT NULL,
+                session_id varchar(64) NOT NULL,agent_run_id varchar(64) NOT NULL,
+                sequence integer NOT NULL,agent_run_sequence integer,
+                session_level boolean NOT NULL DEFAULT false,
+                projects_to_agent_run_stream boolean NOT NULL,payload jsonb NOT NULL,
+                "createdAtMs" bigint NOT NULL,"insertedAt" timestamptz NOT NULL DEFAULT clock_timestamp(),
+                UNIQUE(session_id,sequence),UNIQUE(agent_run_id,agent_run_sequence)
+            );
+            INSERT INTO public.app_core_session(id,workspace_id) VALUES('session_admission','workspace_admission');
+            INSERT INTO runtime.runtime_jobs(job_id,job_kind,status,run_at_ms,lease_owner,lease_expires_at_ms,backoff_policy_json,idempotency_key,session_id,created_at_ms,updated_at_ms)
+            VALUES('admission_job','agent_run.lifecycle','running',0,'admission_owner',(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint + 60000,'{}','admission_key','session_admission',1,1);
+            "#,
+        )
+        .expect("create admission source tables");
+    drop(setup);
+
+    let old_run = "agent_run_admission_old";
+    let mut old = AgentRunSessionState::new(session_id, old_run).expect("old run state");
+    let mut old_records = old.start(old_run, "旧请求", Vec::new(), 1).expect("old start");
+    let call = ToolCallEnvelope {
+        id: "call_admission".to_string(),
+        name: "bash".to_string(),
+        args_json: "{\"command\":\"ls\"}".to_string(),
+    };
+    old_records.extend(
+        old.record_tool_call(
+            "turn_old",
+            &call,
+            "centaeris.builtin",
+            format!("sha256:{}", "c".repeat(64)).as_str(),
+            "bash",
+            2,
+        )
+        .expect("record tool call")
+        .into_iter(),
+    );
+    old_records.push(
+        old.record(
+            centaeris_core::session::failed_agent_run_record(
+                session_id, "turn_old", old_run, "execution_failed", "boom", 3,
+            )
+            .expect("failed record"),
+        )
+        .expect("record terminal"),
+    );
+    runtime
+        .block_on(
+            store
+                .session_log(
+                    workspace_id.to_string(),
+                    session_id.to_string(),
+                    "旧请求".to_string(),
+                )
+                .append_session_records(old_run, &old_records),
+        )
+        .expect("append old run");
+
+    let result = ToolExecutionResult {
+        tool_call_id: call.id.clone(),
+        tool_name: call.name.clone(),
+        status: "blocked".to_string(),
+        content: "The previous unpaired tool call was closed before execution; it was not replayed."
+            .to_string(),
+        details: serde_json::json!({"schema": "tool_result_tombstone_v1", "status": "blocked"}),
+        facts: Vec::new(),
+        error: None,
+        started_at_ms: 4,
+        completed_at_ms: 4,
+        latency_ms: 0,
+        parallel_group: None,
+        transition_reason: Some("unpaired_tool_call_closed_by_new_user_turn".to_string()),
+    };
+    let new_run = "agent_run_admission_new";
+    let closure = UnpairedToolCallClosureV1 {
+        recovery: "not_executed".to_string(),
+        session_id: session_id.to_string(),
+        turn_id: "turn_old".to_string(),
+        agent_run_id: old_run.to_string(),
+        call: call.clone(),
+        result: result.clone(),
+        call_event_id: None,
+        trigger_agent_run_id: new_run.to_string(),
+        trigger_turn_id: "turn_new".to_string(),
+    };
+    let closure_event = centaeris_core::runtime::canonical_tool_call_closure_record(
+        session_id,
+        "turn_old",
+        old_run,
+        &call,
+        &result,
+        "not_executed",
+        None,
+        new_run,
+        "turn_new",
+        4,
+    )
+    .expect("closure record");
+
+    let mut next = AgentRunSessionState::new(session_id, new_run).expect("new run state");
+    let new_records = next.start(new_run, "继续", Vec::new(), 5).expect("new start");
+    let plan = NewUserTurnClosurePlanV1 {
+        session_id: session_id.to_string(),
+        expected_session_sequence: 4,
+        trigger_agent_run_id: new_run.to_string(),
+        trigger_turn_id: "turn_new".to_string(),
+        evidence_preconditions: Vec::new(),
+        closures: vec![closure],
+    };
+    let fence = RuntimeJobLeaseFence {
+        job_id: "admission_job".to_string(),
+        job_kind: centaeris_core::session::reliability::AGENT_RUN_LIFECYCLE_JOB_KIND.to_string(),
+        lease_owner: "admission_owner".to_string(),
+    };
+    let log = store.session_log(
+        workspace_id.to_string(),
+        session_id.to_string(),
+        "继续".to_string(),
+    );
+
+    let receipt = log
+        .append_new_user_turn_admission_blocking(
+            new_run,
+            &new_records,
+            &[closure_event.clone()],
+            &plan,
+            &fence,
+        )
+        .expect("admission commits");
+    assert_eq!(receipt.records.len(), 3);
+
+    let mut audit = Client::connect(&url, NoTls).expect("connect audit");
+    let closure_row = audit
+        .query_one(
+            "SELECT session_level,agent_run_sequence,projects_to_agent_run_stream,agent_run_id FROM app_core_sessionevent WHERE \"eventId\"=$1",
+            &[&closure_event.event_id],
+        )
+        .expect("closure row");
+    assert!(closure_row.get::<_, bool>(0));
+    assert!(closure_row.get::<_, Option<i32>>(1).is_none());
+    assert!(!closure_row.get::<_, bool>(2));
+    assert_eq!(closure_row.get::<_, String>(3), old_run);
+    // SSE isolation: the closure stays out of the per-run stream while
+    // remaining part of the session the transcript reads.
+    let closure_in_stream: i64 = audit
+        .query_one(
+            "SELECT count(*) FROM app_core_sessionevent WHERE agent_run_id=$1 AND \"eventId\"=$2 AND projects_to_agent_run_stream=true",
+            &[&old_run, &closure_event.event_id],
+        )
+        .expect("count closure in per-run stream")
+        .get(0);
+    assert_eq!(closure_in_stream, 0);
+
+    // Re-delivery of the same batch returns the stored receipt without new rows.
+    let again = log
+        .append_new_user_turn_admission_blocking(
+            new_run,
+            &new_records,
+            &[closure_event.clone()],
+            &plan,
+            &fence,
+        )
+        .expect("idempotent re-delivery");
+    assert_eq!(again.records.len(), 3);
+    let total: i64 = audit
+        .query_one(
+            "SELECT count(*) FROM app_core_sessionevent WHERE session_id=$1",
+            &[&session_id],
+        )
+        .expect("count session records")
+        .get(0);
+    assert_eq!(total, 7);
+
+    // A stale plan over an uncommitted batch is rejected: its expected head no
+    // longer matches the confirmed session head.
+    let stale_run = "agent_run_admission_stale";
+    let mut stale_state = AgentRunSessionState::new(session_id, stale_run).expect("stale run state");
+    let stale_records = stale_state
+        .start(stale_run, "继续", Vec::new(), 8)
+        .expect("stale start");
+    let stale = NewUserTurnClosurePlanV1 {
+        session_id: session_id.to_string(),
+        expected_session_sequence: 999,
+        trigger_agent_run_id: stale_run.to_string(),
+        trigger_turn_id: "turn_stale".to_string(),
+        evidence_preconditions: Vec::new(),
+        closures: Vec::new(),
+    };
+    assert!(log
+        .append_new_user_turn_admission_blocking(
+            stale_run,
+            &stale_records,
+            &[],
+            &stale,
+            &fence,
+        )
+        .is_err());
+
+    // The closure updates the original tool block in the session transcript,
+    // keeping the block id and order key and advancing the revision.
+    for _ in 0..=7 {
+        if store
+            .catch_up_transcript_projection(session_id, "generation-1", 7)
+            .expect("catch up transcript")
+            .caught_up
+        {
+            break;
+        }
+    }
+    let (status, body) = crate::transcript_protocol::handle(
+        "/internal/transcript/page",
+        serde_json::to_vec(&serde_json::json!({
+            "schema": "runtime.transcript.page.read.v1",
+            "sessionId": session_id,
+            "projectionVersion": TRANSCRIPT_PROJECTION_VERSION_V1,
+            "projectionGeneration": null,
+            "sourceHighWater": "7",
+            "olderCursor": null,
+        }))
+        .expect("page request")
+        .as_slice(),
+        &store,
+    )
+    .expect("transcript protocol route")
+    .expect("transcript protocol response");
+    assert_eq!(status, 200);
+    let page: serde_json::Value = serde_json::from_slice(&body).expect("page json");
+    let tool = page["blocks"]
+        .as_array()
+        .expect("blocks")
+        .iter()
+        .find(|block| block["body"]["callId"] == "call_admission")
+        .expect("projected tool block");
+    assert_eq!(tool["blockId"], "tool:call_admission");
+    assert_eq!(tool["orderKey"]["sourceSequence"], "3");
+    assert_ne!(tool["blockRevision"], "1");
+    let output_ref = tool["body"]["outputRef"]["refId"]
+        .as_str()
+        .expect("closure output reference");
+    assert!(output_ref.starts_with("session-event:"));
+    assert!(output_ref.ends_with(":modelContent"));
+}
+
+// A projection written by an older block encoding is invalidated and rebuilt
+// under the current generation instead of being decoded under the new fields.
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_transcript_old_block_encoding_generation_is_invalidated_and_reinitialized() {
+    let _guard = TEST_LOCK.lock().expect("Postgres test lock");
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new(&url).expect("open Postgres store");
+    let mut setup = Client::connect(&url, NoTls).expect("connect setup");
+    setup
+        .execute(
+            "INSERT INTO runtime.transcript_projection_heads(session_id,projection_version,projection_generation,source_high_water,invalidation_reason) VALUES('session_old',$1,'generation-old',5,NULL)",
+            &[&TRANSCRIPT_PROJECTION_VERSION_V1],
+        )
+        .expect("seed old head");
+    setup
+        .execute(
+            "INSERT INTO runtime.transcript_projection_current_generations(session_id,projection_version,projection_generation,source_high_water) VALUES('session_old',$1,'generation-old',5)",
+            &[&TRANSCRIPT_PROJECTION_VERSION_V1],
+        )
+        .expect("seed old current generation");
+
+    let current = store
+        .load_or_initialize_current_transcript_generation("session_old")
+        .expect("load current generation");
+    assert_eq!(current.projection_generation, "generation-1");
+
+    let old_heads: i64 = setup
+        .query_one(
+            "SELECT count(*) FROM runtime.transcript_projection_heads WHERE session_id='session_old' AND projection_generation='generation-old'",
+            &[],
+        )
+        .expect("count old heads")
+        .get(0);
+    assert_eq!(old_heads, 0);
+    let new_heads: i64 = setup
+        .query_one(
+            "SELECT count(*) FROM runtime.transcript_projection_heads WHERE session_id='session_old' AND projection_generation='generation-1'",
+            &[],
+        )
+        .expect("count new heads")
+        .get(0);
+    assert_eq!(new_heads, 1);
 }
