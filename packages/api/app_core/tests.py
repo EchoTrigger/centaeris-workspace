@@ -3295,12 +3295,27 @@ class ApiVerticalSliceTests(TransactionTestCase):
 
         metadata, body = payload()
         headers = {"HTTP_X_INTERNAL_TOKEN": "test-internal-token"}
-        first = self.client.post(
+        # A rejected upload must remain retryable and must never reach the library.
+        corrupt = self.client.post(
             "/internal/artifacts/publish",
-            data=body,
+            data=body[:-1] + bytes([body[-1] ^ 1]),
             content_type="application/octet-stream",
             **headers,
         )
+        self.assertEqual(corrupt.status_code, 409, corrupt.content)
+        self.assertEqual(corrupt.json()["error"], "artifact_integrity_mismatch")
+        self.assertEqual(Artifact.objects.get().status, "staging")
+        self.assertFalse(UserLibraryObject.objects.exists())
+
+        # Fresh publication only reads stored bytes to make the durable library copy.
+        with patch.object(default_storage, "open", wraps=default_storage.open) as opened:
+            first = self.client.post(
+                "/internal/artifacts/publish",
+                data=body,
+                content_type="application/octet-stream",
+                **headers,
+            )
+        self.assertEqual(opened.call_count, 1)
         self.assertEqual(first.status_code, 201, first.content)
         artifactRef = first.json()["artifactRef"]
         self.assertEqual(first.json()["publicationId"], metadata["publicationId"])
@@ -3384,6 +3399,8 @@ class ApiVerticalSliceTests(TransactionTestCase):
         )
         self.assertEqual(library.status, "ready")
         self.assertTrue(default_storage.exists(library.storageKey))
+        with default_storage.open(library.storageKey, "rb") as saved:
+            self.assertEqual(saved.read(), content)
         self.assertTrue(library.storageKey.startswith(f"users/{user.id}/library/"))
         self.assertTrue(
             UserLibraryLink.objects.filter(
