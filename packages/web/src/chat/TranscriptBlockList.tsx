@@ -1,5 +1,6 @@
 import {
   memo,
+  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -24,6 +25,7 @@ type Props = Readonly<{
   loadingOlderHistory: boolean;
   onLoadOlderHistory(): Promise<void>;
   emptyState?: ReactNode;
+  pendingUserMessage?: Readonly<{ text: string }> | null;
 }>;
 
 function useTranscriptList(store: TranscriptViewStore) {
@@ -74,12 +76,17 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   loadingOlderHistory,
   onLoadOlderHistory,
   emptyState,
+  pendingUserMessage,
 }: Props) {
   const { t } = useTranslation();
   const { blockIds, hasOlder } = useTranscriptList(store);
   const live = useTranscriptLive(store);
   const entries = useMemo(() => groupTranscriptBlocks(store, blockIds), [store, blockIds]);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const programmaticScrollRef = useRef(false);
+  const userScrollInputRef = useRef(0);
+  const scrollbarDragRef = useRef(false);
   const touchYRef = useRef<number | null>(null);
   const upwardIntentRef = useRef(false);
   const loadingOlderRef = useRef(false);
@@ -96,7 +103,10 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
     followingLatestRef.current = true;
     setFollowingLatest(true);
     const element = scrollRef.current;
-    element?.scrollTo({ top: element.scrollHeight, behavior: "instant" });
+    if (element) {
+      programmaticScrollRef.current = true;
+      element.scrollTo({ top: element.scrollHeight, behavior: "instant" });
+    }
   }, [resetIdentity]);
 
   useLayoutEffect(() => {
@@ -111,10 +121,29 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
           - element.getBoundingClientRect().top - anchor.offset;
       }
       anchorRef.current = null;
-    } else if (followingLatestRef.current) {
+    } else if (followingLatestRef.current
+      && element.scrollTop < element.scrollHeight - element.clientHeight) {
+      programmaticScrollRef.current = true;
       element.scrollTo({ top: element.scrollHeight, behavior: "instant" });
     }
   }, [blockIds]);
+
+  // Any content growth — the live overlay or a committed block still streaming
+  // into place — increases the rendered height without changing blockIds. Watch
+  // the content box and keep the tail visible while the user is following.
+  useEffect(() => {
+    const content = contentRef.current;
+    const element = scrollRef.current;
+    if (!content || !element) return undefined;
+    const observer = new ResizeObserver(() => {
+      if (!followingLatestRef.current) return;
+      if (element.scrollTop >= element.scrollHeight - element.clientHeight) return;
+      programmaticScrollRef.current = true;
+      element.scrollTo({ top: element.scrollHeight, behavior: "instant" });
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, []);
 
   async function requestOlder() {
     const element = scrollRef.current;
@@ -145,6 +174,13 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   function handleScroll() {
     const element = scrollRef.current;
     if (!element) return;
+    if (programmaticScrollRef.current) {
+      programmaticScrollRef.current = false;
+      return;
+    }
+    // Ignore scroll events with no recent user input (browser scroll anchoring,
+    // expand/collapse layout shifts) so they never detach following by themselves.
+    if (!scrollbarDragRef.current && performance.now() - userScrollInputRef.current > 150) return;
     const atEnd = element.scrollHeight - element.clientHeight - element.scrollTop <= END_TOLERANCE_PX;
     if (atEnd !== followingLatestRef.current) {
       followingLatestRef.current = atEnd;
@@ -160,7 +196,9 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
     followingLatestRef.current = true;
     setFollowingLatest(true);
     const element = scrollRef.current;
-    element?.scrollTo({ top: element.scrollHeight, behavior: "smooth" });
+    if (!element) return;
+    programmaticScrollRef.current = true;
+    element.scrollTo({ top: element.scrollHeight, behavior: "instant" });
   }
 
   return (
@@ -169,9 +207,18 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
         className="workspaceMessages"
         ref={scrollRef}
         onScroll={handleScroll}
-        onWheel={(event) => { if (event.deltaY < 0) recordUpwardIntent(); }}
+        onPointerDown={(event) => {
+          if (!(event.target as HTMLElement).closest("button, a, [role=button]")) {
+            scrollbarDragRef.current = true;
+            userScrollInputRef.current = performance.now();
+          }
+        }}
+        onPointerUp={() => { scrollbarDragRef.current = false; }}
+        onPointerCancel={() => { scrollbarDragRef.current = false; }}
+        onWheel={(event) => { userScrollInputRef.current = performance.now(); if (event.deltaY < 0) recordUpwardIntent(); }}
         onTouchStart={(event) => { touchYRef.current = event.touches[0]?.clientY ?? null; }}
         onTouchMove={(event) => {
+          userScrollInputRef.current = performance.now();
           const nextY = event.touches[0]?.clientY ?? null;
           if (nextY !== null && touchYRef.current !== null && nextY > touchYRef.current) {
             recordUpwardIntent();
@@ -180,6 +227,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
         }}
         onTouchEnd={() => { touchYRef.current = null; }}
         onKeyDown={(event) => {
+          userScrollInputRef.current = performance.now();
           if (["ArrowUp", "PageUp", "Home"].includes(event.key)
             || (event.key === " " && event.shiftKey)) recordUpwardIntent();
         }}
@@ -201,10 +249,15 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
               : t("virtualAgentRunList.loadEarlierMessages")}
           </button>
         ) : null}
-        <div className="workspaceTranscriptBlocks">
+        <div className="workspaceTranscriptBlocks" ref={contentRef}>
           {entries.map((entry) => entry.kind === "tool"
             ? <TranscriptToolGroupCard store={store} blockIds={entry.blockIds} toolOperations={toolOperations} key={`tool:${entry.blockIds[0]}`} />
             : <TranscriptBlockRow store={store} blockId={entry.blockId} key={entry.blockId} />)}
+          {pendingUserMessage ? (
+            <div className="workspaceTranscriptBlock workspaceTranscriptUser" data-block-id="pending:user">
+              <div className="workspaceUserMessage">{pendingUserMessage.text}</div>
+            </div>
+          ) : null}
           {live === null ? null : <TranscriptLiveTail live={live} />}
         </div>
       </div>

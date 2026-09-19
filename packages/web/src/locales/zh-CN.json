@@ -817,5 +817,8 @@
   "toolGroup.taskOutput.one": "个任务结果",
   "toolGroup.taskOutput.other": "个任务结果",
   "toolGroup.join": "，",
-  "toolGroup.unknown": "工具调用"
+  "toolGroup.unknown": "工具调用",
+  "appRoute.streamReconnecting": "正在重新连接，会话内容仍可查看。",
+  "appRoute.streamPaused": "实时更新已暂停，你可以继续阅读或重新连接。",
+  "appRoute.retryStream": "重新连接"
 }

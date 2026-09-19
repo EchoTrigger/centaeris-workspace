@@ -126,6 +126,8 @@ export async function readSse(
 ) {
   const reader = response.body?.getReader();
   if (!reader) throw new Error("stream body is unavailable");
+  const cancel = () => { void reader.cancel().catch(() => {}); };
+  signal?.addEventListener("abort", cancel, { once: true });
   const decoder = new TextDecoder();
   let buffer = "";
   let terminal = false;
@@ -137,16 +139,23 @@ export async function readSse(
     await onItem(entry);
     terminal = entry.item.kind === "committed" && isTerminalSessionEvent(entry.item.event.type);
   };
-  while (true) {
-    throwIfAborted(signal);
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const blocks = buffer.split(/\r?\n\r?\n/);
-    buffer = blocks.pop() || "";
-    for (const block of blocks) await deliver(block);
+  try {
+    while (true) {
+      throwIfAborted(signal);
+      const { value, done } = await reader.read();
+      throwIfAborted(signal);
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split(/\r?\n\r?\n/);
+      buffer = blocks.pop() || "";
+      for (const block of blocks) await deliver(block);
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) await deliver(buffer);
+    return terminal;
+  } finally {
+    signal?.removeEventListener("abort", cancel);
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
   }
-  buffer += decoder.decode();
-  if (buffer.trim()) await deliver(buffer);
-  return terminal;
 }

@@ -32,6 +32,7 @@ type ControllerOptions = Readonly<{
   scheduleFrame?: (callback: () => void | Promise<void>) => number;
   cancelFrame?: (frameId: number) => void;
   onCommittedEvent?: (event: SessionStreamEvent) => void;
+  onDetailError?: (error: unknown, event: SessionStreamEvent) => void;
   onTerminal?: () => void;
 }>;
 
@@ -53,6 +54,7 @@ export class WorkspaceTranscriptController {
   readonly scheduleFrame: NonNullable<ControllerOptions["scheduleFrame"]>;
   readonly cancelFrame: NonNullable<ControllerOptions["cancelFrame"]>;
   readonly onCommittedEvent: NonNullable<ControllerOptions["onCommittedEvent"]>;
+  readonly onDetailError: NonNullable<ControllerOptions["onDetailError"]>;
   readonly onTerminal: NonNullable<ControllerOptions["onTerminal"]>;
   lastCursor: string;
   receivedCursor: string;
@@ -63,6 +65,8 @@ export class WorkspaceTranscriptController {
   private disposed = false;
   private terminalAccepted = false;
   private failure: Error | null = null;
+  private failureAbort = new AbortController();
+  get failureSignal() { return this.failureAbort.signal; }
   private idleWaiters: IdleWaiter[] = [];
 
   constructor({
@@ -76,6 +80,9 @@ export class WorkspaceTranscriptController {
     scheduleFrame = (callback) => requestAnimationFrame(() => { void callback(); }),
     cancelFrame = (frameId) => cancelAnimationFrame(frameId),
     onCommittedEvent = () => {},
+    onDetailError = (error, event) => console.error("Transcript tool details unavailable", {
+      eventId: event.eventId, agentRunId: event.agentRunId, error,
+    }),
     onTerminal = () => {},
   }: ControllerOptions) {
     if (!agentRunId || !initialCursor || !identity.sessionId
@@ -94,6 +101,7 @@ export class WorkspaceTranscriptController {
     this.scheduleFrame = scheduleFrame;
     this.cancelFrame = cancelFrame;
     this.onCommittedEvent = onCommittedEvent;
+    this.onDetailError = onDetailError;
     this.onTerminal = onTerminal;
   }
 
@@ -140,7 +148,10 @@ export class WorkspaceTranscriptController {
     try {
       if (batch.some((entry) => entry.item.kind === "committed")) {
         for (const entry of batch) {
-          if (entry.item.kind === "committed") this.onCommittedEvent(entry.item.event);
+          if (entry.item.kind === "committed") {
+            try { this.onCommittedEvent(entry.item.event); }
+            catch (error) { this.onDetailError(error, entry.item.event); }
+          }
         }
         const afterSourceHighWater = this.store.getListSnapshot().appliedSourceHighWater;
         await this.transport.loadPatches({
@@ -173,6 +184,7 @@ export class WorkspaceTranscriptController {
       if (appliedCursor) this.lastCursor = appliedCursor;
     } catch (error) {
       this.failure = error instanceof Error ? error : new Error(String(error));
+      this.failureAbort.abort(this.failure);
       this.queue = [];
       this.queueOffset = 0;
       this.rejectIdle(this.failure);
