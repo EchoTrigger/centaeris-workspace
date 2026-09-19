@@ -38,6 +38,7 @@ def main():
            'EXECUTION_TENANT_LIMIT': '4'}
     commands = [['cargo', 'test', '--locked', '-p', 'runtime_server', 'postgres_outbox', '--']]
     exact_tests = [
+        'postgres_transcript_concurrent_duplicate_commit_is_idempotent',
         'postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_state',
         'postgres_runtime_store_persists_core_state_and_claims_jobs_once',
         'hosted_execution_capacity_is_shared_across_replicas_and_released_on_yield',
@@ -51,6 +52,10 @@ def main():
         'postgres_runtime_job_wait_is_notified_and_closes_lost_wakeups',
         'postgres_session_terminal_append_fences_reclaimed_lease_owner',
         'recovery_orchestration_releases_capacity_before_followup_store_work',
+        'postgres_new_user_turn_after_unpaired_tool_call_fails_admission',
+        'postgres_new_user_turn_admission_commits_closure_and_run_atomically',
+        'postgres_transcript_generation_rotation_switches_pointer_without_deleting_old_rows',
+        'postgres_transcript_old_block_encoding_generation_is_invalidated_and_reinitialized',
     ]
     commands.extend([
         ['cargo', 'test', '--locked', '-p', 'runtime_server',

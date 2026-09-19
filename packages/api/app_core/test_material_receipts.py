@@ -46,6 +46,27 @@ class MaterialReceiptTests(TestCase):
         return self.event("tool_result", {"callId": call_id, "toolName": "read_material", "resultState": state,
             "modelContent": json.dumps(output), "outputComplete": True})
 
+    def closure(self, call_id="call-1"):
+        sequence = SessionEvent.objects.count() + 1
+        return SessionEvent.objects.create(
+            eventId=f"closure-{sequence}", workspace=self.run.workspace, session=self.run.session,
+            agent_run=self.run, sequence=sequence, agent_run_sequence=None, session_level=True,
+            projects_to_agent_run_stream=False,
+            payload={"type": "tool_call_closure", "turnId": self.run.turn_id, "payload": {
+                "callId": call_id, "toolName": "read_material", "resultState": "blocked",
+                "modelContent": "closed before execution", "outputComplete": True,
+                "recovery": "not_executed", "callEventId": None,
+                "triggerAgentRunId": "agent_run_trigger", "triggerTurnId": "turn_trigger"}},
+            createdAtMs=1,
+        )
+
+    def test_recovered_closure_does_not_grant_a_new_citation_projection(self):
+        self.call()
+        self.persist()
+        # The old run ends with a session-level closure, not a durable tool_result.
+        self.closure()
+        self.assertEqual(receipts.citation_projections(self.run), [])
+
     def test_saved_result_survives_reload_and_only_delivered_ranges_are_cited(self):
         from unittest.mock import patch
         from .material_delivery import save_result, read_result

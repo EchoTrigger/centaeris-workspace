@@ -79,6 +79,31 @@ discarded when a corresponding durable event establishes a supersession
 barrier. Redis expiry or cleanup failure must not create or delete durable
 history. The browser consumes API projections and never reads Redis directly.
 
+## New user turn admission
+
+A new user turn is admitted only after Core has closed any unpaired tool call at
+the tail of the session history. Hosts persist the accepted input (prompt,
+attachments, identities), read the execution evidence, and ask Core for a
+read-only closure plan; the plan carries the expected session head and the
+evidence each closure was computed against.
+
+The committing host writes the recovery facts and the new run's first batch in
+one transaction, under the current lifecycle lease, with per-row attribution:
+
+- `tool_call_closure` is a session-level recovery record (`session_level = true`,
+  `agent_run_sequence = NULL`, not projected to the per-run stream). It
+  references the original call's owning AgentRun without reopening it.
+- ordinary records stay `session_level = false` with a positive run sequence.
+
+A failure, cancellation, or interruption before admission writes nothing to the
+model history; it stays in the AgentRun control plane. Re-delivery of an already
+committed admission returns the stored receipt. A plan whose expected head no
+longer matches an uncommitted batch is rejected.
+
+Release order for a storage or transcript block-encoding change: schema first,
+then readers, then the closure writer. A rollback must not hand a store that
+contains closures to a reader that does not understand them.
+
 ## Files and processing
 
 PostgreSQL stores file identities, ownership, grants, lifecycle, and processing

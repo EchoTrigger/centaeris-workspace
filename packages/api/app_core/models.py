@@ -1113,7 +1113,8 @@ class SessionEvent(models.Model):
     )
     agent_run = models.ForeignKey(AgentRun, on_delete=models.PROTECT, related_name="events")
     sequence = models.PositiveIntegerField()
-    agent_run_sequence = models.PositiveIntegerField()
+    agent_run_sequence = models.PositiveIntegerField(null=True, blank=True)
+    session_level = models.BooleanField(default=False, db_default=False)
     projects_to_agent_run_stream = models.BooleanField()
     payload = models.JSONField()
     createdAtMs = models.BigIntegerField()
@@ -1128,6 +1129,35 @@ class SessionEvent(models.Model):
             models.UniqueConstraint(
                 fields=["agent_run", "agent_run_sequence"],
                 name="unique_session_event_agent_run_sequence",
+            ),
+            # Session-level recovery facts carry no AgentRun sequence and never
+            # enter the per-run stream; ordinary run facts must carry a positive
+            # run sequence.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        session_level=True,
+                        agent_run_sequence__isnull=True,
+                        projects_to_agent_run_stream=False,
+                    )
+                    | models.Q(
+                        session_level=False,
+                        agent_run_sequence__isnull=False,
+                        agent_run_sequence__gt=0,
+                    )
+                ),
+                name="session_event_level_shape",
+            ),
+            # session_level is derived from the canonical event type. Only
+            # tool_call_closure is session-level today; widening this requires an
+            # explicit mapping change here and in the runtime writer.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(session_level=True, payload__type="tool_call_closure")
+                    | models.Q(session_level=False)
+                    & ~models.Q(payload__type="tool_call_closure")
+                ),
+                name="session_event_session_level_matches_type",
             ),
         ]
 
