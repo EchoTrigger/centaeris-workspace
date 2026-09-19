@@ -257,7 +257,7 @@ def _load_postgres_page(
 
 @sync_to_async(thread_sensitive=True)
 def _load_terminal_sequence(agent_run_id: str) -> int | None:
-    return (
+    sequence = (
         SessionEvent.objects.filter(
             agent_run_id=agent_run_id,
             projects_to_agent_run_stream=True,
@@ -267,6 +267,13 @@ def _load_terminal_sequence(agent_run_id: str) -> int | None:
         .values_list("sequence", flat=True)
         .first()
     )
+    if sequence is None and AgentRun.objects.filter(id=agent_run_id, status__in={"failed", "cancelled"}).exists():
+        # Admission can fail before any semantic event exists. Close the transport;
+        # its next HTTP request reports the admission failure without fabricating events.
+        if not SessionEvent.objects.filter(agent_run_id=agent_run_id, payload__type="user_message").exists():
+            return 0
+    return sequence
+
 
 
 def advance_overlay_barrier(barriers: dict[str, int], event: dict, sequence: int) -> None:

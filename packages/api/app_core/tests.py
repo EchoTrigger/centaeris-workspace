@@ -3167,6 +3167,22 @@ class ApiVerticalSliceTests(TransactionTestCase):
             },
         )
 
+    def test_failed_unadmitted_run_has_no_endless_event_stream(self):
+        from asgiref.sync import async_to_sync
+        owner = User.objects.create_user(username="unadmitted@example.com", password="password")
+        workspace = Workspace.objects.create(name="Unadmitted", createdBy=owner)
+        workspace.members.add(owner)
+        session = create_session(workspace=workspace, owner=owner)
+        run = AgentRun.objects.create(workspace=workspace, session=session, user=owner,
+            modelConfig=ModelConfig.objects.create(displayName="Unadmitted"), prompt="keep my input",
+            status="failed")
+        self.client.force_login(owner)
+        response = self.client.get(f"/api/sessions/{session.id}/agent-runs/{run.id}/events")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json(), {"error": "agent_run_not_admitted"})
+        self.assertEqual(async_to_sync(agent_run_stream._load_terminal_sequence)(run.id), 0)
+        self.assertFalse(SessionEvent.objects.filter(agent_run=run).exists())
+
     def test_transcript_active_run_uses_the_frozen_session_waterline_without_loading_history(self):
         owner = User.objects.create_user(username="active-transcript@example.com", password="password")
         workspace = Workspace.objects.create(name="Active transcript", createdBy=owner)

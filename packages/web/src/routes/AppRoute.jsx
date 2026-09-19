@@ -129,6 +129,8 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   const [pendingUploadFiles, setPendingUploadFiles] = useState([]);
   const [draft, setDraft] = useState("");
   const [pendingUserMessage, setPendingUserMessage] = useState(null);
+  const pendingUserMessageRef = useRef(null);
+  useEffect(() => { pendingUserMessageRef.current = pendingUserMessage; }, [pendingUserMessage]);
   const enterStartsNewLine = useEnterStartsNewLine(user.id);
   const [error, setError] = useState("");
   const [streamIssue, setStreamIssue] = useState(null);
@@ -404,6 +406,15 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     if (errorValue?.name === "AbortError") return;
     if (activeTranscriptRunRef.current?.agentRunId === agentRunId) {
       console.error("Transcript stream stopped", { agentRunId, error: errorValue });
+      if (errorValue?.message === "agent_run_not_admitted") {
+        const pending = pendingUserMessageRef.current;
+        if (pending) setDraft((value) => value ? `${pending.text}\n\n${value}` : pending.text);
+        setPendingUserMessage(null);
+        updateActiveTranscriptRun(null);
+        setStreamIssue(null);
+        setError(t("appRoute.runNotAdmitted"));
+        return;
+      }
       setStreamIssue({ sessionId: activeSessionIdRef.current, agentRunId, error: errorValue, reconnecting: false });
     }
   }

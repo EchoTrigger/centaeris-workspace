@@ -2060,7 +2060,9 @@ impl PostgresSessionLog {
             return Ok(None);
         }
         if rows.len() != entries.len() {
-            return Err("new user turn admission batch partially overlaps committed facts".to_string());
+            return Err(
+                "new user turn admission batch partially overlaps committed facts".to_string(),
+            );
         }
         let mut existing = rows
             .into_iter()
@@ -2083,7 +2085,9 @@ impl PostgresSessionLog {
         for entry in entries {
             let row = existing
                 .remove(entry.event.event_id.as_str())
-                .ok_or_else(|| "new user turn admission batch contains duplicate event ids".to_string())?;
+                .ok_or_else(|| {
+                    "new user turn admission batch contains duplicate event ids".to_string()
+                })?;
             let wire = serde_json::from_str::<serde_json::Value>(row.6.as_str())
                 .map_err(|error| format!("decode stored session record failed: {error}"))?;
             let stored = parse_wire_record(&wire).map_err(|error| error.to_string())?;

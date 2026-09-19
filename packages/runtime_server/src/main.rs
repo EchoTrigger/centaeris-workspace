@@ -1903,9 +1903,14 @@ fn terminalize_agent_run_failure(
     agent_run_start: &AgentRunStart,
     lifecycle_job_id: &str,
     lifecycle_lease_owner: &str,
-    _internal_error: &str,
+    internal_error: &str,
     transition_reason: &str,
 ) -> Result<AgentRunStepOutcome, String> {
+    failure_diagnostics::report(
+        &agent_run_start.agent_run_id,
+        "agent_run_lifecycle",
+        internal_error,
+    );
     if let Some(terminal_state) = load_existing_terminal_state(job_store, agent_run_start)? {
         return Ok(AgentRunStepOutcome {
             retry_at_ms: None,

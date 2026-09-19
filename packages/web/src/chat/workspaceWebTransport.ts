@@ -86,7 +86,8 @@ export async function streamWorkspaceAgentRun({
       if (error instanceof Error && error.name === "AbortError" && controller.failureSignal?.aborted) {
         error = controller.failureSignal.reason;
       }
-      if (error instanceof ApiError && [401, 403, 404].includes(error.status)) throw error;
+      if (error instanceof ApiError && ([401, 403, 404].includes(error.status)
+        || error.message === "agent_run_not_admitted")) throw error;
       if (++failures > 5) throw error;
       if (recover) pendingRecovery = error;
       else if (!(error instanceof TypeError)
