@@ -21,6 +21,15 @@ Workspace owns Agent Memory behavior and storage. Public Core receives generic
 execution file operations and mutation facts; it does not interpret the private
 memory namespace.
 
+This is a private Markdown directory protocol, not a background model maintaining
+memory. The active model uses ordinary read/edit/write tools through
+`plastic-memories://self/`, with MEMORY.md as an index and topics/*.md as detail.
+Storage is scoped by user and Agent, across Sessions. The existing filesystem
+lock and guarded write coordinate concurrent execution instances of that scope.
+The helper consumes `WriteFile.observedFileHash` as its expected current version;
+ordinary workspace files do not enforce this observation. The internal protocol
+rename requires coordinated Core and Workspace updates, with no old-field alias.
+
 ## Request flow
 
 1. Django authenticates the user and checks workspace membership and resource

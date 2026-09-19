@@ -101,12 +101,12 @@ pub fn run_memory_file_system_operation(
     let result = match operation {
         ExecutionFileSystemOperation::WriteFile {
             content,
-            expected_file_hash,
+            observed_file_hash,
             create_only,
         } if memory_path.is_file() => atomic_write(
             &memory_path,
             content.as_slice(),
-            expected_file_hash.as_deref(),
+            observed_file_hash.as_deref(),
             create_only,
         )
         .map(ExecutionFileSystemOutput::WriteFile),
