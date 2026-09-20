@@ -951,7 +951,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     });
   }
 
-  // biome-ignore lint/correctness/noUnusedVariables: Citation preview awaits transcript resource binding.
   async function showCitation(citation, origin) {
     const requestId = previewRequestIdRef.current + 1;
     previewRequestIdRef.current = requestId;
@@ -1290,6 +1289,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
             loadingOlderHistory={loadingOlderHistory}
             onLoadOlderHistory={loadOlderHistory}
             emptyState={isHome ? <HomePlane agent={activeAgent} /> : null}
+            onShowCitation={showCitation}
             onShowArtifact={(artifact) => showArtifact(artifact, "conversation")}
             pendingUserMessage={pendingUserMessage}
             running={hasActiveAgentRun || sending}

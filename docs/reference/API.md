@@ -122,12 +122,22 @@ projections from committed events through a captured sequence, under the run
 projection lock, so it works before terminal lifecycle reconciliation.
 
 Citation snapshots remain an independently authorized resource API and do not
-advance the Session stream cursor. The transcript page carries display blocks
-and content references; it does not embed citation snapshots. Browser citation
-rows must bind this endpoint to a stable transcript block identity before they
-are re-enabled. Historical Core citation events remain validated and cannot by
-themselves populate browser citations. API and web strict schemas must be
-released together; no old-field aliases exist.
+advance the Session stream cursor. Transcript blocks do not embed citations.
+`GET /api/sessions/{sessionId}/transcript/citations?sequence=...` accepts 1–128
+canonical Session source sequences (repeated `sequence` parameters). It returns
+`{sessionId, bindings: [{sourceSequence, sourceToolCallId, snapshot}]}` with no-store
+caching. Only tool-call events in the authorized Session are resolved. Each
+binding uses that event's AgentRun snapshot and filters it by the recorded call ID;
+non-tool/missing sequences are omitted and duplicate requests are collapsed.
+Unknown parameters fail. A tool result retains the tool call's original order key.
+
+The browser requests only loaded tool blocks, refreshes after committed transcript
+changes/recovery, and discards superseded or disposed requests. Tool-source buttons
+open the existing authorized detail/preview panel and retain its original locator.
+Unavailable citations fail locally; refresh failures have an explicit retry.
+These are tool sources, not sentence-level evidence for the final answer. The
+current protocol has no answer-span binding; filenames, URLs and prose are never
+scanned to manufacture one. API and web must be released together.
 
 Internal REST calls require `X-Internal-Token`; there is no anonymous fallback.
 The first-party MCP transport `/internal/mcp` is an exception: it accepts only a

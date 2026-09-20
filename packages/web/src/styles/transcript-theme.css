@@ -27,3 +27,21 @@
 :root[data-theme] :is(.summaryCodePreviewDiffRemoved,.activityDiffLine.isRemoved) { background:var(--diff-remove-bg); }
 :root[data-theme] .cm-selectionBackground { background:color-mix(in srgb,var(--primary-color) 25%,transparent); }
 :root[data-theme] :is(.markdown-content,.markdownContent) a { text-underline-offset:3px; }
+
+.workspaceCitationSources {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin: 6px 0 6px 24px;
+  font-size: 13px;
+  color: var(--process-text);
+}
+.workspaceCitationSources button {
+  background: none;
+  border: 0;
+  padding: 2px;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}

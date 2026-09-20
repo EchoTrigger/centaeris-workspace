@@ -1,3 +1,5 @@
+import { useTranscriptCitations } from "./useTranscriptCitations";
+import type { CitationSummary } from "./citationSnapshot";
 import { createMessageScroll } from "./messageScroll";
 import {
   memo,
@@ -29,6 +31,7 @@ type Props = Readonly<{
   onLoadOlderHistory(): Promise<void>;
   emptyState?: ReactNode;
   pendingUserMessage?: Readonly<{ text: string; startedAtMs: number; baselineUserBlocks: number }> | null;
+  onShowCitation?(citation: CitationSummary, origin: { elementId: string }): void;
   onShowArtifact?(artifact: import("./useTranscriptTurnMetadata").PublishedArtifact): void;
   running?: boolean;
   startedAtMs?: number;
@@ -85,6 +88,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   emptyState,
   pendingUserMessage,
   onShowArtifact,
+  onShowCitation,
   running = false,
   startedAtMs,
   completedAtMs,
@@ -92,6 +96,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   const { t } = useTranslation();
   const { blockIds, hasOlder } = useTranscriptList(store);
   const live = useTranscriptLive(store);
+  const citations = useTranscriptCitations(store, sessionId);
   const turns = useMemo(() => groupTranscriptTurns(blockIds, store.getBlockSnapshot), [store, blockIds]);
   const turnAnchors = turns.map((turn) => store.getBlockSnapshot(turn.userBlockId ?? turn.processIds[0] ?? turn.answerIds[0])?.orderKey.sourceSequence ?? "");
   const workTimes = useTranscriptTurnMetadata(sessionId, turnAnchors.filter(Boolean).join(","), running);
@@ -271,6 +276,10 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
       >
         {loadingHistory ? <div className="workspaceEmptyState" role="status">{t("virtualAgentRunList.loadingConversation")}</div> : null}
         {!loadingHistory && blockIds.length === 0 && live === null && !pendingVisible ? (emptyState || null) : null}
+        {citations.error ? <div role="status" className="workspaceToolOutputStatus">
+          {t("appRoute.citationRefreshFailed")}
+          <button type="button" onClick={citations.retry}>{t("codePreview.retry")}</button>
+        </div> : null}
         <div className="workspaceTranscriptBlocks" ref={contentRef}>
           {turns.map((turn, index) => {
             const isLast = index === turns.length - 1 && !pendingVisible;
@@ -281,7 +290,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
               <WorkProgress running={isLast && running} finalStarted={turn.answerIds.length > 0}
                 startedAtMs={time?.startedAtMs ?? (isLast ? startedAtMs : undefined)} completedAtMs={time?.completedAtMs ?? (isLast ? completedAtMs : undefined)}>
                 {groupTranscriptBlocks(store, turn.processIds).map((entry) => entry.kind === "tool"
-                  ? <TranscriptToolGroupCard store={store} blockIds={entry.blockIds} toolOperations={toolOperations} key={`tool:${entry.blockIds[0]}`} />
+                  ? <TranscriptToolGroupCard store={store} blockIds={entry.blockIds} toolOperations={toolOperations} citations={citations.citations} onShowCitation={onShowCitation} key={`tool:${entry.blockIds[0]}`} />
                   : <TranscriptBlockRow store={store} blockId={entry.blockId} key={entry.blockId} />)}
                 {turnLive ? <TranscriptLiveTail live={turnLive} /> : null}
               </WorkProgress>

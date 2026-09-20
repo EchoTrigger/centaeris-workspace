@@ -1,11 +1,11 @@
 from ninja import Router, Status
 from django.http import HttpResponse
 
-from app_core.models import AgentRun, SessionCitationProjection
+from app_core.models import AgentRun, SessionCitationProjection, SessionEvent
 from app_core.session_event import citation_snapshot
 from app_core.workspace_access import workspace_membership_for
 
-from .response_schema import CitationEnvelope, CitationSnapshotResponse, COMMON_ERROR_RESPONSES
+from .response_schema import CitationEnvelope, CitationSnapshotResponse, TranscriptCitationsResponse, COMMON_ERROR_RESPONSES
 from .security import session_auth
 
 
@@ -22,6 +22,38 @@ def run_citations(request, response: HttpResponse, session_id: str, agent_run_id
     if request.GET:
         return Status(400, {"error": "citation_snapshot_query_invalid"})
     return citation_snapshot(run)
+
+
+@router.get("/sessions/{session_id}/transcript/citations", auth=session_auth,
+            response={200: TranscriptCitationsResponse} | COMMON_ERROR_RESPONSES)
+def transcript_citations(request, response: HttpResponse, session_id: str):
+    from .workspaces import _authorized_transcript_session, _canonical_waterline
+
+    response["Cache-Control"] = "no-store"
+    session = _authorized_transcript_session(request.user, session_id)
+    if session is None:
+        return Status(404, {"error": "session_not_found"})
+    values = request.GET.getlist("sequence")
+    if (set(request.GET) != {"sequence"} or not 1 <= len(values) <= 128
+            or not all(_canonical_waterline(value) and int(value) <= 9_223_372_036_854_775_807 for value in values)):
+        return Status(400, {"error": "transcript_citations_query_invalid"})
+    # Core keeps the original tool_call order key after a tool result. Resolve
+    # that Session sequence before consulting the existing run-scoped snapshot.
+    records = SessionEvent.objects.filter(session=session, agent_run__user=request.user,
+        sequence__in=[int(value) for value in values], payload__type="tool_call",
+    ).select_related("agent_run").order_by("sequence")
+    snapshots = {}
+    bindings = []
+    for record in records:
+        run_id = record.agent_run_id
+        if run_id not in snapshots:
+            snapshots[run_id] = citation_snapshot(record.agent_run)
+        snapshot = snapshots[run_id]
+        call_id = record.payload["payload"]["callId"]
+        bindings.append({"sourceSequence": str(record.sequence), "sourceToolCallId": call_id,
+            "snapshot": {**snapshot, "citations": [citation for citation in snapshot["citations"]
+                if citation["sourceToolCallId"] == call_id]}})
+    return {"sessionId": session.id, "bindings": bindings}
 
 
 @router.get(

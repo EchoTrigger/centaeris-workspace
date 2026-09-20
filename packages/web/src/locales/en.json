@@ -1,4 +1,5 @@
 {
+  "transcriptBlockContent.toolSources": "Tool sources",
   "language.label": "Language",
   "agentRunRow.agentSessions": "Agent sessions",
   "agentRunRow.agent": "Agent",
