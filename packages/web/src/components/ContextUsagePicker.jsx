@@ -1,7 +1,8 @@
 
 import { useTranslation } from "../i18n";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiJson } from "../api";
+import { dismissDetailsOnOutsideInteraction } from "./detailsDismissal";
 
 function formatTokens(value) {
   if (!Number.isFinite(value)) return "0";
@@ -12,6 +13,13 @@ function formatTokens(value) {
 export function ContextUsagePicker({ sessionId, isRunning }) {
   const { t } = useTranslation();
   const [contextUsage, setContextUsage] = useState(null);
+  const pickerRef = useRef(null);
+
+  useEffect(() => {
+    if (!sessionId || !pickerRef.current) return undefined;
+    pickerRef.current.open = false;
+    return dismissDetailsOnOutsideInteraction(pickerRef.current);
+  }, [sessionId]);
 
   useEffect(() => {
     let active = true;
@@ -53,7 +61,7 @@ export function ContextUsagePicker({ sessionId, isRunning }) {
   ] : [];
 
   return (
-    <details className="workspaceContextUsage">
+    <details className="workspaceContextUsage" ref={pickerRef}>
       <summary aria-label={t("context.Context window")} title={t("context.Context window")}>
         <span style={{ "--context-used": `${usedPercentage * 3.6}deg` }} />
       </summary>

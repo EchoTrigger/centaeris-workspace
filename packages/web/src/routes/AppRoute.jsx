@@ -1086,7 +1086,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
 
   const hasContextPanel = contextPanel.mode !== "closed";
   const contextPanelClass = hasContextPanel ? "withContextPanel withFilePreview" : "";
-  const isHome = !requestedSessionId && !sessionId && transcriptList.blockIds.length === 0;
+  const isHome = !requestedSessionId && !sessionId && transcriptList.blockIds.length === 0 && !pendingUserMessage;
   useLayoutEffect(() => {
     const startRect = composerStartRectRef.current;
     if (isHome || !startRect) return;
