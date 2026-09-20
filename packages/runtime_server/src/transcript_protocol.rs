@@ -1,10 +1,9 @@
 use centaeris_core::session::transcript::{
     TranscriptPagePolicyV1, TranscriptPageReadRequestV1, TranscriptPageV1,
-    TranscriptPatchReadRequestV1, TranscriptPatchV1, TranscriptProjectionGenerationStorePortV1,
+    TranscriptPatchReadRequestV1, TranscriptProjectionGenerationStorePortV1,
     TranscriptProjectionStorePort, TRANSCRIPT_PAGE_SCHEMA_V1,
     TRANSCRIPT_PROJECTION_GENERATION_INVALIDATED, TRANSCRIPT_PROJECTION_VERSION_V1,
 };
-use serde::{Deserialize, Serialize};
 
 use crate::postgres_store::PostgresRuntimeStore;
 
@@ -12,49 +11,8 @@ const PAGE_REQUEST_SCHEMA: &str = "runtime.transcript.page.read.v1";
 const PATCH_REQUEST_SCHEMA: &str = "runtime.transcript.patch.read.v1";
 const PATCH_PAGE_SCHEMA: &str = "transcript.patch.page.v1";
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PageRequest {
-    schema: String,
-    session_id: String,
-    projection_version: String,
-    projection_generation: Option<String>,
-    source_high_water: String,
-    older_cursor: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PatchRequest {
-    schema: String,
-    session_id: String,
-    projection_version: String,
-    projection_generation: String,
-    after_source_high_water: String,
-    through_source_high_water: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PatchPage {
-    schema: &'static str,
-    session_id: String,
-    projection_version: String,
-    projection_generation: String,
-    through_source_high_water: String,
-    patches: Vec<TranscriptPatchV1>,
-    next_source_high_water: String,
-    has_more: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProjectionNotReady<'a> {
-    error: &'static str,
-    projection_generation: &'a str,
-    source_high_water: &'a str,
-    projected_high_water: String,
-}
+mod wire;
+use wire::*;
 
 pub(crate) fn handle(
     path: &str,
@@ -75,11 +33,11 @@ fn content(body: &[u8], store: &PostgresRuntimeStore) -> Result<(u16, Vec<u8>), 
     >(body)
     {
         Ok(request) if request.validate().is_ok() && request.event_reference().is_ok() => request,
-        _ => return json_error(400, "transcript_content_request_invalid"),
+        _ => return json_error(400, ErrorCode::ContentRequestInvalid),
     };
     let response = match store.read_transcript_event_content(&request) {
         Ok(response) => response,
-        Err(_) => return json_error(409, "transcript_content_unavailable"),
+        Err(_) => return json_error(409, ErrorCode::ContentUnavailable),
     };
     serde_json::to_vec(&response)
         .map(|body| (200, body))
@@ -94,7 +52,7 @@ fn page(body: &[u8], store: &PostgresRuntimeStore) -> Result<(u16, Vec<u8>), Str
         {
             wire
         }
-        Ok(_) | Err(_) => return json_error(400, "transcript_page_request_invalid"),
+        Ok(_) | Err(_) => return json_error(400, ErrorCode::PageRequestInvalid),
     };
     let opens_current_view = wire.projection_generation.is_none();
     let current =
@@ -104,7 +62,7 @@ fn page(body: &[u8], store: &PostgresRuntimeStore) -> Result<(u16, Vec<u8>), Str
         .as_deref()
         .is_some_and(|generation| generation != current.projection_generation)
     {
-        return json_error(409, "transcript_view_invalidated");
+        return json_error(409, ErrorCode::ViewInvalidated);
     }
     let request = TranscriptPageReadRequestV1 {
         session_id: wire.session_id,
@@ -115,7 +73,7 @@ fn page(body: &[u8], store: &PostgresRuntimeStore) -> Result<(u16, Vec<u8>), Str
         policy: TranscriptPagePolicyV1::default(),
     };
     if request.validate().is_err() {
-        return json_error(400, "transcript_page_request_invalid");
+        return json_error(400, ErrorCode::PageRequestInvalid);
     }
     if request.source_high_water == "0" {
         let page = TranscriptPageV1 {
@@ -146,7 +104,7 @@ fn page(body: &[u8], store: &PostgresRuntimeStore) -> Result<(u16, Vec<u8>), Str
     let result = match store.load_current_transcript_page(request) {
         Ok(result) => result,
         Err(error) if is_invalidated_store_read(&error) => {
-            return json_error(409, "transcript_view_invalidated")
+            return json_error(409, ErrorCode::ViewInvalidated)
         }
         Err(error) => return Err(error),
     };
@@ -163,7 +121,7 @@ fn patches(body: &[u8], store: &PostgresRuntimeStore) -> Result<(u16, Vec<u8>), 
         {
             wire
         }
-        Ok(_) | Err(_) => return json_error(400, "transcript_patch_request_invalid"),
+        Ok(_) | Err(_) => return json_error(400, ErrorCode::PatchRequestInvalid),
     };
     let request = TranscriptPatchReadRequestV1 {
         session_id: wire.session_id,
@@ -173,12 +131,12 @@ fn patches(body: &[u8], store: &PostgresRuntimeStore) -> Result<(u16, Vec<u8>), 
         through_source_high_water: wire.through_source_high_water,
     };
     if request.validate().is_err() {
-        return json_error(400, "transcript_patch_request_invalid");
+        return json_error(400, ErrorCode::PatchRequestInvalid);
     }
     let current =
         store.load_or_initialize_current_transcript_generation(request.session_id.as_str())?;
     if current.projection_generation != request.projection_generation {
-        return json_error(409, "transcript_view_invalidated");
+        return json_error(409, ErrorCode::ViewInvalidated);
     }
     if request.after_source_high_water == "0" && request.through_source_high_water == "0" {
         let page = PatchPage {
@@ -207,7 +165,7 @@ fn patches(body: &[u8], store: &PostgresRuntimeStore) -> Result<(u16, Vec<u8>), 
     let result = match store.load_current_transcript_patches(request.clone()) {
         Ok(result) => result,
         Err(error) if is_invalidated_store_read(&error) => {
-            return json_error(409, "transcript_view_invalidated")
+            return json_error(409, ErrorCode::ViewInvalidated)
         }
         Err(error) => return Err(error),
     };
@@ -242,7 +200,7 @@ fn projection_gate(
             if schedule_rebuild {
                 store.schedule_transcript_generation_rebuild(session_id, requested, generation)?;
             }
-            return json_error(409, "transcript_view_invalidated").map(Some);
+            return json_error(409, ErrorCode::ViewInvalidated).map(Some);
         }
     }
     let mut projected = head.map_or_else(|| "0".to_string(), |head| head.source_high_water);
@@ -261,14 +219,14 @@ fn projection_gate(
                         session_id, requested, generation,
                     )?;
                 }
-                return json_error(409, "transcript_view_invalidated").map(Some);
+                return json_error(409, ErrorCode::ViewInvalidated).map(Some);
             }
             return Err(error);
         }
         head = store.load_transcript_projection_head(session_id, generation)?;
         if let Some(head) = &head {
             if head.invalidation_reason.is_some() {
-                return json_error(409, "transcript_view_invalidated").map(Some);
+                return json_error(409, ErrorCode::ViewInvalidated).map(Some);
             }
         }
         projected = head.map_or_else(|| "0".to_string(), |head| head.source_high_water);
@@ -290,8 +248,8 @@ fn projection_gate(
     Ok(None)
 }
 
-fn json_error(status: u16, error: &str) -> Result<(u16, Vec<u8>), String> {
-    serde_json::to_vec(&serde_json::json!({"error": error}))
+fn json_error(status: u16, error: ErrorCode) -> Result<(u16, Vec<u8>), String> {
+    serde_json::to_vec(&ErrorResponse { error })
         .map(|body| (status, body))
         .map_err(|failure| format!("encode transcript error failed: {failure}"))
 }

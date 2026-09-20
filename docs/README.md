@@ -7,6 +7,10 @@ boundaries, and release verification.
 
 - [Architecture](architecture/Architecture.md): component ownership and request
   flow.
+- [Pre-admission cancellation](architecture/PreAdmissionCancellation.md): durable
+  cancellation receipts without fabricated Session history.
+- [Generated transcript contract](../packages/api/app_core/generated/README.md):
+  Core-derived wire structure and Python validation.
 - [Platform materials and MCP](architecture/PlatformMaterials.md): material
   access, durable processing, evidence receipts and citation presentation.
 - [API](reference/API.md): REST, SSE, and internal service contracts.

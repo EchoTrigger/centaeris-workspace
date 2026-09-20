@@ -17,6 +17,7 @@ Run "Public Core revision" { node --test scripts/core-revision.test.mjs }
 Run "Rust toolchain consistency" { node --test scripts/rust-toolchain.test.mjs }
 Run "Rust check" { cargo check --workspace --locked }
 Run "Rust tests" { cargo test --workspace --locked }
+Run "Transcript generated contract" { python scripts/transcript-schema.py --check }
 Run "Outbox gate isolation and discovery guards" { python scripts/test_runtime_outbox_gate.py }
 Run "Outbox PostgreSQL regressions" { uv run --frozen --package api python scripts/runtime_outbox_gate.py }
 Run "AgentRun authorization parity" { pwsh -NoProfile -File scripts/agent-run-authorization-gate.ps1 }
