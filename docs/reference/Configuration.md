@@ -185,6 +185,12 @@ to the same object storage as the API. See
 
 ## Production review
 
+Runtime's `DOCKER_CREATE_CONCURRENCY` limits simultaneous Docker container-create
+calls (integer 1..16, default 2); invalid values fail startup. This does not change
+worker slots, start/remove concurrency or execution limits. The production
+Compose configuration retains the default. Isolated perf experiments use
+`PERF_DOCKER_CREATE_CONCURRENCY` in `perf/.state/test.env` through the perf overlay.
+
 Before deployment, set `DJANGO_DEBUG=0`, use explicit allowed hosts and web
 origin, rotate all example values, verify HTTPS termination, and render the
 complete Compose configuration with:

@@ -13,6 +13,8 @@ services:
 
   worker:
     image: centaeris-perf-worker:local
+    environment:
+      WORKSPACE_PERF_OBSERVATIONS: "1"
 
   material-worker:
     image: centaeris-perf-api:local
@@ -76,4 +78,6 @@ services:
       - ./perf/certs/out/isolated/mock-ca.crt:/perf-certs/mock-ca.crt:ro
     environment:
       WORKSPACE_GENERAL_IMAGE: centaeris-perf-general:local
+      DOCKER_CREATE_CONCURRENCY: ${PERF_DOCKER_CREATE_CONCURRENCY:-2}
+      WORKSPACE_PERF_OBSERVATIONS: "1"
       SSL_CERT_FILE: /perf-certs/mock-ca.crt

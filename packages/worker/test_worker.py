@@ -41,6 +41,21 @@ def lifecycle_fixture(agentRunId="agent_run_1"):
 
 
 class WorkerContractTests(unittest.TestCase):
+    def test_observation_keeps_claim_rejection_reason_without_logging_credentials(self):
+        output = io.StringIO()
+        error = urllib.error.HTTPError("http://runtime.invalid/internal/jobs/claim", 503, "busy", {},
+            io.BytesIO(b'{"error":"execution_claim_busy"}'))
+        with patch.object(worker.observations, "ENABLED", True), patch("sys.stderr", output), \
+                patch.object(worker.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaises(worker.DependencyUnavailable) as raised:
+                worker.runtime_request("/internal/jobs/claim", {"secret": "do-not-log"})
+        self.assertEqual(str(raised.exception), "execution_claim_busy")
+        event = json.loads(output.getvalue())
+        self.assertEqual(event["httpStatus"], 503)
+        self.assertEqual(event["errorCode"], "execution_claim_busy")
+        self.assertEqual(event["route"], "/internal/jobs/claim")
+        self.assertNotIn("do-not-log", output.getvalue())
+        self.assertNotIn("test-internal-token", output.getvalue())
 
     def test_terminal_dispatcher_does_not_acknowledge_partial_fanout(self):
         cursor = {"checkpointId": "checkpoint:dense", "toolCallId": "call:0255"}

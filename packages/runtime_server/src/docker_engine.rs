@@ -13,6 +13,23 @@ const MUTATION_TIMEOUT: Duration = Duration::from_secs(30);
 static ENGINE: OnceLock<Result<Engine, String>> = OnceLock::new();
 static IO_RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
 
+fn parse_create_limit(value: Option<&str>) -> Result<usize, String> {
+    let Some(value) = value else { return Ok(2) };
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|value| (1..=16).contains(value))
+        .ok_or_else(|| "DOCKER_CREATE_CONCURRENCY must be an integer between 1 and 16".to_string())
+}
+
+pub(crate) fn create_limit_from_env() -> Result<usize, String> {
+    match std::env::var("DOCKER_CREATE_CONCURRENCY") {
+        Ok(value) => parse_create_limit(Some(&value)),
+        Err(std::env::VarError::NotPresent) => parse_create_limit(None),
+        Err(_) => Err("DOCKER_CREATE_CONCURRENCY must be valid Unicode".to_string()),
+    }
+}
+
 struct Engine {
     docker: Docker,
     runtime: &'static tokio::runtime::Runtime,
@@ -54,7 +71,7 @@ fn shared() -> Result<&'static Engine, String> {
             let mut engine = Engine {
                 docker,
                 runtime,
-                creates: tokio::sync::Semaphore::new(2),
+                creates: tokio::sync::Semaphore::new(create_limit_from_env()?),
             };
             engine.docker = engine.run(QUERY_TIMEOUT, async {
                 engine
@@ -233,6 +250,12 @@ pub(crate) fn verify_created(facts: &Value, request: &Value) -> Result<String, S
 }
 
 pub(crate) fn ensure_created(name: &str, request: Value) -> Result<String, String> {
+    crate::observations::timed("dockerEnsureCreated", || {
+        ensure_created_inner(name, request)
+    })
+}
+
+fn ensure_created_inner(name: &str, request: Value) -> Result<String, String> {
     if let Some(facts) = inspect(name)? {
         return verify_created(&facts, &request);
     }
@@ -246,8 +269,13 @@ pub(crate) fn ensure_created(name: &str, request: Value) -> Result<String, Strin
         );
     }
     let created = engine.run(MUTATION_TIMEOUT, async {
-        let _permit = engine.creates.acquire().await.map_err(|e| e.to_string())?;
-        engine
+        let mut wait = crate::observations::Span::new("dockerCreatePermitWait");
+        let permit = engine.creates.acquire().await;
+        wait.finished(permit.is_ok());
+        drop(wait);
+        let _permit = permit.map_err(|e| e.to_string())?;
+        let mut span = crate::observations::Span::new("dockerCreate");
+        let result = engine
             .docker
             .create_container(
                 Some(CreateContainerOptions {
@@ -258,7 +286,9 @@ pub(crate) fn ensure_created(name: &str, request: Value) -> Result<String, Strin
             )
             .await
             .map(|response| response.id)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string());
+        span.finished(result.is_ok());
+        result
     });
     // Also inspect after an error: create may have committed before the socket
     // failed. Never issue another create or change the deterministic name here.
@@ -291,6 +321,10 @@ pub(crate) fn ensure_created(name: &str, request: Value) -> Result<String, Strin
 }
 
 pub(crate) fn start(id: &str) -> Result<(), String> {
+    crate::observations::timed("dockerStart", || start_inner(id))
+}
+
+fn start_inner(id: &str) -> Result<(), String> {
     let facts = inspect(id)?.ok_or("Docker container missing before start")?;
     match facts["State"]["Status"].as_str() {
         Some("running" | "exited") => return Ok(()), // Never restart a completed process.
@@ -299,11 +333,14 @@ pub(crate) fn start(id: &str) -> Result<(), String> {
     }
     let engine = shared()?;
     let started = engine.run(MUTATION_TIMEOUT, async {
-        engine
+        let mut span = crate::observations::Span::new("dockerDaemonStart");
+        let result = engine
             .docker
             .start_container(id, None::<StartContainerOptions>)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string());
+        span.finished(result.is_ok());
+        result
     });
     let facts = inspect(id)?.ok_or("Docker container disappeared after start")?;
     if matches!(
@@ -319,13 +356,18 @@ pub(crate) fn start(id: &str) -> Result<(), String> {
 }
 
 pub(crate) fn remove(id: &str, volumes: bool) -> Result<(), String> {
+    crate::observations::timed("dockerRemove", || remove_inner(id, volumes))
+}
+
+fn remove_inner(id: &str, volumes: bool) -> Result<(), String> {
     // Callers verify ownership and pass the immutable ID, never a mutable name.
     if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("Docker removal requires an immutable container ID".to_string());
     }
     let engine = shared()?;
     let removed = engine.run(MUTATION_TIMEOUT, async {
-        engine
+        let mut span = crate::observations::Span::new("dockerDaemonRemove");
+        let result = engine
             .docker
             .remove_container(
                 id,
@@ -336,7 +378,9 @@ pub(crate) fn remove(id: &str, volumes: bool) -> Result<(), String> {
                 }),
             )
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string());
+        span.finished(result.is_ok());
+        result
     });
     if inspect(id)?.is_none() {
         Ok(())
@@ -351,6 +395,27 @@ pub(crate) fn remove(id: &str, volumes: bool) -> Result<(), String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn create_limit_defaults_to_two_and_rejects_invalid_values() {
+        assert_eq!(parse_create_limit(None).unwrap(), 2);
+        for value in ["1", "2", "4", "16"] {
+            assert_eq!(
+                parse_create_limit(Some(value)).unwrap(),
+                value.parse::<usize>().unwrap()
+            );
+        }
+        for value in [
+            "",
+            "0",
+            "17",
+            "-1",
+            "four",
+            " 4",
+            "999999999999999999999999",
+        ] {
+            assert!(parse_create_limit(Some(value)).is_err(), "{value}");
+        }
+    }
     #[test]
     fn mount_readonly_omission_is_writable_without_weakening_other_fields() {
         let request = json!({"HostConfig":{"ReadonlyRootfs":true,"Mounts":[{"Type":"volume","Source":"memory","Target":"/memory","ReadOnly":false,"VolumeOptions":{"Subpath":"tenant"}}]}});
