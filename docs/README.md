@@ -38,6 +38,8 @@ boundaries, and release verification.
   definitions without local run receipts.
 - [Isolated performance harness](../perf/README.md): synthetic test deployment,
   TLS preflight, worker slot control, and external evidence collection.
+- [Short-window observations](../perf/Observations.md): worker, request-lane and
+  Docker timings with read-only evidence collection.
 - [Third-party notices](../THIRD_PARTY_NOTICES.md): bundled font licenses.
 
 Runtime semantics remain in the external public Runtime Framework and are not

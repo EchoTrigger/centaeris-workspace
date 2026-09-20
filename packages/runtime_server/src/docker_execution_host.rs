@@ -802,6 +802,10 @@ impl DockerExecutionHostRunner {
     }
 
     pub fn teardown(agent_run_id: &str) -> Result<(), String> {
+        crate::observations::timed("sandboxTeardown", || Self::teardown_inner(agent_run_id))
+    }
+
+    fn teardown_inner(agent_run_id: &str) -> Result<(), String> {
         for name in container_ids_for_agent_run(agent_run_id)? {
             let Some(facts) = inspect_container(name.as_str())? else {
                 continue;
@@ -2074,6 +2078,15 @@ fn authorized_system_skill_path(model_path: &str) -> Result<bool, ExecutionFileS
 }
 
 fn ensure_container(
+    expected: &ContainerExpectation<'_>,
+    has_execution_fact: bool,
+) -> Result<(), String> {
+    crate::observations::timed("sandboxEnsure", || {
+        ensure_container_inner(expected, has_execution_fact)
+    })
+}
+
+fn ensure_container_inner(
     expected: &ContainerExpectation<'_>,
     has_execution_fact: bool,
 ) -> Result<(), String> {
