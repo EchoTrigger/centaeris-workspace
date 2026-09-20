@@ -331,9 +331,110 @@ fn test_url() -> String {
 
 fn reset_store(url: &str) {
     let mut client = Client::connect(url, NoTls).expect("connect test Postgres");
+    client.batch_execute("CREATE TABLE IF NOT EXISTS public.app_core_agentrun(id text PRIMARY KEY, session_id text NOT NULL, \"preAdmissionCancelledAt\" timestamptz); DELETE FROM public.app_core_agentrun;").expect("reset hosted run receipts");
     client
         .batch_execute("DROP SCHEMA IF EXISTS runtime CASCADE")
         .expect("reset runtime schema");
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_pre_admission_cancellation_is_durable_fenced_and_history_free() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    let mut db = Client::connect(&url, NoTls).unwrap();
+    db.batch_execute(
+        "DROP TABLE IF EXISTS public.app_core_sessionevent CASCADE;
+        DROP TABLE IF EXISTS public.app_core_session CASCADE;
+        CREATE TABLE public.app_core_session(id text PRIMARY KEY,workspace_id text NOT NULL);
+        CREATE TABLE public.app_core_sessionevent(agent_run_id text,session_level boolean NOT NULL);
+        INSERT INTO public.app_core_session VALUES('cancel-session','cancel-workspace');
+        INSERT INTO public.app_core_agentrun(id,session_id) VALUES('cancel-run','cancel-session');",
+    )
+    .unwrap();
+    let mut record = job("agent_run.lifecycle:cancel-run", "unused");
+    record.job_kind = "agent_run.lifecycle".into();
+    record.idempotency_key = "agent_run.lifecycle:cancel-run:digest".into();
+    record.session_id = Some("cancel-session".into());
+    record.payload_ref = Some("record:agent_run:cancel-run".into());
+    store
+        .schedule_runtime_job(ScheduleRuntimeJobRequest { job: record })
+        .unwrap();
+    let now: i64 = db
+        .query_one(
+            "SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    store
+        .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
+            now_ms: now,
+            worker_id: "owner".into(),
+            job_id: Some("agent_run.lifecycle:cancel-run".into()),
+            job_kind: None,
+            session_id: None,
+            limit: 1,
+            lease_ms: 60_000,
+        })
+        .unwrap();
+    store
+        .start_runtime_job(StartRuntimeJobRequest {
+            job_id: "agent_run.lifecycle:cancel-run".into(),
+            lease_owner: "owner".into(),
+            started_at_ms: now,
+        })
+        .unwrap();
+    let fence = RuntimeJobLeaseFence {
+        job_id: "agent_run.lifecycle:cancel-run".into(),
+        job_kind: "agent_run.lifecycle".into(),
+        lease_owner: "owner".into(),
+    };
+    let log = store.session_log(
+        "cancel-workspace".into(),
+        "cancel-session".into(),
+        "never admitted".into(),
+    );
+    assert!(log
+        .commit_pre_admission_cancellation("cancel-run", "digest", &fence)
+        .is_err());
+    store
+        .request_agent_run_cancellation("cancel-run", "cancel-session", "digest", now)
+        .unwrap();
+    let stale = RuntimeJobLeaseFence {
+        lease_owner: "stale".into(),
+        ..fence.clone()
+    };
+    assert!(log
+        .commit_pre_admission_cancellation("cancel-run", "digest", &stale)
+        .is_err());
+    assert!(log
+        .commit_pre_admission_cancellation("cancel-run", "wrong", &fence)
+        .is_err());
+    for _ in 0..2 {
+        log.commit_pre_admission_cancellation("cancel-run", "digest", &fence)
+            .unwrap();
+    }
+    let receipt: String = db.query_one("SELECT \"preAdmissionCancelledAt\"::text FROM public.app_core_agentrun WHERE id='cancel-run'", &[]).unwrap().get(0);
+    log.commit_pre_admission_cancellation("cancel-run", "digest", &fence)
+        .unwrap();
+    assert_eq!(receipt, db.query_one("SELECT \"preAdmissionCancelledAt\"::text FROM public.app_core_agentrun WHERE id='cancel-run'", &[]).unwrap().get::<_, String>(0));
+    assert_eq!(
+        db.query_one("SELECT COUNT(*) FROM public.app_core_sessionevent", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    db.execute(
+        "INSERT INTO public.app_core_sessionevent VALUES('cancel-run',false)",
+        &[],
+    )
+    .unwrap();
+    assert!(log
+        .commit_pre_admission_cancellation("cancel-run", "digest", &fence)
+        .is_err());
 }
 
 #[test]

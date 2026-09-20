@@ -39,6 +39,8 @@ def committed_session_terminal_state(agent_run: AgentRun) -> str | None:
         .values_list("payload__type", flat=True)
         .first()
     )
+    if terminal is None and agent_run.preAdmissionCancelledAt is not None:
+        return "cancelled"
     return TERMINAL_STATES.get(terminal)
 
 
@@ -54,6 +56,13 @@ def project_committed_agent_run(
         )
         events = _committed_events(locked_agent_run)
         if not events:
+            if locked_agent_run.preAdmissionCancelledAt is not None:
+                if expected_status not in (None, "cancelled"):
+                    raise ValueError("runtime and pre-admission terminal states mismatch")
+                locked_agent_run.status = "cancelled"
+                locked_agent_run.startedAt = None
+                locked_agent_run.completedAt = locked_agent_run.preAdmissionCancelledAt
+                locked_agent_run.save(update_fields=["status", "startedAt", "completedAt", "updatedAt"])
             return locked_agent_run
         status = TERMINAL_STATES.get(events[-1].payload["type"])
         if status is None:
