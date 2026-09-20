@@ -735,6 +735,45 @@ class ApiVerticalSliceTests(TransactionTestCase):
         ):
             self.assertIn(f'"type":"{event_type}"', stream)
 
+    def test_pre_admission_cancellation_projects_without_session_history(self):
+        user = User.objects.create_user(username="pre-cancel@example.com", password="password")
+        workspace = Workspace.objects.create(name="Cancellation", createdBy=user)
+        workspace.members.add(user)
+        model = ModelConfig.objects.create(id="pre-cancel-model", displayName="Fake")
+        session = create_session(workspace=workspace, owner=user)
+        run = AgentRun.objects.create(workspace=workspace, session=session, user=user,
+                                      modelConfig=model, prompt="never admitted", status="running",
+                                      transitionReason="execution_queue_expired")
+        create_agent_run_authorization(run)
+        body = {"schema": "runtime.agent_run.transition.v1", "agentRunId": run.id,
+                "state": "cancelled", "transitionReason": "agent_run_cancelled"}
+        def transition():
+            return self.client.post("/internal/agent-runs/transition", data=json.dumps(body),
+                                    content_type="application/json", HTTP_X_INTERNAL_TOKEN="test-internal-token")
+        self.assertEqual(transition().status_code, 409)  # Caller claims are not evidence.
+        committed_at = timezone.now()
+        AgentRun.objects.filter(id=run.id).update(preAdmissionCancelledAt=committed_at)
+        resolved = self.client.post("/internal/agent-run-lifecycle/resolve",
+            data=json.dumps({"schema": "runtime.agent_run_lifecycle.resolve.v1",
+                "agentRunId": run.id, "jobId": f"agent_run.lifecycle:{run.id}",
+                "authorizationDigest": run.authorization.digest}),
+            content_type="application/json", HTTP_X_INTERNAL_TOKEN="test-internal-token")
+        self.assertEqual(resolved.status_code, 200)
+        self.assertEqual(resolved.json()["terminalState"], "cancelled")
+        for _ in range(2):
+            self.assertEqual(transition().status_code, 200)
+        run.refresh_from_db()
+        self.assertEqual(run.status, "cancelled")
+        self.assertEqual(run.transitionReason, "execution_queue_expired")
+        self.assertEqual(run.completedAt, committed_at)
+        self.assertFalse(SessionEvent.objects.filter(agent_run=run).exists())
+        with patch("app_core.http.internal.get_runtime_job") as get_job:
+            response = self.client.post("/internal/agent-run-lifecycle/reconcile",
+                data=json.dumps({"schema": "runtime.agent_run_lifecycle.reconcile.v1", "limit": 100}),
+                content_type="application/json", HTTP_X_INTERNAL_TOKEN="test-internal-token")
+        self.assertEqual(response.status_code, 200)
+        get_job.assert_not_called()
+
     def test_agent_run_lifecycle_reconciler_terminates_failed_job_without_deleting_session(self):
         user = User.objects.create_user(
             username="dead-letter@example.com", password="password"

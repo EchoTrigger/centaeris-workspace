@@ -1233,7 +1233,10 @@ def _fail_agent_run_lifecycle(agent_run_id: str) -> AgentRun:
         if committed_session_terminal_state(agent_run) is not None:
             projected = project_committed_agent_run(agent_run)
             if projected.status in {"completed", "failed", "cancelled"}:
-                projected.transitionReason = "runtime_session_terminal_committed"
+                if projected.preAdmissionCancelledAt is None:
+                    projected.transitionReason = "runtime_session_terminal_committed"
+                elif projected.transitionReason != "execution_queue_expired":
+                    projected.transitionReason = "agent_run_cancelled"
                 projected.save(update_fields=["transitionReason", "updatedAt"])
                 return projected
         if agent_run.status == "failed":
