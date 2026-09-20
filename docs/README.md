@@ -33,6 +33,8 @@ boundaries, and release verification.
 
 - [Security model](security/Model.md): trust boundaries, credentials, execution,
   and Plugin risk.
+- [Memory acceptance](eval/MemoryAcceptance.md): offline discovery and private
+  persistence checks, plus bounded real-model follow-up.
 - [Release gate](eval/ReleaseGate.md): required source and deployment checks.
 - [Performance evaluation](eval/PerformanceEvaluation.md): reproducible measurement
   definitions without local run receipts.
