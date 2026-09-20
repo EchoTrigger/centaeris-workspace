@@ -40,3 +40,14 @@ centaeris-runtime-sqlite.workspace = true
 rmcp = { workspace = true, features = ["macros", "server", "transport-streamable-http-server"] }
 rusqlite.workspace = true
 zstd.workspace = true
+
+[features]
+contract-schema = ["dep:schemars", "centaeris-core/contract-schema"]
+
+[dependencies.schemars]
+version = "=1.2.1"
+optional = true
+
+[[example]]
+name = "transcript_schema"
+required-features = ["contract-schema"]
