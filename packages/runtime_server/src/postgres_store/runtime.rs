@@ -1178,6 +1178,56 @@ fn hydrate_model_request_wire(
 }
 
 impl PostgresSessionLog {
+    /// A hosted terminal receipt for cancellation before Session admission.
+    /// It is committed under the same Session lock as admission, with a current
+    /// lifecycle lease and a durable cancellation request. No model history is written.
+    pub fn commit_pre_admission_cancellation(
+        &self,
+        agent_run_id: &str,
+        authorization_digest: &str,
+        fence: &RuntimeJobLeaseFence,
+    ) -> Result<(), String> {
+        run_postgres_blocking(|| {
+            self.connections.with_client(|client| {
+            let mut tx = client.transaction().map_err(|e| e.to_string())?;
+            let run = tx.query_opt(
+                "SELECT session_id FROM app_core_agentrun WHERE id=$1 FOR UPDATE",
+                &[&agent_run_id],
+            ).map_err(|e| e.to_string())?.ok_or("pre-admission run missing")?;
+            if run.get::<_, String>(0) != self.session_id {
+                return Err("pre-admission session mismatch".into());
+            }
+            tx.query_opt("SELECT id FROM app_core_session WHERE id=$1 AND workspace_id=$2 FOR UPDATE",
+                &[&self.session_id, &self.workspace_id]).map_err(|e| e.to_string())?
+                .ok_or("pre-admission session missing")?;
+            let expected_job = format!("agent_run.lifecycle:{agent_run_id}");
+            if fence.job_id != expected_job || fence.job_kind != AGENT_RUN_LIFECYCLE_JOB_KIND {
+                return Err(RUNTIME_JOB_LEASE_FENCE_REJECTED.into());
+            }
+            tx.query_opt(
+                "SELECT job_id FROM runtime.runtime_jobs WHERE job_id=$1 AND job_kind=$2 AND status='running' AND lease_owner=$3 AND session_id=$4 AND idempotency_key=$5 AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint FOR UPDATE",
+                &[&fence.job_id, &fence.job_kind, &fence.lease_owner, &self.session_id,
+                  &format!("{expected_job}:{authorization_digest}")],
+            ).map_err(|e| e.to_string())?.ok_or(RUNTIME_JOB_LEASE_FENCE_REJECTED)?;
+            let requested: bool = tx.query_one(
+                "SELECT EXISTS(SELECT 1 FROM runtime.runtime_events WHERE event_id=$1 AND session_id=$2 AND task_id=$3 AND event_type=$4 AND payload_json::jsonb->>'authorizationDigest'=$5)",
+                &[&format!("agent_run_cancel_requested:{agent_run_id}"), &self.session_id,
+                  &agent_run_id, &AGENT_RUN_CANCEL_REQUESTED_EVENT_SCHEMA, &authorization_digest],
+            ).map_err(|e| e.to_string())?.get(0);
+            let admitted: bool = tx.query_one(
+                "SELECT EXISTS(SELECT 1 FROM app_core_sessionevent WHERE agent_run_id=$1 AND NOT session_level)",
+                &[&agent_run_id],
+            ).map_err(|e| e.to_string())?.get(0);
+            if !requested || admitted {
+                return Err("pre-admission cancellation evidence mismatch".into());
+            }
+            tx.execute("UPDATE app_core_agentrun SET \"preAdmissionCancelledAt\"=COALESCE(\"preAdmissionCancelledAt\",clock_timestamp()) WHERE id=$1", &[&agent_run_id])
+                .map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())
+        })
+        })
+    }
+
     pub(crate) fn new(
         connections: Arc<PostgresConnectionPool>,
         workspace_id: String,
@@ -2161,6 +2211,13 @@ impl PostgresSessionLog {
                 .is_some();
             if !lease_is_current {
                 return Err(RUNTIME_JOB_LEASE_FENCE_REJECTED.to_string());
+            }
+            let cancelled = tx.query_opt(
+                "SELECT 1 FROM app_core_agentrun WHERE id=$1 AND \"preAdmissionCancelledAt\" IS NOT NULL",
+                &[&new_agent_run_id],
+            ).map_err(|e| e.to_string())?.is_some();
+            if cancelled {
+                return Err("new user turn admission rejected after cancellation".into());
             }
             let mut entries = Vec::with_capacity(closure_events.len() + new_run_events.len());
             for closure_event in closure_events {

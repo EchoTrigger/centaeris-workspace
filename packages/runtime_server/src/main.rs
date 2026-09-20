@@ -4175,6 +4175,13 @@ fn commit_interrupted_agent_run(
         accept_session_commit(&mut committed_sequence, session_stream, &receipt)?;
         *session_record_sequence = committed_sequence;
     }
+    if events.is_empty() {
+        session_log.commit_pre_admission_cancellation(
+            &agent_run_start.agent_run_id,
+            &agent_run_start.authorization_digest,
+            lease_fence,
+        )?;
+    }
     Ok(AgentRunStepOutcome {
         retry_at_ms: None,
         disposition: "terminal",
@@ -5181,6 +5188,16 @@ fn load_existing_terminal_state(
             &agent_run_start.authorization.session_id,
             &agent_run_start.agent_run_id,
         )?;
+    } else {
+        let cancelled = store.with_client(|client| {
+            client.query_opt(
+                "SELECT 1 FROM app_core_agentrun WHERE id=$1 AND session_id=$2 AND \"preAdmissionCancelledAt\" IS NOT NULL",
+                &[&agent_run_start.agent_run_id, &agent_run_start.authorization.session_id],
+            ).map(|row| row.is_some()).map_err(|e| e.to_string())
+        })?;
+        if cancelled {
+            return Ok(Some("cancelled"));
+        }
     }
     Ok(terminal)
 }

@@ -1050,6 +1050,8 @@ class AgentRun(models.Model):
     transitionReason = models.CharField(max_length=160, default="agent_run_created")
     startedAt = models.DateTimeField(null=True, blank=True)
     completedAt = models.DateTimeField(null=True, blank=True)
+    # Runtime-owned receipt; cancellation requests alone are not terminal facts.
+    preAdmissionCancelledAt = models.DateTimeField(null=True, blank=True, editable=False)
     createdAt = models.DateTimeField(auto_now_add=True)
     updatedAt = models.DateTimeField(auto_now=True)
 
