@@ -3222,6 +3222,44 @@ class ApiVerticalSliceTests(TransactionTestCase):
         self.assertEqual(async_to_sync(agent_run_stream._load_terminal_sequence)(run.id), 0)
         self.assertFalse(SessionEvent.objects.filter(agent_run=run).exists())
 
+    def test_transcript_citations_bind_tool_sequence_to_its_run_and_session(self):
+        owner = User.objects.create_user(username="citation-binding@example.com", password="password")
+        workspace = Workspace.objects.create(name="Citation binding", createdBy=owner)
+        workspace.members.add(owner)
+        session = create_session(workspace=workspace, owner=owner)
+        other_session = create_session(workspace=workspace, owner=owner)
+        model = ModelConfig.objects.create(displayName="Citation binding")
+        runs = [AgentRun.objects.create(workspace=workspace, session=target, user=owner,
+            modelConfig=model, prompt="read") for target in [session, session, other_session]]
+        for run in runs:
+            append_started(run)
+            append_session_records(run, [session_record(run, 3, "tool_call", {
+                "callId": "same-call", "toolName": "read_material", "providerId": "builtin",
+                "normalizedInput": {}, "toolContractDigest": "sha256:" + "a" * 64,
+                "displayTarget": "material",
+            })])
+        def snapshot(run):
+            return {"schema": "workspace.citations.v1", "sessionId": run.session_id,
+                "agentRunId": run.id, "throughSequence": 3, "citations": [
+                    {"citationId": f"citation:{run.id}", "inputRef": "input", "displayName": "Material",
+                     "sourceToolCallId": "same-call", "sourceUrl": f"/api/citations/citation:{run.id}"},
+                    {"citationId": "citation:unrelated", "inputRef": "other", "displayName": "Other",
+                     "sourceToolCallId": "other-call", "sourceUrl": "/api/citations/citation:unrelated"}]}
+        self.client.force_login(owner)
+        url = f"/api/sessions/{session.id}/transcript/citations"
+        with patch("app_core.http.citations.citation_snapshot", side_effect=snapshot) as snapshots:
+            response = self.client.get(url, {"sequence": ["1", "3", "6", "3"]})
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json(), {"sessionId": session.id, "bindings": [
+            {"sourceSequence": str(sequence), "sourceToolCallId": "same-call",
+             "snapshot": {**snapshot(run), "citations": snapshot(run)["citations"][:1]}}
+            for sequence, run in [(3, runs[0]), (6, runs[1])]]})
+        self.assertEqual(snapshots.call_count, 2)
+        for query in [{"sequence": ["3"] * 129}, {"sequence": "03"}, {"sequence": "3", "extra": "x"}]:
+            self.assertEqual(self.client.get(url, query).status_code, 400)
+        workspace.members.remove(owner)
+        self.assertEqual(self.client.get(url, {"sequence": "3"}).status_code, 404)
+
     def test_transcript_work_times_restore_the_original_run_clock(self):
         owner = User.objects.create_user(username="work-clock@example.com", password="password")
         workspace = Workspace.objects.create(name="Work clock", createdBy=owner)
@@ -8048,6 +8086,18 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         self.assertEqual(receipt_preview.status_code, 200)
         self.assertEqual(streaming_response_bytes(receipt_preview), canonical)
         self.assertEqual(len(rebuild_agent_run_citation_projection(agent_run)), 1)
+        tool_sequence = SessionEvent.objects.get(agent_run=agent_run, payload__type="tool_call").sequence
+        binding_url = f"/api/sessions/{self.session.id}/transcript/citations"
+        for _ in range(2):  # Reload/reconnect uses the same receipt, never a fabricated ID.
+            binding = self.client.get(binding_url, {"sequence": str(tool_sequence)})
+            self.assertEqual(binding.status_code, 200, binding.content)
+            bound = binding.json()["bindings"][0]
+            self.assertEqual(bound["sourceToolCallId"], "material-call")
+            self.assertEqual(bound["snapshot"]["agentRunId"], agent_run.id)
+            self.assertEqual([item["citationId"] for item in bound["snapshot"]["citations"]], receipt_output["citationIds"])
+            detail = self.client.get(bound["snapshot"]["citations"][0]["sourceUrl"])
+            self.assertEqual(detail.status_code, 200)
+            self.assertEqual(detail.json()["citation"]["locator"], hit["locator"])
 
         from dataclasses import replace
         bad_manifest = json.loads(json.dumps(manifest))

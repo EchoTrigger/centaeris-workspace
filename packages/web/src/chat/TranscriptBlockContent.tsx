@@ -1,3 +1,4 @@
+import type { CitationSummary } from "./citationSnapshot";
 import {
   memo,
   useCallback,
@@ -263,9 +264,11 @@ function useToolOperationsSnapshot(registry: TranscriptToolOperationRegistry | u
 
 // Consecutive tool blocks share one card (desktop groups consecutive tool
 // tasks the same way); each call contributes one or more operation nodes.
-export function TranscriptToolGroupCard({ store, blockIds, toolOperations }: Readonly<{
+export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citations, onShowCitation }: Readonly<{
   store: TranscriptViewStore;
   blockIds: readonly string[];
+  citations?: ReadonlyMap<string, readonly CitationSummary[]>;
+  onShowCitation?(citation: CitationSummary, origin: { elementId: string }): void;
   toolOperations?: TranscriptToolOperationRegistry;
 }>) {
   const { t } = useTranslation();
@@ -288,6 +291,7 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations }: Rea
       const record = registrySnapshot ? registrySnapshot.records.get(callId) ?? null : null;
       return {
         body,
+        sourceSequence: block.orderKey.sourceSequence,
         callId,
         call: (record?.call ?? {}) as Record<string, unknown>,
         operations: (record?.operations ?? []) as readonly Record<string, unknown>[],
@@ -331,6 +335,17 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations }: Rea
         <span title={title}>{title}</span>
         {hasDetail ? <ChevronDown className={`workspaceActivityGroupChevron ${expanded ? "isExpanded" : ""}`} aria-hidden="true" /> : null}
       </Header>
+      {entries.map(entry => {
+        const sources = citations?.get(entry.sourceSequence) ?? [];
+        return sources.length ? <div className="workspaceCitationSources" key={entry.sourceSequence}>
+          <span>{t("transcriptBlockContent.toolSources")}</span>
+          {sources.map(citation => {
+            const elementId = `citation-${entry.sourceSequence}-${citation.citationId}`;
+            return <button type="button" id={elementId} key={citation.citationId}
+              onClick={() => onShowCitation?.(citation, { elementId })}>{citation.displayName}</button>;
+          })}
+        </div> : null;
+      })}
       {hasDetail && expanded ? (
         <div className="workspaceActivityDetails isExpanded">
           <div className="workspaceActivityDetailsInner">
