@@ -49,7 +49,7 @@ class TranscriptToolResultIndexMigrationTests(TestCase):
 
 
 class MigrationBaselineTests(TestCase):
-    def test_schema_history_is_one_baseline_plus_one_postgresql_index(self):
+    def test_schema_history_includes_pre_admission_cancellation(self):
         migration_directory = Path(__file__).with_name("migrations")
 
         self.assertEqual(
@@ -60,6 +60,7 @@ class MigrationBaselineTests(TestCase):
             [
                 "0001_initial.py",
                 "0002_session_event_tool_result_lookup.py",
+                "0003_agentrun_pre_admission_cancelled.py",
             ],
         )
 
@@ -68,7 +69,21 @@ class MigrationBaselineTests(TestCase):
             REPOSITORY_ROOT / "scripts" / "docker-release-gate.sh"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("0002_session_event_tool_result_lookup", release_gate)
+        self.assertIn("0003_agentrun_pre_admission_cancelled", release_gate)
+
+    def test_cancellation_receipt_extends_the_existing_migration_chain(self):
+        receipt = importlib.import_module(
+            "app_core.migrations.0003_agentrun_pre_admission_cancelled"
+        ).Migration
+        self.assertEqual(receipt.dependencies, [
+            ("app_core", "0002_session_event_tool_result_lookup")
+        ])
+        self.assertEqual(len(receipt.operations), 1)
+        operation = receipt.operations[0]
+        self.assertEqual((operation.model_name, operation.name),
+                         ("agentrun", "preAdmissionCancelledAt"))
+        self.assertTrue(operation.field.null)
+        self.assertFalse(operation.field.editable)
 
     def test_postgresql_index_depends_directly_on_the_schema_baseline(self):
         self.assertEqual(migration.Migration.dependencies, [("app_core", "0001_initial")])
