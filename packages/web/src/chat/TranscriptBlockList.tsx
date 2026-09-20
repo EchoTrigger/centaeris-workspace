@@ -1,5 +1,7 @@
+import { createMessageScroll } from "./messageScroll";
 import {
   memo,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -17,7 +19,6 @@ import { TranscriptBlockRow, TranscriptLiveTail, TranscriptToolGroupCard } from 
 import type { TranscriptToolOperationRegistry } from "./transcriptToolOperations";
 import type { TranscriptViewStore } from "./transcriptViewStore";
 
-const END_TOLERANCE_PX = 2;
 
 type Props = Readonly<{
   store: TranscriptViewStore;
@@ -27,7 +28,7 @@ type Props = Readonly<{
   loadingOlderHistory: boolean;
   onLoadOlderHistory(): Promise<void>;
   emptyState?: ReactNode;
-  pendingUserMessage?: Readonly<{ text: string; startedAtMs: number }> | null;
+  pendingUserMessage?: Readonly<{ text: string; startedAtMs: number; baselineUserBlocks: number }> | null;
   onShowArtifact?(artifact: import("./useTranscriptTurnMetadata").PublishedArtifact): void;
   running?: boolean;
   startedAtMs?: number;
@@ -96,7 +97,10 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   const workTimes = useTranscriptTurnMetadata(sessionId, turnAnchors.filter(Boolean).join(","), running);
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
-  const programmaticScrollRef = useRef(false);
+  const spacerRef = useRef<HTMLDivElement>(null);
+  const controllerRef = useRef<ReturnType<typeof createMessageScroll> | null>(null);
+  const lastSentRef = useRef<number | null>(null);
+  const pendingAnchorRef = useRef<{ userId: string | null } | null>(null);
   const userScrollInputRef = useRef(0);
   const scrollbarDragRef = useRef(false);
   const touchYRef = useRef<number | null>(null);
@@ -104,22 +108,60 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   const loadingOlderRef = useRef(false);
   const anchorRef = useRef<{ blockId: string; offset: number } | null>(null);
   const previousCountRef = useRef(blockIds.length);
-  const followingLatestRef = useRef(true);
   const [followingLatest, setFollowingLatest] = useState(true);
-  const resetIdentity = `${sessionId ?? ""}:${loadingHistory}`;
+  const resetIdentity = sessionId ?? "";
+  const userTurns = turns.filter((turn) => turn.userBlockId);
+  const lastUserId = userTurns[userTurns.length - 1]?.userBlockId ?? null;
+  const pendingVisible = pendingUserMessage && userTurns.length <= pendingUserMessage.baselineUserBlocks;
 
+  const getController = useCallback(() => {
+    controllerRef.current ??= createMessageScroll({
+      measure: () => {
+        const element = scrollRef.current;
+        const content = contentRef.current;
+        if (!element || !content) return null;
+        const top = element.getBoundingClientRect().top;
+        const anchors = content.querySelectorAll<HTMLElement>("[data-send-anchor]");
+        const anchor = anchors[anchors.length - 1];
+        return { height: element.clientHeight, scrollTop: element.scrollTop,
+          contentEnd: content.getBoundingClientRect().bottom - top + element.scrollTop + parseFloat(getComputedStyle(element).paddingBottom || "0"),
+          anchorTop: anchor ? anchor.getBoundingClientRect().top - top + element.scrollTop : 0 };
+      },
+      setPadding: (value) => { if (spacerRef.current) spacerRef.current.style.height = `${value}px`; },
+      scrollTo: (top) => { if (scrollRef.current) scrollRef.current.scrollTop = top; },
+      requestFrame: (callback) => requestAnimationFrame(callback),
+      cancelFrame: (id) => cancelAnimationFrame(id),
+      reducedMotion: () => window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false,
+      onFollowingChange: setFollowingLatest,
+    });
+    return controllerRef.current;
+  }, []);
+  const pendingStartedAt = pendingUserMessage?.startedAtMs;
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only identity changes reset scrolling; pending admission must preserve the anchor.
   useLayoutEffect(() => {
     void resetIdentity;
     anchorRef.current = null;
     upwardIntentRef.current = false;
-    followingLatestRef.current = true;
-    setFollowingLatest(true);
-    const element = scrollRef.current;
-    if (element) {
-      programmaticScrollRef.current = true;
-      element.scrollTo({ top: element.scrollHeight, behavior: "instant" });
+    if (pendingStartedAt === undefined) {
+      getController().reset();
+      getController().update();
     }
-  }, [resetIdentity]);
+    // A newly created session can acquire its durable ID during this send.
+    // Preserve its ongoing animation until the pending message is admitted.
+  }, [resetIdentity, getController]);
+
+  useLayoutEffect(() => {
+    if (pendingStartedAt !== undefined && lastSentRef.current !== pendingStartedAt) {
+      lastSentRef.current = pendingStartedAt;
+      pendingAnchorRef.current = { userId: lastUserId };
+      getController().anchor();
+    } else if (pendingStartedAt === undefined && pendingAnchorRef.current) {
+      if (pendingAnchorRef.current.userId === lastUserId) getController().jump();
+      else getController().update();
+      pendingAnchorRef.current = null;
+    }
+  }, [pendingStartedAt, lastUserId, getController]);
 
   useLayoutEffect(() => {
     const element = scrollRef.current;
@@ -133,29 +175,18 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
           - element.getBoundingClientRect().top - anchor.offset;
       }
       anchorRef.current = null;
-    } else if (followingLatestRef.current
-      && element.scrollTop < element.scrollHeight - element.clientHeight) {
-      programmaticScrollRef.current = true;
-      element.scrollTo({ top: element.scrollHeight, behavior: "instant" });
-    }
-  }, [blockIds]);
+    } else getController().update();
+  }, [blockIds, getController]);
 
-  // Any content growth — the live overlay or a committed block still streaming
-  // into place — increases the rendered height without changing blockIds. Watch
-  // the content box and keep the tail visible while the user is following.
   useEffect(() => {
     const content = contentRef.current;
     const element = scrollRef.current;
     if (!content || !element) return undefined;
-    const observer = new ResizeObserver(() => {
-      if (!followingLatestRef.current) return;
-      if (element.scrollTop >= element.scrollHeight - element.clientHeight) return;
-      programmaticScrollRef.current = true;
-      element.scrollTo({ top: element.scrollHeight, behavior: "instant" });
-    });
+    const observer = new ResizeObserver(() => getController().update());
     observer.observe(content);
-    return () => observer.disconnect();
-  }, []);
+    observer.observe(element);
+    return () => { observer.disconnect(); controllerRef.current?.dispose(); };
+  }, [getController]);
 
   async function requestOlder() {
     const element = scrollRef.current;
@@ -179,8 +210,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
 
   function recordUpwardIntent() {
     upwardIntentRef.current = true;
-    followingLatestRef.current = false;
-    setFollowingLatest(false);
+    getController().pause();
     const element = scrollRef.current;
     if (element && shouldLoadEarlier(element.scrollTop, hasOlder, loadingOlderHistory)) {
       upwardIntentRef.current = false;
@@ -191,18 +221,10 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   function handleScroll() {
     const element = scrollRef.current;
     if (!element) return;
-    if (programmaticScrollRef.current) {
-      programmaticScrollRef.current = false;
-      return;
-    }
     // Ignore scroll events with no recent user input (browser scroll anchoring,
     // expand/collapse layout shifts) so they never detach following by themselves.
     if (!scrollbarDragRef.current && performance.now() - userScrollInputRef.current > 150) return;
-    const atEnd = element.scrollHeight - element.clientHeight - element.scrollTop <= END_TOLERANCE_PX;
-    if (atEnd !== followingLatestRef.current) {
-      followingLatestRef.current = atEnd;
-      setFollowingLatest(atEnd);
-    }
+    getController().userScroll();
     if (shouldLoadEarlier(element.scrollTop, hasOlder, loadingOlderHistory) && upwardIntentRef.current) {
       upwardIntentRef.current = false;
       void requestOlder();
@@ -210,12 +232,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   }
 
   function scrollToLatest() {
-    followingLatestRef.current = true;
-    setFollowingLatest(true);
-    const element = scrollRef.current;
-    if (!element) return;
-    programmaticScrollRef.current = true;
-    element.scrollTo({ top: element.scrollHeight, behavior: "instant" });
+    getController().jump();
   }
 
   return (
@@ -253,13 +270,13 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
         aria-label={t("virtualAgentRunList.conversationMessages")}
       >
         {loadingHistory ? <div className="workspaceEmptyState" role="status">{t("virtualAgentRunList.loadingConversation")}</div> : null}
-        {!loadingHistory && blockIds.length === 0 && live === null ? (emptyState || null) : null}
+        {!loadingHistory && blockIds.length === 0 && live === null && !pendingVisible ? (emptyState || null) : null}
         <div className="workspaceTranscriptBlocks" ref={contentRef}>
           {turns.map((turn, index) => {
-            const isLast = index === turns.length - 1 && !pendingUserMessage;
+            const isLast = index === turns.length - 1 && !pendingVisible;
             const turnLive = isLast ? live : null;
             const time = workTimes.get(turnAnchors[index]);
-            return <div className="workspaceTranscriptTurn" key={turn.id}>
+            return <div className="workspaceTranscriptTurn" data-send-anchor={turn.userBlockId ? "" : undefined} key={turn.id}>
               {turn.userBlockId ? <TranscriptBlockRow store={store} blockId={turn.userBlockId} /> : null}
               <WorkProgress running={isLast && running} finalStarted={turn.answerIds.length > 0}
                 startedAtMs={time?.startedAtMs ?? (isLast ? startedAtMs : undefined)} completedAtMs={time?.completedAtMs ?? (isLast ? completedAtMs : undefined)}>
@@ -277,13 +294,14 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
               </div> : null}
             </div>;
           })}
-          {pendingUserMessage ? (
-            <div className="workspaceTranscriptBlock workspaceTranscriptUser" data-block-id="pending:user">
+          {pendingVisible ? (
+            <div className="workspaceTranscriptBlock workspaceTranscriptUser" data-block-id="pending:user" data-send-anchor="">
               <div className="workspaceUserMessage">{pendingUserMessage.text}</div>
             </div>
           ) : null}
-          {pendingUserMessage ? <WorkProgress running finalStarted={false} startedAtMs={pendingUserMessage.startedAtMs} /> : null}
+          {pendingVisible ? <WorkProgress running finalStarted={false} startedAtMs={pendingUserMessage.startedAtMs} /> : null}
         </div>
+        <div ref={spacerRef} aria-hidden="true" style={{ height: 0, flexShrink: 0 }} />
       </div>
       {!followingLatest && (blockIds.length > 0 || live !== null) ? (
         <button
