@@ -9,7 +9,9 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 import uuid
+import observations
 from contextlib import contextmanager
 
 RUNTIME_INTERNAL_URL = os.environ["RUNTIME_INTERNAL_URL"].rstrip("/")
@@ -47,14 +49,17 @@ class RuntimeJobCancelled(RuntimeError):
 
 
 class DependencyUnavailable(RuntimeError):
-    pass
+    def __init__(self, reason, http_status=None):
+        super().__init__(reason)
+        self.http_status = http_status
 
 
 class RuntimeStepFailed(RuntimeError):
-    def __init__(self, reason, retryable, agent_run_id):
+    def __init__(self, reason, retryable, agent_run_id, http_status=None):
         super().__init__(reason)
         self.retryable = retryable
         self.agent_run_id = agent_run_id
+        self.http_status = http_status
 
 
 def runtime_request(path, body=None):
@@ -110,6 +115,17 @@ def api_request(path, body, default_reason, *, timeout=10):
 
 
 def json_request(url, body, token_header, token, default_reason, timeout=10):
+    path = urllib.parse.urlsplit(url).path
+    route = "/internal/jobs/:id" if path.startswith("/internal/jobs/") and body is None else path
+    with observations.measure("rpc", route=route):
+        try:
+            return _json_request(url, body, token_header, token, default_reason, timeout)
+        except DependencyUnavailable as error:
+            error.route = route
+            raise
+
+
+def _json_request(url, body, token_header, token, default_reason, timeout=10):
     method = "GET" if body is None else "POST"
     request = urllib.request.Request(
         url,
@@ -149,11 +165,13 @@ def json_request(url, body, token_header, token, default_reason, timeout=10):
             ):
                 raise RuntimeError("runtime_step_failure_response_invalid") from error
             raise RuntimeStepFailed(
-                reason, payload["retryable"], payload["agentRunId"]
+                reason, payload["retryable"], payload["agentRunId"], http_status=status
             ) from error
         if status in {502, 503, 504}:
-            raise DependencyUnavailable(reason) from error
-        raise RuntimeError(reason) from error
+            raise DependencyUnavailable(reason, http_status=status) from error
+        failure = RuntimeError(reason)
+        failure.http_status = status
+        raise failure from error
     except (
         urllib.error.URLError,
         TimeoutError,
@@ -527,6 +545,7 @@ def claim_job(job_kind, lease_owner):
     if not isinstance(jobs, list) or len(jobs) > 1:
         raise RuntimeError("runtime_job_claim_response_invalid")
     if not jobs:
+        observations.emit("claimResult", time.monotonic(), outcome="empty")
         return None
     job = jobs[0]
     if (
@@ -537,6 +556,7 @@ def claim_job(job_kind, lease_owner):
         or job.get("status") != "leased"
     ):
         raise RuntimeError("runtime_job_claim_response_invalid")
+    observations.emit("claimResult", time.monotonic(), outcome="claimed", jobId=job["jobId"])
     return job
 
 
@@ -575,6 +595,11 @@ def wait_for_jobs():
 
 
 def execute_claimed_job(job, lease_owner):
+    with observations.context(jobId=job["jobId"]), observations.measure("slotHeld"):
+        return _execute_claimed_job(job, lease_owner)
+
+
+def _execute_claimed_job(job, lease_owner):
     try:
         start_job(job["jobId"], lease_owner)
         if job["jobKind"] not in WORKER_JOB_KINDS:
@@ -765,6 +790,11 @@ def run_loop(operation, interval_seconds, stopped=None):
 
 
 def run_job_loop(slot_index, stopped):
+    with observations.context(slotIndex=slot_index):
+        return _run_job_loop(slot_index, stopped)
+
+
+def _run_job_loop(slot_index, stopped):
     while not stopped.is_set():
         try:
             worked = execute_next_job(slot_index)
@@ -776,8 +806,11 @@ def run_job_loop(slot_index, stopped):
                 file=sys.stderr,
                 flush=True,
             )
-            stopped.wait(5 if str(error) in {"runtime_busy", "execution_claim_busy"}
-                         else JOB_WAIT_FAILURE_BACKOFF_SECONDS)
+            delay = 5 if str(error) in {"runtime_busy", "execution_claim_busy"} else JOB_WAIT_FAILURE_BACKOFF_SECONDS
+            with observations.measure("backoff", requestedMs=delay * 1000,
+                    route=getattr(error, "route", None),
+                    errorCode=str(error) if str(error) in {"runtime_busy", "execution_claim_busy"} else "other"):
+                stopped.wait(delay)
 
 
 def run_worker_service():

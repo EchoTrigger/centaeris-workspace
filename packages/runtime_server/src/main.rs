@@ -14,6 +14,7 @@ mod file_mutation_commit;
 mod job_protocol;
 mod lifecycle_hooks;
 mod mcp;
+mod observations;
 mod platform_materials;
 mod postgres_store;
 mod request_capacity;
@@ -416,6 +417,7 @@ fn main() -> Result<(), String> {
         tool_layers.clone(),
     ));
     execution_capacity::ExecutionCapacity::from_env()?;
+    docker_engine::create_limit_from_env()?;
     let state = HttpServerState {
         runtime: runtime.clone(),
         store,
@@ -1019,9 +1021,18 @@ async fn dispatch_http_request(
     State(state): State<HttpServerState>,
     request: Request<Body>,
 ) -> Response<Body> {
+    let observed_route = observations::route(request.uri().path());
+    let observed_lane =
+        if request.method().as_str() == "POST" && request.uri().path() == "/internal/jobs/wait" {
+            2
+        } else {
+            0
+        };
+    let admission_started = Instant::now();
     let lane = state
         .request_capacity
         .lane(request.method().as_str(), request.uri().path());
+    let observed_lane = if lane.control { 1 } else { observed_lane };
     let deadline = lane.deadline.map(|duration| Instant::now() + duration);
     let slot = if lane.control {
         // Absorb brief heartbeat bursts within the same control deadline.
@@ -1038,8 +1049,13 @@ async fn dispatch_http_request(
     };
     let request_slot = match slot {
         Some(slot) => slot,
-        None => return bounded_json_error_response(503, "runtime_busy").into_axum_response(),
+        None => {
+            observations::Request::rejected(observed_route, observed_lane, admission_started);
+            return bounded_json_error_response(503, "runtime_busy").into_axum_response();
+        }
     };
+    let observed_request =
+        observations::Request::admitted(observed_route, observed_lane, admission_started);
     let read = read_axum_request(request);
     let read_result = if let Some(deadline) = deadline {
         match tokio::time::timeout_at(deadline.into(), read).await {
@@ -1057,6 +1073,8 @@ async fn dispatch_http_request(
         Err(response) => return response.into_axum_response(),
     };
     let task = tokio::task::spawn_blocking(move || {
+        let _context = observations::Context::enter(&request.body);
+        let _observed_request = observed_request;
         let _request_slot = request_slot;
         let _deadline = postgres_store::RequestDeadline::enter(deadline);
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
