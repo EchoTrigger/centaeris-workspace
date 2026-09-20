@@ -109,3 +109,25 @@ python -m unittest discover -s perf/tests -v
 
 These regressions also run in `scripts/ci.ps1`. Docker Compose rendering tests use
 synthetic configuration; live smoke runs require the isolated deployment.
+
+## Harness repair (2026-09-20)
+
+- Smoke consumes the current replayable run SSE endpoint. Its child process has a
+  hard 180-second lifetime; a busy nonterminal stream cannot extend that deadline.
+  K6 terminal observers use the same endpoint with an overall request timeout.
+- PostgreSQL statements travel on stdin, including large accepted-ID sets. `up`
+  initializes `pg_stat_statements` in the isolated database.
+- Sampling failures invalidate the experiment but do not terminate a running K6
+  workload. K6, sampling, drain and accounting errors retain separate phase labels
+  in `failure.json`; `outcome.json` is retained even for unsuccessful experiments.
+- `requestedDurationSeconds` is the configured load duration;
+  `observedWorkloadSeconds` is the controller's elapsed time when it first observes
+  K6 exit (includes setup and sampling delay), not an exact active-load duration.
+  Check K6 logs/summary for interrupted windows. Never relabel them as complete.
+- `completionBuckets` counts successful completions by UTC completion minute.
+  Creation cohorts are a different statistic. `completedLatencyMs` excludes failed,
+  cancelled and unfinished runs; `statuses` reports them separately. Partial first
+  and last minute buckets must not be compared with full minutes.
+- Keep background VM activity and continuous-history growth in the report. They
+  can affect medians and trends, not only maxima. No capacity/extrapolation claim
+  is justified by these uncontrolled Windows runs alone.

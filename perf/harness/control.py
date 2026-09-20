@@ -94,7 +94,8 @@ def validate_config(config, root):
 
 
 def run(command, **kwargs):
-    result = subprocess.run(command, capture_output=True, text=True, timeout=kwargs.pop('timeout', 120), **kwargs)
+    result = subprocess.run(command, capture_output=True, text=True, encoding='utf-8',
+                            errors='strict', timeout=kwargs.pop('timeout', 120), **kwargs)
     if result.returncode:
         # Compose errors may contain interpolated credentials; keep those out of logs.
         raise RuntimeError(f'command failed (exit {result.returncode}): {command[0]}')
@@ -134,6 +135,32 @@ def account_runs(accepted, rows, accepted_count=None):
     return {'completed': len(rows)}
 
 
+def summarize_runs(rows):
+    buckets, latency = {}, []
+    for row in rows:
+        if row['status'] != 'completed':
+            continue
+        end = datetime.datetime.fromisoformat(row['completedAt']).astimezone(datetime.timezone.utc)
+        start = datetime.datetime.fromisoformat(row['createdAt'])
+        key = end.isoformat()[:16]
+        buckets[key] = buckets.get(key, 0) + 1
+        latency.append((end - start).total_seconds() * 1000)
+    latency.sort()
+    return {'completed': len(latency), 'failed': sum(r['status'] == 'failed' for r in rows),
+            'statuses': {status: sum(r['status'] == status for r in rows) for status in sorted({r['status'] for r in rows})},
+            'completionBuckets': dict(sorted(buckets.items())),
+            'completedLatencyMs': {key: latency[int((len(latency) - 1) * p)] if latency else None
+                                   for key, p in [('p50', .5), ('p95', .95), ('p99', .99)]}}
+
+
+def failure_record(phase, error, secrets=()):
+    message = str(error)
+    for secret in secrets:
+        if secret:
+            message = message.replace(secret, '[redacted]')
+    return {'phase': phase, 'errorType': type(error).__name__, 'message': message[:1000]}
+
+
 def load(stack, output, rate, seconds):
     if not 1 <= rate <= 600 or not 1 <= seconds <= 3600:
         raise ValueError('load requires rate 1-600/min and duration 1-3600 seconds')
@@ -150,27 +177,37 @@ def load(stack, output, rate, seconds):
            'RATE': str(rate), 'DURATION': f'{seconds}s', 'VERBOSE': '1'}
     command = [str(binary), 'run', '--summary-export', str(output / 'k6-summary.json'),
                str(ROOT / 'perf/k6/scenarios/s2-runs.js')]
+    failures = []
+    private = [value for key, value in stack.values.items() if any(word in key for word in ("PASSWORD", "SECRET", "TOKEN", "KEY"))]
+    started = time.monotonic()
+    workload_elapsed = None
     with (output / 'k6.log').open('w', encoding='utf-8') as log, (output / 'resources.jsonl').open('x', encoding='utf-8') as samples:
         process = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT)
-        failure = None
         try:
-            deadline = time.monotonic() + seconds + 360
+            deadline = started + seconds + 360
             while True:
-                samples.write(json.dumps({'utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                                          'resources': stack.sample(),
-                                          'runCounts': stack.sql('SELECT status,count(*) FROM app_core_agentrun GROUP BY status').splitlines()}) + '\n')
-                samples.flush()
+                try:
+                    sample = {'utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                              'resources': stack.sample(),
+                              'runCounts': stack.sql('SELECT status,count(*) FROM app_core_agentrun GROUP BY status').splitlines()}
+                    samples.write(json.dumps(sample) + '\n')
+                    samples.flush()
+                except Exception as error:
+                    failures.append(failure_record('sampling', error, private))
                 if process.poll() is not None:
-                    if process.returncode:
-                        raise RuntimeError('k6 failed; experiment is invalid')
-                    if stack.quiet():
-                        break
+                    if workload_elapsed is None:
+                        workload_elapsed = time.monotonic() - started
+                        if process.returncode:
+                            failures.append(failure_record('k6', RuntimeError(f'k6 exit {process.returncode}')))
+                    try:
+                        if stack.quiet():
+                            break
+                    except Exception as error:
+                        failures.append(failure_record('drain-check', error, private))
                 if time.monotonic() >= deadline:
-                    raise RuntimeError('experiment did not drain before its deadline')
+                    failures.append(failure_record('deadline', TimeoutError('experiment did not drain before deadline')))
+                    break
                 time.sleep(2)
-        except Exception as error:
-            failure = error
-            (output / 'failure.json').write_text(json.dumps({'errorType': type(error).__name__, 'valid': False}), encoding='utf-8')
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -179,21 +216,30 @@ def load(stack, output, rate, seconds):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+                failures.append(failure_record('k6', RuntimeError('k6 terminated before natural exit')))
     accepted = re.findall(r'accepted run ([A-Za-z0-9_-]+) session ', (output / 'k6.log').read_text(encoding='utf-8'))
     (output / 'accepted-ids.json').write_text(json.dumps(accepted), encoding='utf-8')
-    if not accepted:
-        raise RuntimeError('no accepted run identities captured')
-    ids = ','.join("'" + value + "'" for value in accepted)
-    rows = json.loads(stack.sql('SELECT coalesce(json_agg(t),\'[]\'::json) FROM '
-        '(SELECT id,status,"createdAt","startedAt","completedAt","transitionReason" '
-        f'FROM app_core_agentrun WHERE id IN ({ids}) ORDER BY "createdAt") t'))
-    (output / 'runs.json').write_text(json.dumps(rows, indent=2), encoding='utf-8')
-    if failure is not None:
-        raise failure
-    k6_summary = json.loads((output / 'k6-summary.json').read_text(encoding='utf-8'))
-    summary = account_runs(accepted, rows, k6_summary['metrics']['s2_runs_accepted']['count'])
-    summary.update(rate=rate, durationSeconds=seconds, historyMode='continuous-history')
+    rows = []
+    try:
+        if not accepted:
+            raise RuntimeError('no accepted run identities captured')
+        ids = ','.join("'" + value + "'" for value in accepted)
+        rows = json.loads(stack.sql("SELECT coalesce(json_agg(t),'[]'::json) FROM "
+            '(SELECT id,status,"createdAt","startedAt","completedAt","transitionReason" '
+            f'FROM app_core_agentrun WHERE id IN ({ids}) ORDER BY "createdAt") t'))
+        (output / 'runs.json').write_text(json.dumps(rows, indent=2), encoding='utf-8')
+        k6_summary = json.loads((output / 'k6-summary.json').read_text(encoding='utf-8'))
+        account_runs(accepted, rows, k6_summary['metrics']['s2_runs_accepted']['count'])
+    except Exception as error:
+        failures.append(failure_record('accounting', error, private))
+    summary = summarize_runs(rows)
+    summary.update(rate=rate, requestedDurationSeconds=seconds, observedWorkloadSeconds=workload_elapsed,
+                   k6ExitCode=process.returncode, valid=not failures, acceptedCount=len(accepted),
+                   durableCount=len(rows), historyMode='continuous-history')
     (output / 'outcome.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
+    if failures:
+        (output / 'failure.json').write_text(json.dumps({'valid': False, 'errors': failures}, indent=2), encoding='utf-8')
+        raise RuntimeError('experiment failed; see outcome.json and failure.json')
 
 
 class Stack:
@@ -204,9 +250,9 @@ class Stack:
             raise ValueError('test env must identify the performance project')
         validate_config(json.loads(self.compose(['config', '--format', 'json'])), ROOT)
 
-    def compose(self, args, slots=None, timeout=120):
+    def compose(self, args, slots=None, timeout=120, **kwargs):
         command, env = compose_command(ROOT, self.env_file, args, slots)
-        return run(command, env=env, cwd=ROOT, timeout=timeout)
+        return run(command, env=env, cwd=ROOT, timeout=timeout, **kwargs)
 
     def container(self, service):
         ids = self.compose(['ps', '-q', service]).split()
@@ -225,7 +271,7 @@ class Stack:
 
     def sql(self, statement):
         return self.compose(['exec', '-T', 'postgres', 'psql', '-v', 'ON_ERROR_STOP=1',
-                             '-U', self.values['POSTGRES_USER'], '-d', self.values['POSTGRES_DB'], '-Atc', statement])
+                             '-U', self.values['POSTGRES_USER'], '-d', self.values['POSTGRES_DB'], '-At'], input=statement)
 
     def quiet(self):
         return self.sql("SELECT count(*) FROM app_core_agentrun WHERE status IN ('queued','running')").strip() == '0'
@@ -281,6 +327,7 @@ def main():
         stack.compose(['build', 'api', 'worker', 'runtime', 'workspace-general', 'mock-model'], timeout=3600)
     elif args.action == 'up':
         stack.compose(['up', '-d', 'worker'], timeout=600)
+        stack.sql('CREATE EXTENSION IF NOT EXISTS pg_stat_statements;')
         stack.preflight()
     elif args.action == 'slots':
         switch_slots(stack, args.slots)
@@ -303,7 +350,7 @@ def main():
             env = {**os.environ, 'API_BASE': 'http://localhost:18000',
                    'PERF_ADMIN_EMAIL': stack.values['BOOTSTRAP_SUPERADMIN_EMAIL'],
                    'PERF_ADMIN_PASSWORD': stack.values['BOOTSTRAP_SUPERADMIN_PASSWORD']}
-            result = run([sys.executable, str(ROOT / 'perf/harness/bootstrap.py')], env=env, timeout=180)
+            result = run([sys.executable, str(ROOT / 'perf/harness/bootstrap.py')], env=env, timeout=190)
             (output / 'smoke.txt').write_text(result, encoding='utf-8')
         else:
             if not 1 <= args.seconds <= 14400:
