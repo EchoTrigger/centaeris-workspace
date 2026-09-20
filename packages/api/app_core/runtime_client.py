@@ -5,6 +5,8 @@ import urllib.request
 
 from django.conf import settings
 
+from .transcript_contract import valid_transcript_block_structure, valid_transcript_structure
+
 from .runtime_contract import (
     AGENT_RUN_START_SCHEMA,
     agent_run_binding_matches,
@@ -449,16 +451,13 @@ WORKSPACE_TRANSCRIPT_STREAM_ID = "workspace-transcript.v1"
 
 def request_transcript_content(body: dict) -> dict:
     result = _request_transcript_read("/internal/transcript/content", body)
-    expected = {"schema", "sessionId", "projectionVersion", "projectionGeneration",
-                "refId", "revision", "byteLength", "startOffset", "endOffset", "content", "hasMore"}
-    if (set(result) != expected
+    if (not valid_transcript_structure("content", result)
         or result.get("schema") != "transcript.content.range.v1"
         or any(result.get(key) != body.get(key) for key in
                ("sessionId", "projectionVersion", "projectionGeneration", "refId", "revision", "byteLength"))
         or result.get("startOffset") != body.get("offset")
         or not _canonical_decimal_u64(result.get("endOffset"))
-        or not isinstance(result.get("content"), str)
-        or type(result.get("hasMore")) is not bool):
+    ):
         raise RuntimeError("transcript_content_response_invalid")
     start, end, length = int(result["startOffset"]), int(result["endOffset"]), int(result["byteLength"])
     if (not start <= end <= length
@@ -472,19 +471,8 @@ def request_transcript_content(body: dict) -> dict:
 
 def request_transcript_page(body: dict) -> dict:
     result = _request_transcript_read("/internal/transcript/page", body)
-    expected = {
-        "schema",
-        "sessionId",
-        "projectionVersion",
-        "projectionGeneration",
-        "sourceHighWater",
-        "blocks",
-        "olderCursor",
-        "hasOlder",
-        "resumeCursors",
-    }
     if (
-        set(result) != expected
+        not valid_transcript_structure("page", result)
         or result.get("schema") != "transcript.page.v1"
         or result.get("sessionId") != body.get("sessionId")
         or result.get("projectionVersion") != body.get("projectionVersion")
@@ -492,15 +480,7 @@ def request_transcript_page(body: dict) -> dict:
             body.get("projectionGeneration") is not None
             and result.get("projectionGeneration") != body.get("projectionGeneration")
         )
-        or not isinstance(result.get("projectionGeneration"), str)
         or result.get("sourceHighWater") != body.get("sourceHighWater")
-        or not isinstance(result.get("blocks"), list)
-        or not isinstance(result.get("resumeCursors"), list)
-        or type(result.get("hasOlder")) is not bool
-        or (
-            result.get("olderCursor") is not None
-            and not isinstance(result.get("olderCursor"), str)
-        )
         or not _valid_transcript_page_content(result)
     ):
         raise RuntimeError("transcript_page_response_invalid")
@@ -509,26 +489,13 @@ def request_transcript_page(body: dict) -> dict:
 
 def request_transcript_patches(body: dict) -> dict:
     result = _request_transcript_read("/internal/transcript/patches", body)
-    expected = {
-        "schema",
-        "sessionId",
-        "projectionVersion",
-        "projectionGeneration",
-        "throughSourceHighWater",
-        "patches",
-        "nextSourceHighWater",
-        "hasMore",
-    }
     if (
-        set(result) != expected
+        not valid_transcript_structure("patches", result)
         or result.get("schema") != "transcript.patch.page.v1"
         or result.get("sessionId") != body.get("sessionId")
         or result.get("projectionVersion") != body.get("projectionVersion")
         or result.get("projectionGeneration") != body.get("projectionGeneration")
         or result.get("throughSourceHighWater") != body.get("throughSourceHighWater")
-        or not isinstance(result.get("patches"), list)
-        or not isinstance(result.get("nextSourceHighWater"), str)
-        or type(result.get("hasMore")) is not bool
         or not _valid_transcript_patch_content(result, body)
     ):
         raise RuntimeError("transcript_patch_response_invalid")
@@ -570,16 +537,12 @@ def _request_transcript_read(path: str, body: dict) -> dict:
 
 
 def _validate_transcript_conflict(payload: dict, request_body: dict) -> dict | None:
-    if payload == {"error": "transcript_content_unavailable"}:
+    if valid_transcript_structure("error", payload) and payload["error"] in {
+        "transcript_content_unavailable", "transcript_view_invalidated"
+    }:
         return payload
-    if payload == {"error": "transcript_view_invalidated"}:
-        return payload
-    if set(payload) != {
-        "error",
-        "projectionGeneration",
-        "sourceHighWater",
-        "projectedHighWater",
-    } or payload.get("error") != "transcript_projection_not_ready":
+    if (not valid_transcript_structure("projectionNotReady", payload)
+        or payload["error"] != "transcript_projection_not_ready"):
         return None
     generation = payload.get("projectionGeneration")
     requested_generation = request_body.get("projectionGeneration")
@@ -649,7 +612,6 @@ def _valid_transcript_page_content(page: dict) -> bool:
         return cursors == []
     return (
         len(cursors) == 1
-        and set(cursors[0]) == {"streamId", "cursor"}
         and cursors[0].get("streamId") == WORKSPACE_TRANSCRIPT_STREAM_ID
         and _canonical_decimal_u64(cursors[0].get("cursor"))
         and int(cursors[0]["cursor"]) <= int(high_water)
@@ -691,18 +653,6 @@ def _valid_transcript_patch_content(page: dict, request: dict) -> bool:
 
 
 def _valid_transcript_patch(patch: object, page: dict) -> bool:
-    if not isinstance(patch, dict) or set(patch) != {
-        "schema",
-        "sessionId",
-        "projectionVersion",
-        "projectionGeneration",
-        "sourceHighWater",
-        "streamId",
-        "appliedCursor",
-        "upserts",
-        "removals",
-    }:
-        return False
     if (
         patch.get("schema") != "transcript.patch.v1"
         or patch.get("sessionId") != page.get("sessionId")
@@ -712,16 +662,11 @@ def _valid_transcript_patch(patch: object, page: dict) -> bool:
         or patch.get("appliedCursor") != patch.get("sourceHighWater")
         or not _canonical_decimal_u64(patch.get("sourceHighWater"))
         or int(patch["sourceHighWater"]) > int(page["throughSourceHighWater"])
-        or not isinstance(patch.get("upserts"), list)
-        or not isinstance(patch.get("removals"), list)
         or len(patch["upserts"]) + len(patch["removals"])
         > TRANSCRIPT_PATCH_MAX_CHANGES
         or not all(_valid_transcript_block(block) for block in patch["upserts"])
         or not all(
-            isinstance(removal, dict)
-            and set(removal) == {"blockId", "blockRevision"}
-            and isinstance(removal.get("blockId"), str)
-            and bool(removal["blockId"].strip())
+            bool(removal["blockId"].strip())
             and _canonical_decimal_u64(removal.get("blockRevision"))
             for removal in patch["removals"]
         )
@@ -734,12 +679,7 @@ def _valid_transcript_patch(patch: object, page: dict) -> bool:
 
 
 def _valid_transcript_block(block: object) -> bool:
-    if not isinstance(block, dict) or set(block) != {
-        "blockId",
-        "blockRevision",
-        "orderKey",
-        "body",
-    }:
+    if not valid_transcript_block_structure(block):
         return False
     if (
         not isinstance(block.get("blockId"), str)
@@ -749,34 +689,7 @@ def _valid_transcript_block(block: object) -> bool:
     ):
         return False
     body = block.get("body")
-    if not isinstance(body, dict):
-        return False
-    kind = body.get("kind")
-    fields = {
-        "userText": {"kind", "content"},
-        "assistantText": {"kind", "content", "status"},
-        "reasoning": {"kind", "requestId", "content", "status"},
-        "tool": {
-            "kind",
-            "callId",
-            "toolName",
-            "status",
-            "summary",
-            "summaryRef",
-            "outputRef",
-        },
-        "notice": {"kind", "noticeType", "content", "status"},
-    }
-    if kind not in fields or set(body) != fields[kind]:
-        return False
-    if "status" in body and body["status"] not in {
-        "queued",
-        "running",
-        "completed",
-        "failed",
-        "interrupted",
-    }:
-        return False
+    kind = body["kind"]
     if kind == "tool":
         summary = body["summary"]
         summary_ref = body["summaryRef"]
@@ -820,8 +733,6 @@ def _transcript_block_order(block: dict) -> tuple[int, int] | None:
 
 
 def _valid_transcript_content(content: object) -> bool:
-    if not isinstance(content, dict) or set(content) != {"inlineContent", "sourceRef"}:
-        return False
     inline = content.get("inlineContent")
     reference = content.get("sourceRef")
     return (
@@ -833,9 +744,7 @@ def _valid_transcript_content(content: object) -> bool:
 
 def _valid_transcript_content_ref(reference: object) -> bool:
     return (
-        isinstance(reference, dict)
-        and set(reference) == {"refId", "revision", "byteLength"}
-        and isinstance(reference.get("refId"), str)
+        reference is not None
         and bool(reference["refId"].strip())
         and _canonical_decimal_u64(reference.get("revision"))
         and _canonical_decimal_u64(reference.get("byteLength"))
