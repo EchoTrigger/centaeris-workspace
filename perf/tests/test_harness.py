@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -12,6 +13,16 @@ spec.loader.exec_module(control)
 
 
 class IsolationTests(unittest.TestCase):
+    def test_command_utf8_io_does_not_depend_on_windows_locale(self):
+        # Reproduce a non-UTF-8 Windows default even on UTF-8 test hosts.
+        with patch.object(control.subprocess, '_text_encoding', return_value='gbk'):
+            output = control.run(
+                [sys.executable, '-c',
+                 'import sys; value = sys.stdin.buffer.read().decode("utf-8"); '
+                 'sys.stdout.buffer.write(value.encode("utf-8"))'],
+                input='阶段报告：中文输入与输出\n')
+        self.assertEqual(output, '阶段报告：中文输入与输出\n')
+
     def test_terminal_accounting_is_exact_and_cancellation_is_not_completion(self):
         self.assertEqual(control.account_runs(['a', 'b'], [{'id': 'a', 'status': 'completed'}, {'id': 'b', 'status': 'completed'}]), {'completed': 2})
         for rows in ([{'id': 'a', 'status': 'completed'}],
@@ -35,15 +46,67 @@ class IsolationTests(unittest.TestCase):
                              config['services']['document-processor']['image'])
             self.assertEqual(config['services']['runtime']['environment']['PLUGIN_VOLUME_NAME'], 'centaeris-perf_plugin-data')
 
-    def test_smoke_rejects_unsuccessful_terminals(self):
+    def test_smoke_reads_replayed_terminal_and_has_a_process_deadline(self):
         spec = importlib.util.spec_from_file_location('perf_bootstrap', SOURCE.parent / 'bootstrap.py')
         bootstrap = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(bootstrap)
-        self.assertTrue(bootstrap.completed_terminal('completed'))
-        self.assertFalse(bootstrap.completed_terminal('running'))
-        for state in ('failed', 'cancelled', 'interrupted'):
-            with self.assertRaises(RuntimeError):
-                bootstrap.completed_terminal(state)
+        for terminal in ('completed', 'failed', 'interrupted'):
+            lines = [b': heartbeat\n', ('data: ' + json.dumps({'event': {'type': 'agent_run_' + terminal}})).encode()]
+            self.assertEqual(bootstrap.read_terminal(lines), 'agent_run_' + terminal)
+        with self.assertRaises(ValueError):
+            bootstrap.read_terminal([b'data: invalid-json'])
+        with self.assertRaises(RuntimeError):
+            bootstrap.read_terminal([b': heartbeat'])
+        with patch.object(bootstrap.subprocess, 'run') as launch:
+            bootstrap.run_bounded_smoke()
+            self.assertEqual(launch.call_args.kwargs['timeout'], 180)
+
+    def test_large_sql_is_sent_over_stdin(self):
+        stack = object.__new__(control.Stack)
+        stack.values = {'POSTGRES_USER': 'test', 'POSTGRES_DB': 'test'}
+        statement = 'SELECT ' + '1,' * 20000 + '1;'
+        with patch.object(stack, 'compose', return_value='ok') as compose:
+            self.assertEqual(stack.sql(statement), 'ok')
+        args, kwargs = compose.call_args
+        self.assertNotIn(statement, args[0])
+        self.assertEqual(kwargs['input'], statement)
+
+    def test_completion_buckets_use_completion_time_and_exclude_failures_from_latency(self):
+        rows = [
+            {'id': 'a', 'status': 'completed', 'createdAt': '2026-01-01T00:00:00+00:00', 'completedAt': '2026-01-01T00:02:00+00:00'},
+            {'id': 'b', 'status': 'failed', 'createdAt': '2026-01-01T00:00:00+00:00', 'completedAt': '2026-01-01T00:05:00+00:00'},
+        ]
+        summary = control.summarize_runs(rows)
+        self.assertEqual(summary['completionBuckets'], {'2026-01-01T00:02': 1})
+        self.assertEqual(summary['completedLatencyMs']['p50'], 120000)
+        self.assertEqual(summary['failed'], 1)
+
+    def test_sampling_failure_does_not_kill_workload_or_get_hidden_by_accounting(self):
+        stack = unittest.mock.Mock()
+        stack.env_file = Path('/test.env')
+        stack.values = {'BOOTSTRAP_SUPERADMIN_EMAIL': 'test', 'BOOTSTRAP_SUPERADMIN_PASSWORD': 'secret'}
+        stack.quiet.return_value = True
+        stack.sample.side_effect = [RuntimeError('sampling failed'), []]
+        def sql(statement):
+            if 'json_agg' in statement:
+                raise OSError('accounting failed')
+            return '{}'
+        stack.sql.side_effect = sql
+        process = unittest.mock.Mock(returncode=0)
+        process.poll.side_effect = [None, 0, 0]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            def launch(*args, **kwargs):
+                kwargs['stdout'].write('accepted run a session s\n')
+                kwargs['stdout'].flush()
+                return process
+            with patch.object(control.subprocess, 'Popen', side_effect=launch), patch.object(control, 'run', return_value='k6'), patch.object(control.time, 'sleep'), patch.object(control.time, 'monotonic', return_value=0):
+                with self.assertRaises(RuntimeError):
+                    control.load(stack, output, 60, 10)
+            errors = json.loads((output / 'failure.json').read_text())['errors']
+            self.assertEqual([e['phase'] for e in errors], ['sampling', 'accounting'])
+            self.assertFalse(json.loads((output / 'outcome.json').read_text())['valid'])
+        process.terminate.assert_not_called()
 
     def test_environment_is_generated_without_reading_private_env(self):
         with tempfile.TemporaryDirectory() as tmp:

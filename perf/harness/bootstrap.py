@@ -11,6 +11,7 @@
 import json
 import os
 import sys
+import subprocess
 import urllib.error
 import urllib.request
 
@@ -57,10 +58,21 @@ def step(name: str, status: int, body, ok=(200, 201, 202)):
     return body
 
 
-def completed_terminal(status):
-    if status in {'failed', 'cancelled', 'interrupted'}:
-        raise RuntimeError(f'Smoke run ended unsuccessfully: {status}')
-    return status == 'completed'
+def read_terminal(stream):
+    for raw in stream:
+        line = raw.decode("utf-8").strip()
+        if not line.startswith("data:"):
+            continue
+        item = json.loads(line[5:].strip())
+        event_type = (item.get("event") or item).get("type")
+        if event_type in {"agent_run_completed", "agent_run_failed", "agent_run_interrupted"}:
+            return event_type
+    raise RuntimeError("Event stream ended without a terminal event")
+
+
+def run_bounded_smoke():
+    # A process deadline also bounds a continuously active nonterminal stream.
+    return subprocess.run([sys.executable, __file__, "--smoke-child"], timeout=180).returncode
 
 
 def main():
@@ -142,31 +154,27 @@ def main():
     agent_run_id = body["agentRunId"]
     print(f"     session: {session_id}  run: {agent_run_id}")
 
-    # 轮询 history 到终态。裸 live 订阅会漏掉订阅前已提交的事件，
-    # 且 run 可能在 202 返回后瞬间完成——轮询是唯一可靠的观察方式。
-    import time
+    with urllib.request.urlopen(
+        urllib.request.Request(
+            f"{API}/api/sessions/{session_id}/agent-runs/{agent_run_id}/events",
+            headers={"Cookie": cookie_header(), "Accept": "text/event-stream"},
+        ), timeout=60,
+    ) as stream:
+        terminal = read_terminal(stream)
 
-    deadline = time.monotonic() + 180
-    last_status = None
-    while time.monotonic() < deadline:
-        status, body = call("GET", f"/api/sessions/{session_id}/history")
-        if status == 200:
-            run = next(
-                (r for r in (body.get("agentRuns") or []) if r.get("id") == agent_run_id),
-                None,
-            )
-            if run:
-                st = run.get("status")
-                if st != last_status:
-                    print(f"     run status: {st}")
-                    last_status = st
-                if completed_terminal(st):
-                    print(f"终态到达: {st}")
-                    return
-        time.sleep(2)
-    print("FAIL: 180 秒内未到终态")
+    if terminal == "agent_run_completed":
+        print(f"终态到达: {terminal}")
+        return
+    print(f"FAIL: 终态异常: {terminal}")
     sys.exit(1)
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] == ["--smoke-child"]:
+        main()
+    else:
+        try:
+            sys.exit(run_bounded_smoke())
+        except subprocess.TimeoutExpired:
+            print("FAIL: smoke exceeded its 180-second deadline")
+            sys.exit(1)

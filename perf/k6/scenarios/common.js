@@ -112,19 +112,23 @@ export function startRun(store, csrf, workspaceId, agentId, modelId, text) {
   return { sessionId: body.sessionId, agentRunId: body.agentRunId };
 }
 
-// 轮询 history 到终态；返回 {status, seconds, events}
-export function waitForTerminal(store, csrf, sessionId, agentRunId, timeoutSeconds) {
-  const deadline = Date.now() + (timeoutSeconds || 120) * 1000;
-  while (Date.now() < deadline) {
-    const res = request('GET', `/api/sessions/${sessionId}/history`, store, undefined, csrf, { type: 'poll_history' });
-    if (res.status === 200) {
-      const runs = res.json('agentRuns') || [];
-      const run = runs.find((r) => r.id === agentRunId);
-      if (run && ['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status)) {
-        return { status: run.status, seconds: (timeoutSeconds * 1000 - (deadline - Date.now())) / 1000, events: res.json('events') || [] };
-      }
-    }
-    sleep(0.5);
+// The server replays committed events and closes this response at the terminal.
+// A request timeout bounds the entire response, including active nonterminal streams.
+export function waitForTerminal(store, csrf, sessionId, agentRunId, timeoutSeconds = 120) {
+  const started = Date.now();
+  const response = http.get(`${API}/api/sessions/${sessionId}/agent-runs/${agentRunId}/events`, {
+    headers: { Cookie: cookieHeader(store), Accept: 'text/event-stream' },
+    timeout: `${timeoutSeconds}s`, tags: { type: 'terminal_events' },
+  });
+  if (response.status !== 200) throw new Error(`terminal stream failed: ${response.status}`);
+  const events = [];
+  const terminals = { agent_run_completed: 'completed', agent_run_failed: 'failed', agent_run_interrupted: 'interrupted' };
+  for (const line of response.body.split(/\r?\n/)) {
+    if (!line.startsWith('data:')) continue;
+    const item = JSON.parse(line.slice(5).trim());
+    const event = item.event || item;
+    events.push(event);
+    if (terminals[event.type]) return { status: terminals[event.type], seconds: (Date.now() - started) / 1000, events };
   }
-  return { status: 'timeout', seconds: timeoutSeconds, events: [] };
+  throw new Error('terminal stream ended without a terminal event');
 }
