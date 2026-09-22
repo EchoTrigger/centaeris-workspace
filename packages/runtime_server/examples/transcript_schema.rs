@@ -47,6 +47,14 @@ fn main() {
     let block = TranscriptBlockV1 {
         block_id: "block-1".into(),
         block_revision: "1".into(),
+        presentation: Some(TranscriptPresentationV1 {
+            agent_run_id: None,
+            source_type: "user_message".into(),
+            observed_at_ms: 0,
+            display_target: None,
+            duration_ms: None,
+            operation: None,
+        }),
         order_key: TranscriptOrderKeyV1 {
             source_sequence: "1".into(),
             ordinal: 0,
@@ -81,6 +89,7 @@ fn main() {
         removals: vec![TranscriptBlockRemovalV1 {
             block_id: "removed".into(),
             block_revision: "1".into(),
+            presentation: None,
         }],
     };
     let patches = PatchPage {
