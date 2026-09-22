@@ -60,6 +60,14 @@
           "orderKey": {
             "ordinal": 0,
             "sourceSequence": "1"
+          },
+          "presentation": {
+            "agentRunId": null,
+            "displayTarget": null,
+            "durationMs": null,
+            "observedAtMs": 0,
+            "operation": null,
+            "sourceType": "user_message"
           }
         }
       ],
@@ -131,6 +139,14 @@
               "orderKey": {
                 "ordinal": 0,
                 "sourceSequence": "1"
+              },
+              "presentation": {
+                "agentRunId": null,
+                "displayTarget": null,
+                "durationMs": null,
+                "observedAtMs": 0,
+                "operation": null,
+                "sourceType": "user_message"
               }
             }
           ]
