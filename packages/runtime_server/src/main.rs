@@ -5916,6 +5916,154 @@ mod tests {
         }
     }
 
+    #[test]
+    fn memory_discovery_reaches_the_model_request_without_plugins_or_eager_reads() {
+        use centaeris_core::model::{
+            ModelClient, ModelClientError, ModelClientErrorKind, ModelClientFuture,
+            ModelClientRequest, ModelClientResponse,
+        };
+        use centaeris_runtime_sqlite::SqliteRuntimeStore;
+
+        struct DiscoveryHost;
+        impl centaeris_core::execution::ExecutionHostRunner for DiscoveryHost {
+            fn status(
+                &self,
+                policy: &centaeris_core::execution::ExecutionPolicy,
+            ) -> Result<
+                centaeris_core::execution::ExecutionHostStatus,
+                centaeris_core::execution::ExecutionError,
+            > {
+                UnavailableTestExecutionHost.status(policy)
+            }
+            fn run_file_system_operation(
+                &self,
+                request: centaeris_core::execution::ExecutionFileSystemRequest,
+            ) -> Result<
+                centaeris_core::execution::ExecutionFileSystemOutput,
+                centaeris_core::execution::ExecutionFileSystemError,
+            > {
+                assert_eq!(
+                    request.model_path, "AGENTS.md",
+                    "discovery must not read Memory eagerly"
+                );
+                Err(centaeris_core::execution::ExecutionFileSystemError::new(
+                    centaeris_core::execution::ExecutionFileSystemErrorKind::NotFound,
+                    "no fixture AGENTS.md",
+                ))
+            }
+            fn run_host_command(
+                &self,
+                _id: Option<&str>,
+                _request: centaeris_core::execution::ExecutionCommandRequest,
+                _probe: Option<&centaeris_core::execution::ExecutionCancellationProbe>,
+            ) -> Result<
+                centaeris_core::execution::ExecutionHostCommandOutput,
+                centaeris_core::execution::ExecutionError,
+            > {
+                panic!("discovery must not run commands")
+            }
+        }
+        #[derive(Default)]
+        struct Capture(Mutex<Vec<ModelClientRequest>>);
+        impl ModelClient for Capture {
+            fn generate<'a>(
+                &'a self,
+                request: &'a ModelClientRequest,
+            ) -> ModelClientFuture<'a, ModelClientResponse> {
+                self.0.lock().expect("capture").push(request.clone());
+                Box::pin(async {
+                    Err(ModelClientError::new(
+                        ModelClientErrorKind::Provider,
+                        "offline capture complete".to_string(),
+                        false,
+                    ))
+                })
+            }
+        }
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-memory-discovery-{}-{}",
+            std::process::id(),
+            centaeris_core::runtime::contracts::current_timestamp_ms()
+        ));
+        std::fs::create_dir(&root).expect("isolated fixture");
+        {
+            let binding = Arc::new(
+                ExecutionHostBinding::new(
+                    ExecutionHostMode::Remote,
+                    Arc::new(DiscoveryHost),
+                    root.clone(),
+                    centaeris_core::execution::ExecutionPolicy::workspace_write_no_network(&root),
+                )
+                .expect("host binding"),
+            );
+            let activation = centaeris_core::extension::build_plugin_activation_snapshot(&[])
+                .expect("no plugins");
+            let layer = ToolLayer::try_new_with_skill_catalog_config_and_execution_host_binding(
+                workspace_skill_catalog_config(&activation).expect("installed system skills"),
+                binding,
+            )
+            .expect("tools");
+            let location = layer
+                .skill_index()
+                .entries()
+                .iter()
+                .find(|skill| skill.name == "memory")
+                .expect("built-in memory")
+                .skill_md_path
+                .clone();
+            let store = SqliteRuntimeStore::new(root.join("runtime.sqlite")).expect("store");
+            let engine = AgentRuntime::new(
+                store,
+                layer,
+                AgentRuntimeConfig {
+                    enable_prompt_compaction: false,
+                    ..Default::default()
+                },
+                ToolConcurrencyCoordinator::new(1),
+            );
+            let capture = Capture::default();
+            let result = tokio::runtime::Runtime::new().expect("runtime").block_on(
+                engine.process_turn_loop_online_with_model_client_stream_cancellable_and_tool_safe_point_async(
+                    AgentRunRequest {
+                        session_id: "memory-discovery".to_string(), initial_turn_id: "turn-memory".to_string(),
+                        user_message: "Remember my synthetic preference: use green headings.".to_string(),
+                        agent_run_identity: None,
+                        runtime_scope: centaeris_core::model::prompt::PromptCompactionScopeV1::main(),
+                        resume_from_turn_id: None, auto_continue_after_resume_wait: None,
+                    }, &capture, &EmptyModelSessionConfigStore::new(), &mut |_| {},
+                    &|| Ok(None), &mut |_| Ok(()),
+                )
+            );
+            assert!(result.is_err(), "offline provider stops after capture");
+            let requests = capture.0.lock().expect("requests");
+            assert_eq!(
+                requests.len(),
+                1,
+                "exactly one offline model request: {result:?}"
+            );
+            let prompt = &requests[0].prepared_prompt;
+            let context = prompt
+                .messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(context.contains("<name>memory</name>"));
+            assert!(context.contains("remember, update, correct, or forget"));
+            assert!(context.contains(location.as_str()));
+            assert!(!context.contains("Keep `plastic-memories://self/MEMORY.md` as a short index"));
+            for name in ["read", "edit", "write"] {
+                assert!(
+                    prompt.tool_definitions.iter().any(|tool| tool.name == name),
+                    "{name}"
+                );
+            }
+            // DiscoveryHost allows only the ordinary AGENTS.md probe; private
+            // Memory and skill bodies are not read during prompt construction.
+        }
+        std::fs::remove_dir_all(root).expect("remove isolated fixture");
+    }
+
     pub(super) fn hosted_context() -> HostedRuntimeContext {
         let workspace_root = std::env::current_dir().expect("test workspace root");
         let execution_host_binding = Arc::new(

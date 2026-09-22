@@ -14,6 +14,8 @@ boundaries, and release verification.
 - [Platform materials and MCP](architecture/PlatformMaterials.md): material
   access, durable processing, evidence receipts and citation presentation.
 - [API](reference/API.md): REST, SSE, and internal service contracts.
+- [Web chat presentation](reference/WebChatPresentation.md): typography roles,
+  motion inventory, disclosure rules and focused browser checks.
 - [Configuration](reference/Configuration.md): environment variables and secret
   boundaries.
 
@@ -33,6 +35,8 @@ boundaries, and release verification.
 
 - [Security model](security/Model.md): trust boundaries, credentials, execution,
   and Plugin risk.
+- [Memory acceptance](eval/MemoryAcceptance.md): offline discovery and private
+  persistence checks, plus bounded real-model follow-up.
 - [Release gate](eval/ReleaseGate.md): required source and deployment checks.
 - [Performance evaluation](eval/PerformanceEvaluation.md): reproducible measurement
   definitions without local run receipts.

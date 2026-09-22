@@ -481,8 +481,8 @@ button.attachmentCardContent:hover { border-color: var(--outline-variant); backg
 .workspaceActivityGroupChevron { transition: transform 140ms ease; }
 .workspaceActivityGroupChevron.isExpanded { transform: rotate(180deg); }
 button.workspaceActivityGroup:hover { color: var(--on-surface); }
-.workspaceActivityDetails { display: grid; grid-template-rows: 0fr; min-width: 0; opacity: 0; transform: translateY(-4px); transition: grid-template-rows 160ms ease, opacity 150ms ease, transform 160ms ease; }
-.workspaceActivityDetails.isExpanded { grid-template-rows: 1fr; opacity: 1; transform: translateY(0); }
+.chatDisclosure { min-width: 0; overflow: clip; }
+.workspaceActivityDetails { min-width: 0; }
 .workspaceActivityDetailsInner { display: grid; min-height: 0; gap: 0; overflow: hidden; border: 1px solid var(--outline-variant); border-radius: 10px; background: var(--surface); }
 .workspaceActivityGroup small { flex: none; color: var(--error); font-size: 11px; }
 .workspaceToolOutput { display: grid; min-width: 0; }
@@ -607,8 +607,8 @@ button.workspaceActivityGroup:hover { color: var(--on-surface); }
 .attachmentPreviewUnavailable svg { width: 34px; height: 34px; color: var(--primary-color); }
 .attachmentPreviewUnavailable a { color: var(--primary-color); }
 
-.workspaceContextPanel { position: relative; grid-column: 3; grid-row: 2; min-width: 0; height: 100%; margin: 0; overflow: hidden; border-left: 1px solid var(--outline-variant); background: var(--surface-color); opacity: 1; transform: translateX(0); visibility: visible; transition: opacity 180ms ease, transform 520ms var(--motion-sidebar), visibility 0s linear 0s; }
-.workspaceWorkbench:not(.withContextPanel) .workspaceContextPanel { opacity: 0; transform: translateX(40px); visibility: hidden; pointer-events: none; transition: opacity 180ms ease, transform 520ms var(--motion-sidebar), visibility 0s linear 520ms; }
+.workspaceContextPanel { position: relative; grid-column: 3; grid-row: 2; min-width: 0; height: 100%; margin: 0; overflow: hidden; border-left: 1px solid var(--outline-variant); background: var(--surface-color); opacity: 1; transform: translateX(0); visibility: visible; transition: opacity 240ms ease, transform 240ms var(--motion-standard), visibility 0s linear 0s; }
+.workspaceWorkbench:not(.withContextPanel) .workspaceContextPanel { opacity: 0; transform: translateX(16px); visibility: hidden; pointer-events: none; transition: opacity 240ms ease, transform 240ms var(--motion-standard), visibility 0s linear 240ms; }
 .workspaceContextPanelHeader { display: flex; min-height: 40px; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--outline-variant); background: var(--surface-variant); padding: 5px 9px 5px 13px; }
 .workspaceContextPanelHeader > strong { font-size: 12px; font-weight: 650; }
 .workspaceContextPanelHeader > strong span { color: var(--muted); font-weight: 450; }
@@ -663,7 +663,10 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 .filePreviewActions svg { width: 17px; height: 17px; }
 .filePreviewState { display: grid; place-items: center; align-content: center; padding: 32px; color: var(--muted); font-size: 13px; text-align: center; }
 .filePreviewState.isError { color: var(--danger); }
-.filePreviewLayout { display: grid; min-height: 0; grid-template-rows: minmax(0, 1fr); }
+.filePreviewLayout { animation: filePreviewReady 150ms ease-out; display: grid; min-height: 0; grid-template-rows: minmax(0, 1fr); }
+@keyframes filePreviewReady { from { opacity: 0; } to { opacity: 1; } }
+.workProgressSummary svg { transition: transform 140ms ease; }
+:is(.workspaceCitationSources button,.workProgressSummary,.workspaceActivityGroup,.filePreviewActions button,.filePreviewActions a) { transition: color 140ms ease, background-color 140ms ease; }
 .filePreviewBody { min-width: 0; min-height: 0; overflow: auto; background: var(--surface-variant); }
 .filePreviewBody iframe { display: block; width: 100%; height: 100%; border: 0; background: var(--surface-color); }
 .filePreviewBody img { display: block; max-width: calc(100% - 36px); max-height: calc(100% - 36px); margin: 18px auto; object-fit: contain; }
@@ -1086,7 +1089,7 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; transition-delay: 0s !important; }
 }
 /* A native select keeps language switching keyboard and screen-reader accessible. */
 .languageSelector { display: flex; align-items: center; justify-content: space-between; gap: 24px; min-height: 64px; padding: 0; color: var(--text); font-size: 14px; }

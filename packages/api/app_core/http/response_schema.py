@@ -644,6 +644,17 @@ class CitationSnapshotResponse(StrictSchema):
     citations: list[CitationSummaryResponse]
 
 
+class TranscriptCitationBinding(StrictSchema):
+    source_sequence: str = Field(alias="sourceSequence")
+    source_tool_call_id: str = Field(alias="sourceToolCallId")
+    snapshot: CitationSnapshotResponse
+
+
+class TranscriptCitationsResponse(StrictSchema):
+    session_id: str = Field(alias="sessionId")
+    bindings: list[TranscriptCitationBinding]
+
+
 class AgentRunAcceptedResponse(StrictSchema):
     agent_run_id: str = Field(alias="agentRunId")
     turn_id: str = Field(alias="turnId")
