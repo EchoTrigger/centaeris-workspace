@@ -268,6 +268,7 @@ dependencies = [
  "centaeris-model-catalog",
  "futures",
  "hmac 0.12.1",
+ "httpdate",
  "image",
  "schemars",
  "serde",
