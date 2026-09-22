@@ -667,7 +667,9 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
         })
         .expect("load projected transcript page");
     assert_eq!(page.work.raw_event_visits, 0);
-    assert_eq!(page.page.blocks.len(), 2);
+    // AgentRun start and completion are first-class transcript boundary blocks
+    // in the Core projection, alongside the user and assistant messages.
+    assert_eq!(page.page.blocks.len(), 4);
     let content_request = serde_json::json!({
         "schema":"transcript.content.range.read.v1", "sessionId":"session_transcript",
         "projectionVersion":"transcript.projection.v1", "projectionGeneration":"generation-1",
