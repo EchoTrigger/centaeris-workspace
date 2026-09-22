@@ -1,9 +1,13 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useState, type ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
 import { useTranslation } from "../i18n";
+import { AnimatedDisclosure } from "./AnimatedDisclosure";
+import { initialWorkDisclosure, observeFinalAnswer, toggleWorkDisclosure, preserveWorkDisclosure, type WorkDisclosure } from "./workDisclosure";
 import { formatWorkDuration } from "./workDuration";
 
-export function WorkProgress({ running, finalStarted, startedAtMs, completedAtMs, children, response, responseIsProcess = false }: {
+export function WorkProgress({ running, finalStarted, startedAtMs, completedAtMs, children, response, responseIsProcess = false, initialDisclosure, onDisclosureChange }: {
+  initialDisclosure?: WorkDisclosure;
+  onDisclosureChange?(value: WorkDisclosure): void;
   running: boolean;
   finalStarted: boolean;
   startedAtMs?: number;
@@ -14,12 +18,10 @@ export function WorkProgress({ running, finalStarted, startedAtMs, completedAtMs
 }) {
   const { t } = useTranslation();
   const [now, setNow] = useState(Date.now);
-  const [disclosure, setDisclosure] = useState({ finalStarted, expanded: !finalStarted });
-  // A draft answer can become a process summary when a tool starts. Reopen on
-  // that boundary, but allow manual disclosure until the next phase transition.
-  if (disclosure.finalStarted !== finalStarted) {
-    setDisclosure({ finalStarted, expanded: !finalStarted });
-  }
+  const [disclosure, setDisclosure] = useState(() => initialDisclosure ?? initialWorkDisclosure(finalStarted));
+  useLayoutEffect(() => { onDisclosureChange?.(disclosure); }, [disclosure, onDisclosureChange]);
+  const nextDisclosure = observeFinalAnswer(disclosure, finalStarted);
+  if (nextDisclosure !== disclosure) setDisclosure(nextDisclosure);
   useEffect(() => {
     if (!running) return;
     const interval = setInterval(() => setNow(Date.now()), 1000);
@@ -30,12 +32,18 @@ export function WorkProgress({ running, finalStarted, startedAtMs, completedAtMs
   );
   const label = [t(running ? "workProgress.working" : "workProgress.worked"), elapsed].filter(Boolean).join(" ");
   return <div className="workProgress">
-    {finalStarted ? <button className="workProgressSummary" type="button" aria-label={label}
+    {disclosure.finalSeen ? <button className="workProgressSummary" type="button" aria-label={label}
       aria-expanded={disclosure.expanded}
-      onClick={() => setDisclosure({ finalStarted, expanded: !disclosure.expanded })}>
+      onClick={() => setDisclosure(toggleWorkDisclosure)}>
       <span>{label}</span><ChevronRight aria-hidden="true" className={disclosure.expanded ? "isExpanded" : ""} />
     </button> : <div className="workProgressStatus">{label}</div>}
-    {disclosure.expanded ? <div className="workProgressBody">{children}</div> : null}
+    <AnimatedDisclosure expanded={disclosure.expanded}><div className="workProgressBody" onClickCapture={(event) => {
+      // Opening any process detail is a deliberate reading choice, including
+      // keyboard activation. A later final answer must not interrupt it.
+      if (event.target instanceof Element && event.target.closest('button[aria-expanded="false"]')) {
+        setDisclosure(preserveWorkDisclosure);
+      }
+    }}>{children}</div></AnimatedDisclosure>
     <div hidden={responseIsProcess && !disclosure.expanded}>{response}</div>
   </div>;
 }

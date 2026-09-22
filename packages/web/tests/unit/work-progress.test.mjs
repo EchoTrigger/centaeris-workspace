@@ -36,3 +36,29 @@ test("upward intent loads at the top even when no scroll event can fire", () => 
   assert.equal(shouldLoadEarlier(0, false, false), false);
   assert.equal(shouldLoadEarlier(0, true, true), false);
 });
+import { initialWorkDisclosure, observeFinalAnswer, toggleWorkDisclosure, preserveWorkDisclosure } from "../../src/chat/workDisclosure.ts";
+
+test("process starts open and folds on first final answer", () => {
+  const working = initialWorkDisclosure(false);
+  assert.equal(working.expanded, true);
+  assert.equal(observeFinalAnswer(working, true).expanded, false);
+  assert.equal(initialWorkDisclosure(true).expanded, false);
+});
+
+test("manual reopening survives answer updates and projection refresh", () => {
+  let state = toggleWorkDisclosure(observeFinalAnswer(initialWorkDisclosure(false), true));
+  state = observeFinalAnswer(state, true);
+  state = observeFinalAnswer(state, false);
+  state = observeFinalAnswer(state, true);
+  assert.equal(state.expanded, true);
+});
+
+test("manual closure survives refresh; new turns have their own default", () => {
+  assert.equal(observeFinalAnswer(initialWorkDisclosure(true), false).expanded, false);
+  assert.equal(initialWorkDisclosure(false).expanded, true);
+});
+
+test("opening process details before the final answer protects the reader", () => {
+  const state = preserveWorkDisclosure(initialWorkDisclosure(false));
+  assert.equal(observeFinalAnswer(state, true).expanded, true);
+});

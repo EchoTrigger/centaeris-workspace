@@ -14,7 +14,7 @@ function FilePreviewPanel({ panel, browserWidthPx, onBrowserWidthChange, onClose
     if (drag) onBrowserWidthChange(drag.widthPx + drag.clientX - clientX);
   };
   return (
-    <aside className="workspaceContextPanel workspaceFilePreviewPanel" aria-label={t("workspaceContextPanel.filePreview")}>
+    <>
       <div
         className="workspaceContextPanelResizeHandle"
         role="separator"
@@ -76,14 +76,17 @@ function FilePreviewPanel({ panel, browserWidthPx, onBrowserWidthChange, onClose
           </div>
         </div>
       ) : null}
-    </aside>
+    </>
   );
 }
 
 export function WorkspaceContextPanel({ panel, browserWidthPx, onBrowserWidthChange, onClose, onReturn }) {
-  useTranslation();
-  if (panel.mode === "filePreview") {
-    return <FilePreviewPanel panel={panel} browserWidthPx={browserWidthPx} onBrowserWidthChange={onBrowserWidthChange} onClose={onClose} onReturn={onReturn} />;
-  }
-  return null;
+  const { t } = useTranslation();
+  const open = panel.mode === "filePreview";
+  // Keep only the empty shell for the exit transition. Closing immediately
+  // releases file content and its resources; no stale citation is retained.
+  return <aside className="workspaceContextPanel workspaceFilePreviewPanel" aria-label={t("workspaceContextPanel.filePreview")}
+    inert={!open} aria-hidden={!open}>
+    {open ? <FilePreviewPanel panel={panel} browserWidthPx={browserWidthPx} onBrowserWidthChange={onBrowserWidthChange} onClose={onClose} onReturn={onReturn} /> : null}
+  </aside>;
 }

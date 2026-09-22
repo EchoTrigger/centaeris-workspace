@@ -14,6 +14,8 @@ boundaries, and release verification.
 - [Platform materials and MCP](architecture/PlatformMaterials.md): material
   access, durable processing, evidence receipts and citation presentation.
 - [API](reference/API.md): REST, SSE, and internal service contracts.
+- [Web chat presentation](reference/WebChatPresentation.md): typography roles,
+  motion inventory, disclosure rules and focused browser checks.
 - [Configuration](reference/Configuration.md): environment variables and secret
   boundaries.
 
