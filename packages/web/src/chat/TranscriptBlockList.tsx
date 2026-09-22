@@ -285,7 +285,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
             const isLast = index === turns.length - 1 && !pendingVisible;
             const turnLive = isLast ? live : null;
             const time = workTimes.get(turnAnchors[index]);
-            return <div className="workspaceTranscriptTurn" data-send-anchor={turn.userBlockId ? "" : undefined} key={turn.id}>
+            return <div className="workspaceTranscriptTurn" data-send-anchor={turn.userBlockId ? "" : undefined} key={`${sessionId}:${turn.id}`}>
               {turn.userBlockId ? <TranscriptBlockRow store={store} blockId={turn.userBlockId} /> : null}
               <WorkProgress running={isLast && running} finalStarted={turn.answerIds.length > 0}
                 startedAtMs={time?.startedAtMs ?? (isLast ? startedAtMs : undefined)} completedAtMs={time?.completedAtMs ?? (isLast ? completedAtMs : undefined)}>

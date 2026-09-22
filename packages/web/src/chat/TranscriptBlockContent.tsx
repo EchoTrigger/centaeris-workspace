@@ -1,3 +1,4 @@
+import { AnimatedDisclosure } from "./AnimatedDisclosure";
 import type { CitationSummary } from "./citationSnapshot";
 import {
   memo,
@@ -126,13 +127,13 @@ function TranscriptReasoning({ store, body }: Readonly<{
         ) : null}
         <ChevronDown className={`workspaceActivityGroupChevron ${expanded ? "isExpanded" : ""}`} aria-hidden="true" />
       </button>
-      {expanded ? (
+      <AnimatedDisclosure expanded={expanded}>
         <div className="workspaceReasoningBody" role="region" aria-label={t("reasoningBlock.thinkingContent")} tabIndex={0} ref={bodyRef}>
           {text === null
             ? (reference ? <ReferencedContent store={store} reference={reference} mode="markdown" /> : null)
             : <MarkdownContent text={text} />}
         </div>
-      ) : null}
+      </AnimatedDisclosure>
     </div>
   );
 }
@@ -234,7 +235,7 @@ function TranscriptToolNode({ store, call, operation, outputRef, failed }: Reado
         <span className="agent-tool-node-action is-inline-summary" title={summary}>{summary}</span>
         {hasDetail ? <span className={`agent-operation-chevron ${expanded ? "open" : ""}`} aria-hidden="true" /> : null}
       </Header>
-      {hasDetail && expanded ? (
+      <AnimatedDisclosure expanded={hasDetail && expanded}>
         <div className="agent-operation-body agent-tool-node-body">
           <div className="agent-tool-command-card">
             {isCommand && command ? <pre className="agent-tool-bash-command">{`$ ${command}`}</pre> : null}
@@ -245,7 +246,7 @@ function TranscriptToolNode({ store, call, operation, outputRef, failed }: Reado
               : null}
           </div>
         </div>
-      ) : null}
+      </AnimatedDisclosure>
     </div>
   );
 }
@@ -346,8 +347,8 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
           })}
         </div> : null;
       })}
-      {hasDetail && expanded ? (
-        <div className="workspaceActivityDetails isExpanded">
+      <AnimatedDisclosure expanded={hasDetail && expanded}>
+        <div className="workspaceActivityDetails">
           <div className="workspaceActivityDetailsInner">
             <div className="agent-tool-node-list">
               {entries.flatMap((entry) => {
@@ -377,7 +378,7 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
             </div>
           </div>
         </div>
-      ) : null}
+      </AnimatedDisclosure>
     </div>
   );
 }
@@ -466,11 +467,11 @@ export const TranscriptLiveTail = memo(function TranscriptLiveTail({ live }: Rea
             ) : null}
             <ChevronDown className={`workspaceActivityGroupChevron ${expanded ? "isExpanded" : ""}`} aria-hidden="true" />
           </button>
-          {expanded ? (
+          <AnimatedDisclosure expanded={expanded}>
             <div className="workspaceReasoningBody" role="region" aria-label={t("reasoningBlock.thinkingContent")} tabIndex={0} ref={reasoningBodyRef}>
               <MarkdownContent text={reasoningText} />
             </div>
-          ) : null}
+          </AnimatedDisclosure>
         </div>
       ) : null}
     </div>
