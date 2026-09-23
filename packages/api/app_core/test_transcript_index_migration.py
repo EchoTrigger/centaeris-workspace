@@ -61,6 +61,7 @@ class MigrationBaselineTests(TestCase):
                 "0001_initial.py",
                 "0002_session_event_tool_result_lookup.py",
                 "0003_agentrun_pre_admission_cancelled.py",
+                "0004_modelquotadomain_providercredential_quotadomain.py",
             ],
         )
 
@@ -69,7 +70,15 @@ class MigrationBaselineTests(TestCase):
             REPOSITORY_ROOT / "scripts" / "docker-release-gate.sh"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("0003_agentrun_pre_admission_cancelled", release_gate)
+        self.assertIn("0004_modelquotadomain_providercredential_quotadomain", release_gate)
+
+    def test_quota_domain_migration_extends_the_existing_migration_chain(self):
+        quota = importlib.import_module(
+            "app_core.migrations.0004_modelquotadomain_providercredential_quotadomain"
+        ).Migration
+        self.assertEqual(quota.dependencies, [
+            ("app_core", "0003_agentrun_pre_admission_cancelled")
+        ])
 
     def test_cancellation_receipt_extends_the_existing_migration_chain(self):
         receipt = importlib.import_module(

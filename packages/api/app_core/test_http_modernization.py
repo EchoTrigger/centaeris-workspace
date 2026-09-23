@@ -16,11 +16,14 @@ from app_core import agent_run_stream
 from app_core.http import storage_stream
 from app_core.http.schema import ModelResponse
 from app_core.http.stream_response import OwnedAsyncStreamingHttpResponse
+from app_core.http.internal_model import model_runs
 from app_core.model_adapter import stream_model_async
+from app_core.model_adapter.quota import async_model_attempt
 from app_core.runtime_client import request_execution_profile, request_model_catalog
 from app_core.models import (
     Session,
     ModelConfig,
+    ModelQuotaDomain,
     ModelRunLog,
     ModelProvider,
     ProviderCredential,
@@ -1022,6 +1025,38 @@ class AsyncStorageStreamTests(TestCase):
         self.assertEqual(recovered_body, b"second")
 
 
+class ModelRunQueueCancellationTests(SimpleTestCase):
+    def test_dropped_sync_proxy_request_signals_queued_provider_work(self):
+        started = threading.Event()
+        observed_cancel = threading.Event()
+
+        def blocked_run_model(*, cancel_event, **_kwargs):
+            started.set()
+            if cancel_event.wait(2):
+                observed_cancel.set()
+            return {}
+
+        request = SimpleNamespace(
+            read=lambda _limit: b'{"agentRunId":"run"}', headers={}
+        )
+
+        async def exercise():
+            task = asyncio.create_task(model_runs(request))
+            self.assertTrue(await asyncio.to_thread(started.wait, 2))
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        with patch(
+            "app_core.http.internal_model._validate_model_run",
+            new=AsyncMock(return_value="model"),
+        ), patch(
+            "app_core.http.internal_model.run_model", side_effect=blocked_run_model
+        ):
+            async_to_sync(exercise)()
+        self.assertTrue(observed_cancel.is_set())
+
+
 class AsyncProviderStreamTests(TestCase):
     def test_disconnect_closes_without_success_audit(self):
         model = ModelConfig.objects.create(
@@ -1117,6 +1152,9 @@ class AsyncProviderStreamTests(TestCase):
                 apiBase="https://api.deepseek.com",
             ),
             displayName="Provider cancellation credential",
+            quotaDomain=ModelQuotaDomain.objects.create(
+                id="provider-cancellation", maxConcurrent=1, enabled=True
+            ),
             encryptedSecret="unused-by-patched-client",
             createdBy=admin,
             updatedBy=admin,
@@ -1203,6 +1241,14 @@ class AsyncProviderStreamTests(TestCase):
             async_to_sync(cancel_provider_send)()
 
         self.assertEqual(client.close.await_count, 1)
+        async def next_attempt():
+            async with async_model_attempt(model):
+                return True
+
+        async def verify_released():
+            return await asyncio.wait_for(next_attempt(), timeout=2)
+
+        self.assertTrue(async_to_sync(verify_released)())
         audit = ModelRunLog.objects.get(agentRunId="agent_run_provider_cancelled")
         self.assertEqual(audit.status, "error")
         self.assertEqual(audit.error, "provider_stream_cancelled")
