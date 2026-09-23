@@ -122,8 +122,8 @@ impl PostgresRuntimeStore {
                 let tenant: String = row.get(1);
                 let tenant_used = tenants.entry(tenant).or_default();
                 if *tenant_used >= limits.tenant { continue; }
-                tx.execute("UPDATE runtime_jobs SET status='leased',lease_owner=$1,lease_expires_at_ms=$2,updated_at_ms=$3,heartbeat_at_ms=$3 WHERE job_id=$4",
-                    &[&req.worker_id,&until,&now,&id]).map_err(|error| error.to_string())?;
+                tx.execute("UPDATE runtime_jobs SET status='leased',lease_owner=gen_random_uuid()::text,lease_expires_at_ms=$1,updated_at_ms=$2,heartbeat_at_ms=$2 WHERE job_id=$3 AND status='queued'",
+                    &[&until,&now,&id]).map_err(|error| error.to_string())?;
                 *tenant_used += 1;
                 jobs.push(load_job(&mut tx, &id)?.ok_or("claimed execution job missing")?);
             }

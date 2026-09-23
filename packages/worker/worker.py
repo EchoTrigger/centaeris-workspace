@@ -522,16 +522,22 @@ def valid_runtime_job_id(value):
     )
 
 
+def valid_lease_owner(value):
+    return (
+        isinstance(value, str)
+        and 16 <= len(value.encode("utf-8")) <= 160
+        and all(ord(character) >= 32 and not 127 <= ord(character) < 160 for character in value)
+    )
 
 
-def claim_job(job_kind, lease_owner):
+def claim_job(job_kind, worker_id):
     if job_kind not in WORKER_JOB_KINDS:
         raise RuntimeError("worker_job_kind_invalid")
     response = runtime_request(
         "/internal/jobs/claim",
         {
             "schema": "runtime.job.claim.v1",
-            "workerId": lease_owner,
+            "workerId": worker_id,
             "jobId": None,
             "jobKind": job_kind,
             "nowMs": now_ms(),
@@ -552,7 +558,7 @@ def claim_job(job_kind, lease_owner):
         not isinstance(job, dict)
         or not valid_runtime_job_id(job.get("jobId"))
         or job.get("jobKind") != job_kind
-        or job.get("leaseOwner") != lease_owner
+        or not valid_lease_owner(job.get("leaseOwner"))
         or job.get("status") != "leased"
     ):
         raise RuntimeError("runtime_job_claim_response_invalid")
@@ -643,12 +649,12 @@ def _execute_claimed_job(job, lease_owner):
 
 
 def execute_next_job(slot_index):
-    lease_owner = f"worker:{socket.gethostname()}:{uuid.uuid4().hex}"
+    worker_id = f"worker:{socket.gethostname()}:{uuid.uuid4().hex}"
     for offset in range(len(WORKER_JOB_KINDS)):
         job_kind = WORKER_JOB_KINDS[(slot_index + offset) % len(WORKER_JOB_KINDS)]
-        job = claim_job(job_kind, lease_owner)
+        job = claim_job(job_kind, worker_id)
         if job is not None:
-            execute_claimed_job(job, lease_owner)
+            execute_claimed_job(job, job["leaseOwner"])
             return True
     return False
 

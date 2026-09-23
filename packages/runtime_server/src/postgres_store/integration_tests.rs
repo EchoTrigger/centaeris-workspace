@@ -1,12 +1,17 @@
 use centaeris_core::runtime::contracts::{CheckpointRecord, EventVisibility, RuntimeEvent};
+use centaeris_core::session::external_context::{
+    ExternalContextObject, ExternalContextObjectLink, ExternalContextStorePort,
+};
 use centaeris_core::session::reliability::{
-    ClaimDueRuntimeJobsRequest, CompleteRuntimeJobRequest, RenewRuntimeJobLeaseRequest,
-    RuntimeBackoffPolicy, RuntimeJobOutboxPort, RuntimeJobRecord, RuntimeJobStatus,
+    CancelRuntimeJobRequest, ClaimDueRuntimeJobsRequest, CompleteRuntimeJobRequest,
+    FailRuntimeJobRequest, RenewRuntimeJobLeaseRequest, RuntimeBackoffPolicy,
+    RuntimeJobFailureDisposition, RuntimeJobOutboxPort, RuntimeJobRecord, RuntimeJobStatus,
     RuntimeJobStorePort, ScheduleRuntimeJobRequest, StartRuntimeJobRequest, YieldRuntimeJobRequest,
 };
 use centaeris_core::session::store::{
     AgentRuntimeSnapshotStorePort, ConsumeWaitCheckpointRequest, RuntimeStore,
     RuntimeStoreTransactionPort, SaveWaitCheckpointRequest, SessionDataStorePort,
+    UpsertExternalContextLinkAndCompleteJobRequest,
 };
 use centaeris_core::session::supplement::{
     AcknowledgeTurnSupplementsRequest, ClaimTurnSupplementsRequest,
@@ -283,7 +288,7 @@ fn postgres_outbox_wake_during_active_waiter_survives_yield() {
     let store = PostgresRuntimeStore::new(&url).unwrap();
     terminal_source(&store, "source:terminal");
     let id = late_waiter(&store, 0);
-    store
+    let waiter_owner = store
         .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
             now_ms: 100_000,
             worker_id: "worker_waiter".to_string(),
@@ -293,6 +298,9 @@ fn postgres_outbox_wake_during_active_waiter_survives_yield() {
             limit: 1,
             lease_ms: 10_000,
         })
+        .unwrap()
+        .remove(0)
+        .lease_owner
         .unwrap();
     outbox_protocol(
         &store,
@@ -305,7 +313,7 @@ fn postgres_outbox_wake_during_active_waiter_survives_yield() {
     store
         .yield_runtime_job(YieldRuntimeJobRequest {
             job_id: id.clone(),
-            lease_owner: "worker_waiter".to_string(),
+            lease_owner: waiter_owner,
             yielded_at_ms: 100_002,
             run_at_ms: 400_000,
             transition_reason: "runtime_job_wait".to_string(),
@@ -369,7 +377,7 @@ fn postgres_pre_admission_cancellation_is_durable_fenced_and_history_free() {
         )
         .unwrap()
         .get(0);
-    store
+    let owner = store
         .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
             now_ms: now,
             worker_id: "owner".into(),
@@ -379,18 +387,21 @@ fn postgres_pre_admission_cancellation_is_durable_fenced_and_history_free() {
             limit: 1,
             lease_ms: 60_000,
         })
+        .unwrap()
+        .remove(0)
+        .lease_owner
         .unwrap();
     store
         .start_runtime_job(StartRuntimeJobRequest {
             job_id: "agent_run.lifecycle:cancel-run".into(),
-            lease_owner: "owner".into(),
+            lease_owner: owner.clone(),
             started_at_ms: now,
         })
         .unwrap();
     let fence = RuntimeJobLeaseFence {
         job_id: "agent_run.lifecycle:cancel-run".into(),
         job_kind: "agent_run.lifecycle".into(),
-        lease_owner: "owner".into(),
+        lease_owner: owner,
     };
     let log = store.session_log(
         "cancel-workspace".into(),
@@ -866,6 +877,463 @@ fn job(id: &str, key: &str) -> RuntimeJobRecord {
         created_at_ms: 1,
         updated_at_ms: 1,
     }
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_same_worker_reclaim_fences_old_writes_and_result_transaction() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    store
+        .schedule_runtime_job(ScheduleRuntimeJobRequest {
+            job: job("job_pg_reclaim", "key_pg_reclaim"),
+        })
+        .unwrap();
+    let claim = |store: &PostgresRuntimeStore, now_ms| {
+        store
+            .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
+                now_ms,
+                worker_id: "worker:stable-worker".into(),
+                job_id: Some("job_pg_reclaim".into()),
+                job_kind: None,
+                session_id: None,
+                limit: 1,
+                lease_ms: 100,
+            })
+            .unwrap()
+            .remove(0)
+            .lease_owner
+            .unwrap()
+    };
+    let old = claim(&store, 10);
+    store
+        .start_runtime_job(StartRuntimeJobRequest {
+            job_id: "job_pg_reclaim".into(),
+            lease_owner: old.clone(),
+            started_at_ms: 11,
+        })
+        .unwrap();
+    drop(store);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    assert_eq!(
+        store
+            .get_runtime_job("job_pg_reclaim")
+            .unwrap()
+            .unwrap()
+            .lease_owner
+            .as_deref(),
+        Some(old.as_str())
+    );
+    assert_eq!(store.reclaim_expired_runtime_job_leases(110).unwrap(), 1);
+    let current = claim(&store, 110);
+    assert_ne!(
+        old, current,
+        "each claim needs a new identity even for the same worker"
+    );
+    assert!(store
+        .start_runtime_job(StartRuntimeJobRequest {
+            job_id: "job_pg_reclaim".into(),
+            lease_owner: old.clone(),
+            started_at_ms: 111
+        })
+        .is_err());
+    assert!(store
+        .renew_runtime_job_lease(RenewRuntimeJobLeaseRequest {
+            job_id: "job_pg_reclaim".into(),
+            lease_owner: old.clone(),
+            heartbeat_at_ms: 111,
+            lease_ms: 100
+        })
+        .is_err());
+    assert!(store
+        .yield_runtime_job(YieldRuntimeJobRequest {
+            job_id: "job_pg_reclaim".into(),
+            lease_owner: old.clone(),
+            yielded_at_ms: 111,
+            run_at_ms: 120,
+            transition_reason: "stale".into()
+        })
+        .is_err());
+    assert!(store
+        .fail_runtime_job(FailRuntimeJobRequest {
+            job_id: "job_pg_reclaim".into(),
+            lease_owner: old.clone(),
+            failed_at_ms: 111,
+            last_error: "stale".into(),
+            next_run_at_ms: None,
+            disposition: RuntimeJobFailureDisposition::Failed
+        })
+        .is_err());
+    assert!(store
+        .complete_runtime_job(CompleteRuntimeJobRequest {
+            job_id: "job_pg_reclaim".into(),
+            lease_owner: old.clone(),
+            output_refs: vec![],
+            completed_at_ms: 111
+        })
+        .is_err());
+    assert!(store
+        .cancel_runtime_job(CancelRuntimeJobRequest {
+            job_id: "job_pg_reclaim".into(),
+            reason: "stale".into(),
+            cancelled_at_ms: 111,
+            expected_status: None,
+            expected_lease_owner: Some(old.clone())
+        })
+        .is_err());
+    let object = ExternalContextObject {
+        schema_version: "external_context.object.v1".into(),
+        object_id: "old_result".into(),
+        object_kind: "subagent_result".into(),
+        source_provider_id: "test".into(),
+        source_tool_name: "test".into(),
+        title: "old".into(),
+        content: "old result".into(),
+        metadata: serde_json::json!({}),
+        updated_at_ms: 111,
+    };
+    let link = ExternalContextObjectLink {
+        session_id: "session_pg".into(),
+        turn_id: Some("turn_pg".into()),
+        tool_call_id: Some("call_pg".into()),
+        object_id: object.object_id.clone(),
+        source_provider_id: "test".into(),
+        source_tool_name: "test".into(),
+        linked_at_ms: 111,
+    };
+    assert!(store
+        .upsert_external_context_link_and_complete_job(
+            UpsertExternalContextLinkAndCompleteJobRequest {
+                object: Some(object),
+                link: Some(link),
+                complete_job: CompleteRuntimeJobRequest {
+                    job_id: "job_pg_reclaim".into(),
+                    lease_owner: old,
+                    output_refs: vec!["old_result".into()],
+                    completed_at_ms: 111
+                },
+            }
+        )
+        .is_err());
+    assert!(store
+        .load_external_context_object("old_result")
+        .unwrap()
+        .is_none());
+    assert!(store
+        .load_external_context_object_link("session_pg", "old_result", "turn_pg", "call_pg")
+        .unwrap()
+        .is_none());
+    assert!(store
+        .list_pending_runtime_job_outbox(10)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store
+            .get_runtime_job("job_pg_reclaim")
+            .unwrap()
+            .unwrap()
+            .status,
+        RuntimeJobStatus::Leased
+    );
+    store
+        .start_runtime_job(StartRuntimeJobRequest {
+            job_id: "job_pg_reclaim".into(),
+            lease_owner: current.clone(),
+            started_at_ms: 111,
+        })
+        .unwrap();
+    store
+        .complete_runtime_job(CompleteRuntimeJobRequest {
+            job_id: "job_pg_reclaim".into(),
+            lease_owner: current,
+            output_refs: vec![],
+            completed_at_ms: 112,
+        })
+        .unwrap();
+    assert_eq!(
+        store
+            .get_runtime_job("job_pg_reclaim")
+            .unwrap()
+            .unwrap()
+            .status,
+        RuntimeJobStatus::Succeeded
+    );
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_worker_cancel_checks_claim_but_user_cancel_targets_job() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    let mut legacy = job("job_pg_cancel", "key_pg_cancel");
+    legacy.status = RuntimeJobStatus::Leased;
+    legacy.lease_owner = Some("legacy_claim_identity".into());
+    legacy.lease_expires_at_ms = Some(200);
+    store
+        .schedule_runtime_job(ScheduleRuntimeJobRequest { job: legacy })
+        .unwrap();
+    drop(store);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    assert_eq!(
+        store
+            .get_runtime_job("job_pg_cancel")
+            .unwrap()
+            .unwrap()
+            .lease_owner
+            .as_deref(),
+        Some("legacy_claim_identity")
+    );
+    store
+        .renew_runtime_job_lease(RenewRuntimeJobLeaseRequest {
+            job_id: "job_pg_cancel".into(),
+            lease_owner: "legacy_claim_identity".into(),
+            heartbeat_at_ms: 100,
+            lease_ms: 100,
+        })
+        .unwrap();
+    assert_eq!(
+        store
+            .get_runtime_job("job_pg_cancel")
+            .unwrap()
+            .unwrap()
+            .lease_owner
+            .as_deref(),
+        Some("legacy_claim_identity"),
+        "renewal preserves a released lease identity"
+    );
+    assert!(store
+        .cancel_runtime_job(CancelRuntimeJobRequest {
+            job_id: "job_pg_cancel".into(),
+            reason: "stale worker".into(),
+            cancelled_at_ms: 101,
+            expected_status: Some(RuntimeJobStatus::Leased),
+            expected_lease_owner: Some("wrong_claim_identity".into())
+        })
+        .is_err());
+    assert_eq!(
+        store
+            .get_runtime_job("job_pg_cancel")
+            .unwrap()
+            .unwrap()
+            .status,
+        RuntimeJobStatus::Leased
+    );
+    store
+        .cancel_runtime_job(CancelRuntimeJobRequest {
+            job_id: "job_pg_cancel".into(),
+            reason: "user requested".into(),
+            cancelled_at_ms: 102,
+            expected_status: None,
+            expected_lease_owner: None,
+        })
+        .unwrap();
+    assert_eq!(
+        store
+            .get_runtime_job("job_pg_cancel")
+            .unwrap()
+            .unwrap()
+            .status,
+        RuntimeJobStatus::Cancelled
+    );
+    let mut published = job("job_pg_published_transition", "key_pg_published_transition");
+    published.status = RuntimeJobStatus::Leased;
+    published.lease_owner = Some("released_worker_identity".into());
+    published.lease_expires_at_ms = Some(200);
+    store
+        .schedule_runtime_job(ScheduleRuntimeJobRequest { job: published })
+        .unwrap();
+    drop(store);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    assert_eq!(
+        store
+            .get_runtime_job("job_pg_published_transition")
+            .unwrap()
+            .unwrap()
+            .lease_owner
+            .as_deref(),
+        Some("released_worker_identity")
+    );
+    assert_eq!(store.reclaim_expired_runtime_job_leases(200).unwrap(), 1);
+    let claim = store
+        .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
+            now_ms: 200,
+            worker_id: "released_worker_identity".into(),
+            job_id: Some("job_pg_published_transition".into()),
+            job_kind: None,
+            session_id: None,
+            limit: 1,
+            lease_ms: 100,
+        })
+        .unwrap()
+        .remove(0);
+    assert_ne!(
+        claim.lease_owner.as_deref(),
+        Some("released_worker_identity")
+    );
+    store
+        .complete_runtime_job(CompleteRuntimeJobRequest {
+            job_id: claim.job_id,
+            lease_owner: claim.lease_owner.unwrap(),
+            output_refs: vec![],
+            completed_at_ms: 201,
+        })
+        .unwrap();
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_hosted_worker_reclaim_changes_claim_identity() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    let id = "agent_run.lifecycle:agent_run_claim_generation";
+    let mut lifecycle = job(id, id);
+    lifecycle.job_kind = "agent_run.lifecycle".into();
+    store
+        .schedule_worker_job(
+            ScheduleRuntimeJobRequest { job: lifecycle },
+            Some("workspace_claim_generation"),
+        )
+        .unwrap();
+    let claim = |store: &PostgresRuntimeStore| {
+        store
+            .claim_worker_jobs(ClaimDueRuntimeJobsRequest {
+                now_ms: 1,
+                worker_id: "worker:stable-hosted-worker".into(),
+                job_id: Some(id.into()),
+                job_kind: Some("agent_run.lifecycle".into()),
+                session_id: None,
+                limit: 1,
+                lease_ms: 60_000,
+            })
+            .unwrap()
+            .remove(0)
+            .lease_owner
+            .unwrap()
+    };
+    let old = claim(&store);
+    let mut db = Client::connect(&url, NoTls).unwrap();
+    db.execute(
+        "UPDATE runtime.runtime_jobs SET lease_expires_at_ms=0 WHERE job_id=$1",
+        &[&id],
+    )
+    .unwrap();
+    let now: i64 = db
+        .query_one(
+            "SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(store.reclaim_expired_runtime_job_leases(now).unwrap(), 1);
+    let current = claim(&store);
+    assert_ne!(old, current);
+    assert!(store
+        .complete_runtime_job(CompleteRuntimeJobRequest {
+            job_id: id.into(),
+            lease_owner: old,
+            output_refs: vec![],
+            completed_at_ms: now + 1
+        })
+        .is_err());
+    store
+        .complete_runtime_job(CompleteRuntimeJobRequest {
+            job_id: id.into(),
+            lease_owner: current,
+            output_refs: vec![],
+            completed_at_ms: now + 1,
+        })
+        .unwrap();
+    assert_eq!(
+        store.get_runtime_job(id).unwrap().unwrap().status,
+        RuntimeJobStatus::Succeeded
+    );
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_subagent_projection_uses_core_durable_job_binding() {
+    use centaeris_core::runtime::persist_subagent_result_projection_from_scheduler_events;
+    use centaeris_core::runtime::subagent::{
+        build_subagent_run_job, SubagentLifecycleStatus, SubagentRunJobRequest,
+        SubagentSchedulerEvent, SubagentSchedulerEventKind,
+    };
+    use centaeris_core::session::manager::SessionManager;
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    let mut job = build_subagent_run_job(SubagentRunJobRequest {
+        session_id: "session_projection_parent".into(),
+        parent_turn_id: "turn_projection_parent".into(),
+        tool_call_id: "call_projection".into(),
+        subagent_id: "agent_projection".into(),
+        work_packet_ref: "external_context:subagent_work_packet:projection".into(),
+        checkpoint_id: None,
+        run_at_ms: 1,
+        created_at_ms: 1,
+        max_retries: 0,
+    });
+    job.status = RuntimeJobStatus::Succeeded;
+    job.output_refs = vec!["external_context:subagent_result:projection".into()];
+    job.updated_at_ms = 20;
+    let event = SubagentSchedulerEvent {
+        kind: SubagentSchedulerEventKind::Succeeded,
+        subagent_id: "agent_projection".into(),
+        child_session_id: "session-agent_projection".into(),
+        parent_turn_id: "turn_projection_parent".into(),
+        job_id: job.job_id.clone(),
+        work_packet_ref: job.payload_ref.clone(),
+        result_ref: job.output_refs.first().cloned(),
+        worker_id: Some("worker:projection".into()),
+        status: SubagentLifecycleStatus::Succeeded,
+        summary: "completed".into(),
+        description: None,
+        started_at_ms: None,
+        completed_at_ms: Some(20),
+        at_ms: 20,
+    };
+    store
+        .schedule_runtime_job(ScheduleRuntimeJobRequest { job })
+        .unwrap();
+    let project = |session_id: &str, event: SubagentSchedulerEvent| {
+        persist_subagent_result_projection_from_scheduler_events(&store, session_id, &[event])
+    };
+    assert!(project("session_projection_other", event.clone()).is_err());
+    let mut wrong = event.clone();
+    wrong.subagent_id = "agent_other".into();
+    assert!(project("session_projection_parent", wrong).is_err());
+    let mut wrong = event.clone();
+    wrong.child_session_id = "session-agent_other".into();
+    assert!(project("session_projection_parent", wrong).is_err());
+    let mut wrong = event.clone();
+    wrong.parent_turn_id = "turn_other".into();
+    assert!(project("session_projection_parent", wrong).is_err());
+    let mut wrong = event.clone();
+    wrong.result_ref = Some("external_context:subagent_result:old".into());
+    assert!(project("session_projection_parent", wrong).is_err());
+    let mut wrong = event.clone();
+    wrong.status = SubagentLifecycleStatus::Failed;
+    assert!(project("session_projection_parent", wrong).is_err());
+    assert!(SessionManager::new(store.clone())
+        .load_session("session_projection_parent")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        project("session_projection_parent", event.clone()).unwrap(),
+        1
+    );
+    assert_eq!(project("session_projection_parent", event).unwrap(), 0);
+    assert!(SessionManager::new(store)
+        .load_session("session_projection_parent")
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -1736,13 +2204,12 @@ fn postgres_runtime_store_persists_core_state_and_claims_jobs_once() {
         limit: 1,
         lease_ms: 1000,
     };
-    assert_eq!(
-        store
-            .claim_due_runtime_jobs(request.clone())
-            .expect("first claim")
-            .len(),
-        1
-    );
+    let old_owner = store
+        .claim_due_runtime_jobs(request.clone())
+        .expect("first claim")
+        .remove(0)
+        .lease_owner
+        .unwrap();
     assert!(store
         .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
             worker_id: "worker_b".to_string(),
@@ -1753,14 +2220,14 @@ fn postgres_runtime_store_persists_core_state_and_claims_jobs_once() {
     store
         .start_runtime_job(StartRuntimeJobRequest {
             job_id: "job_pg".to_string(),
-            lease_owner: "worker_a".to_string(),
+            lease_owner: old_owner.clone(),
             started_at_ms: 11,
         })
         .expect("start job");
     store
         .renew_runtime_job_lease(RenewRuntimeJobLeaseRequest {
             job_id: "job_pg".to_string(),
-            lease_owner: "worker_a".to_string(),
+            lease_owner: old_owner.clone(),
             heartbeat_at_ms: 20,
             lease_ms: 100,
         })
@@ -1774,7 +2241,7 @@ fn postgres_runtime_store_persists_core_state_and_claims_jobs_once() {
     assert!(store
         .complete_runtime_job(CompleteRuntimeJobRequest {
             job_id: "job_pg".to_string(),
-            lease_owner: "worker_a".to_string(),
+            lease_owner: old_owner.clone(),
             output_refs: vec![],
             completed_at_ms: 120,
         })
@@ -1785,25 +2252,25 @@ fn postgres_runtime_store_persists_core_state_and_claims_jobs_once() {
             .expect("expired lease"),
         1
     );
-    assert_eq!(
-        store
-            .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
-                now_ms: 120,
-                worker_id: "worker_b".to_string(),
-                job_id: Some("job_pg".to_string()),
-                job_kind: None,
-                session_id: None,
-                limit: 1,
-                lease_ms: 100,
-            })
-            .expect("reclaim job")
-            .len(),
-        1
-    );
+    let current_owner = store
+        .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
+            now_ms: 120,
+            worker_id: "worker_b".to_string(),
+            job_id: Some("job_pg".to_string()),
+            job_kind: None,
+            session_id: None,
+            limit: 1,
+            lease_ms: 100,
+        })
+        .expect("reclaim job")
+        .remove(0)
+        .lease_owner
+        .unwrap();
+    assert_ne!(old_owner, current_owner);
     assert!(store
         .complete_runtime_job(CompleteRuntimeJobRequest {
             job_id: "job_pg".to_string(),
-            lease_owner: "worker_a".to_string(),
+            lease_owner: old_owner,
             output_refs: vec![],
             completed_at_ms: 121,
         })
@@ -1811,7 +2278,7 @@ fn postgres_runtime_store_persists_core_state_and_claims_jobs_once() {
     store
         .complete_runtime_job(CompleteRuntimeJobRequest {
             job_id: "job_pg".to_string(),
-            lease_owner: "worker_b".to_string(),
+            lease_owner: current_owner,
             output_refs: vec![],
             completed_at_ms: 121,
         })
@@ -1859,7 +2326,7 @@ fn postgres_runtime_job_yield_requeues_same_job_without_queued_outbox_and_fences
             job: job("job_pg_yield", "key_pg_yield"),
         })
         .expect("schedule job");
-    store
+    let yield_owner = store
         .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
             now_ms: 10,
             worker_id: "worker_pg_yield_owner".to_string(),
@@ -1869,17 +2336,20 @@ fn postgres_runtime_job_yield_requeues_same_job_without_queued_outbox_and_fences
             limit: 1,
             lease_ms: 1_000,
         })
-        .expect("claim job");
+        .expect("claim job")
+        .remove(0)
+        .lease_owner
+        .unwrap();
     store
         .start_runtime_job(StartRuntimeJobRequest {
             job_id: "job_pg_yield".to_string(),
-            lease_owner: "worker_pg_yield_owner".to_string(),
+            lease_owner: yield_owner.clone(),
             started_at_ms: 11,
         })
         .expect("start job");
     let request = YieldRuntimeJobRequest {
         job_id: "job_pg_yield".to_string(),
-        lease_owner: "worker_pg_yield_owner".to_string(),
+        lease_owner: yield_owner,
         yielded_at_ms: 20,
         run_at_ms: 40,
         transition_reason: "waiting_for_durable_input".to_string(),
@@ -1931,7 +2401,7 @@ fn postgres_turn_supplement_queue_is_lease_fenced_and_cancel_closes_admission() 
     let session_id = "session_pg_supplement";
     let digest = "digest_pg_supplement";
     let job_id = format!("agent_run.lifecycle:{agent_run_id}");
-    let owner = "worker_pg_supplement";
+    let worker_id = "worker_pg_supplement";
     let mut lifecycle_job = job(job_id.as_str(), "unused");
     lifecycle_job.job_kind =
         centaeris_core::session::reliability::AGENT_RUN_LIFECYCLE_JOB_KIND.to_string();
@@ -1941,17 +2411,20 @@ fn postgres_turn_supplement_queue_is_lease_fenced_and_cancel_closes_admission() 
     store
         .schedule_runtime_job(ScheduleRuntimeJobRequest { job: lifecycle_job })
         .expect("schedule lifecycle job");
-    store
+    let owner = store
         .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
             now_ms: 10,
-            worker_id: owner.to_string(),
+            worker_id: worker_id.to_string(),
             job_id: Some(job_id.clone()),
             job_kind: None,
             session_id: None,
             limit: 1,
             lease_ms: 1_000,
         })
-        .expect("claim lifecycle job");
+        .expect("claim lifecycle job")
+        .remove(0)
+        .lease_owner
+        .unwrap();
     store
         .start_runtime_job(StartRuntimeJobRequest {
             job_id: job_id.clone(),
@@ -2092,7 +2565,7 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
     store
         .schedule_runtime_job(ScheduleRuntimeJobRequest { job: lifecycle_job })
         .expect("schedule lifecycle job");
-    store
+    let old_owner = store
         .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
             now_ms,
             worker_id: "old_owner".to_string(),
@@ -2102,11 +2575,14 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
             limit: 1,
             lease_ms: 10,
         })
-        .expect("claim old lease");
+        .expect("claim old lease")
+        .remove(0)
+        .lease_owner
+        .unwrap();
     store
         .start_runtime_job(StartRuntimeJobRequest {
             job_id: "agent_run.lifecycle:agent_run_fenced_terminal".to_string(),
-            lease_owner: "old_owner".to_string(),
+            lease_owner: old_owner.clone(),
             started_at_ms: now_ms,
         })
         .expect("start old lease");
@@ -2152,7 +2628,7 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
     store
         .reclaim_expired_runtime_job_leases(now_ms + 11)
         .expect("reclaim old lease");
-    store
+    let new_owner = store
         .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
             now_ms: now_ms + 11,
             worker_id: "new_owner".to_string(),
@@ -2162,11 +2638,14 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
             limit: 1,
             lease_ms: 60_000,
         })
-        .expect("claim replacement lease");
+        .expect("claim replacement lease")
+        .remove(0)
+        .lease_owner
+        .unwrap();
     store
         .start_runtime_job(StartRuntimeJobRequest {
             job_id: "agent_run.lifecycle:agent_run_fenced_terminal".to_string(),
-            lease_owner: "new_owner".to_string(),
+            lease_owner: new_owner.clone(),
             started_at_ms: now_ms + 12,
         })
         .expect("start replacement lease");
@@ -2262,7 +2741,7 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
             &RuntimeJobLeaseFence {
                 job_id: "agent_run.lifecycle:agent_run_fenced_terminal".to_string(),
                 job_kind: "agent_run.lifecycle".to_string(),
-                lease_owner: "old_owner".to_string(),
+                lease_owner: old_owner.clone(),
             },
         ))
         .expect_err("reclaimed owner must not commit terminal records");
@@ -2296,7 +2775,7 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
             &RuntimeJobLeaseFence {
                 job_id: "agent_run.lifecycle:agent_run_fenced_terminal".into(),
                 job_kind: "agent_run.lifecycle".into(),
-                lease_owner: "new_owner".into(),
+                lease_owner: new_owner.clone(),
             },
         ))
         .expect_err("consumption conflict must reject the whole terminal transaction");
@@ -2333,7 +2812,7 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
             &RuntimeJobLeaseFence {
                 job_id: "agent_run.lifecycle:agent_run_fenced_terminal".to_string(),
                 job_kind: "agent_run.lifecycle".to_string(),
-                lease_owner: "new_owner".to_string(),
+                lease_owner: new_owner,
             },
         ))
         .expect("current owner commits terminal records");
