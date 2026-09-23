@@ -46,14 +46,14 @@ def main():
     assert first["job"]["jobId"] == JOB_ID
     assert duplicate["disposition"] == "existing" and duplicate["job"]["jobId"] == JOB_ID
 
-    old_owner = "worker:old:lease-recovery"
-    new_owner = "worker:new:lease-recovery"
+    worker_id = "worker:lease-recovery"
     claimed = worker.runtime_request("/internal/jobs/claim", {
-        "schema": "runtime.job.claim.v1", "workerId": old_owner, "jobId": JOB_ID,
+        "schema": "runtime.job.claim.v1", "workerId": worker_id, "jobId": JOB_ID,
         "jobKind": "worker.noop",
         "nowMs": worker.now_ms(), "leaseMs": 1000, "limit": 1,
     })["jobs"]
     assert claimed[0]["jobId"] == JOB_ID
+    old_owner = claimed[0]["leaseOwner"]
     worker.runtime_request("/internal/jobs/start", {
         "schema": "runtime.job.start.v1", "jobId": JOB_ID, "leaseOwner": old_owner, "atMs": worker.now_ms(),
     })
@@ -62,11 +62,13 @@ def main():
         "schema": "runtime.job.reconcile.v1", "nowMs": worker.now_ms(),
     })
     reclaimed = worker.runtime_request("/internal/jobs/claim", {
-        "schema": "runtime.job.claim.v1", "workerId": new_owner, "jobId": JOB_ID,
+        "schema": "runtime.job.claim.v1", "workerId": worker_id, "jobId": JOB_ID,
         "jobKind": "worker.noop",
         "nowMs": worker.now_ms(), "leaseMs": 1000, "limit": 1,
     })["jobs"]
     assert reclaimed[0]["jobId"] == JOB_ID
+    new_owner = reclaimed[0]["leaseOwner"]
+    assert new_owner != old_owner
     expect_rejected("/internal/jobs/heartbeat", {
         "schema": "runtime.job.heartbeat.v1", "jobId": JOB_ID, "leaseOwner": old_owner,
         "heartbeatAtMs": worker.now_ms(), "leaseMs": 1000,
