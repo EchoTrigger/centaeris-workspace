@@ -1,4 +1,5 @@
 import json
+import threading
 
 from asgiref.sync import sync_to_async
 from django.http import JsonResponse
@@ -58,11 +59,13 @@ async def model_runs(request):
         response["Cache-Control"] = "no-cache"
         response["X-Accel-Buffering"] = "no"
         return response
+    cancel_event = threading.Event()
     try:
         result = await sync_to_async(run_model, thread_sensitive=True)(
             agent_run_id=agent_run_id,
             model_config_ref=model_config_ref,
             request_body=body,
+            cancel_event=cancel_event,
         )
     except ModelConfig.DoesNotExist:
         return JsonResponse({"error": "model_not_found"}, status=404)
@@ -74,6 +77,8 @@ async def model_runs(request):
             },
             status=502,
         )
+    finally:
+        cancel_event.set()
     return JsonResponse(result)
 
 

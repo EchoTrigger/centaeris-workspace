@@ -108,8 +108,9 @@ browser interaction, authorization-UI, and appearance checks.
    an explicit manual run.
 3. Populate a private `.env`, then run `docker compose config --quiet`.
 4. On fresh Postgres, migrate from zero through
-   `0002_session_event_tool_result_lookup` and confirm the Workspace app starts
-   from the current two-migration baseline.
+   `0004_modelquotadomain_providercredential_quotadomain` and confirm the Workspace app starts
+   from the current migration leaf. Existing credentials must retain their encrypted
+   values and remain unconfigured until assigned an explicit quota domain.
 5. Build Runtime, API, worker, web, and execution images from root Compose
    contexts; verify health with an empty extension volume.
 6. `docker compose config` must resolve project `centaeris-workspace` and only
@@ -135,19 +136,17 @@ dedicated Worker with a bounded processing deadline, outside Runtime HTTP.
 These are acceptance requirements, not a claim that an isolated run was executed.
 Sibling Rust paths must become exact Git revisions before distribution.
 
-CI and Performance use the shared `Resolve public Core revision` workflow.
-At the start of each workflow run it resolves the public Core `main` once;
-all dependent jobs check out that full SHA. The run summary records a link to
-the resolved commit, and Docker image labels retain the same SHA. A missing or
-unavailable ref stops resolution without a fallback. Separate runs (including
-full reruns) may resolve different Core revisions as `main` advances.
+CI and Performance use the shared pinned Core revision from `core-revision.txt`;
+all dependent jobs check out that full public SHA. The run summary records a
+link to it, and Docker image labels retain the same SHA. Local builds and the
+Docker release gate require the sibling Core checkout to match the pin. Core
+`main` advancing does not silently change Workspace builds.
 
-The local gate tests strict resolution, output recording, and public fetchability
+The local gate tests strict pin parsing, output recording, and public fetchability
 with `node --test scripts/core-revision.test.mjs`; this requires network access.
-In GitHub Actions, the live smoke test is skipped because the shared resolver
-and downstream checkouts exercise it; unit tests run without resolving main again.
-Local Rust checks still use the sibling Core checkout. To reproduce a CI run,
-check out the Core SHA recorded in that run alongside the tested Workspace SHA.
+In GitHub Actions, the live smoke test is skipped because the downstream
+checkouts exercise it. To reproduce a CI run, check out the pinned Core SHA
+alongside the tested Workspace SHA.
 
 The checked-in CI workflow runs the source, browser, and Compose gates from a
 clean checkout. Required status checks must be enabled on the public `main`

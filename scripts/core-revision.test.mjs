@@ -6,30 +6,36 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { parseCoreRevision, resolveCoreRevision } from './resolve-core-revision.mjs';
+import { verifyCoreCheckout } from './verify-core-checkout.mjs';
 
 const sha = '0123456789abcdef0123456789abcdef01234567';
 
-test('accepts one full SHA bound to the public main ref', () => {
-  assert.equal(parseCoreRevision(`${sha}\trefs/heads/main\n`), sha);
-  assert.equal(parseCoreRevision(`${sha}\trefs/heads/main\r\n`), sha);
+test('accepts one exact pinned full SHA', () => {
+  assert.equal(parseCoreRevision(`${sha}\n`), sha);
+  assert.equal(parseCoreRevision(`${sha}\r\n`), sha);
 });
 
-test('rejects absent, abbreviated, malformed, unrelated, or ambiguous refs', () => {
-  for (const response of ['', `${sha.slice(0, 7)}\trefs/heads/main\n`,
-    `${'z'.repeat(40)}\trefs/heads/main\n`, `${sha}\trefs/heads/dev\n`,
-    `${sha}\trefs/heads/main\n${sha}\trefs/heads/main\n`]) {
+test('rejects absent, abbreviated, malformed, or multiple revisions', () => {
+  for (const response of ['', `${sha.slice(0, 7)}\n`,
+    `${'z'.repeat(40)}\n`, `${sha}\trefs/heads/main\n`,
+    `${sha}\n${sha}\n`]) {
     assert.throws(() => parseCoreRevision(response));
   }
 });
 
-test('resolves once and propagates remote failures without a fallback', () => {
+test('reads the checked-in revision and propagates failures without a fallback', () => {
   let calls = 0;
-  assert.equal(resolveCoreRevision(() => { calls++; return `${sha}\trefs/heads/main\n`; }), sha);
+  assert.equal(resolveCoreRevision(() => { calls++; return `${sha}\n`; }), sha);
   assert.equal(calls, 1);
-  assert.throws(() => resolveCoreRevision(() => { throw new Error('remote unavailable'); }), /remote unavailable/);
+  assert.throws(() => resolveCoreRevision(() => { throw new Error('file unavailable'); }), /file unavailable/);
 });
 
-// CI already resolved main in its shared job; do not resolve a second live SHA.
+test('local Core checkout must match the pinned revision', () => {
+  assert.equal(verifyCoreCheckout(() => `${sha}\n`, sha), sha);
+  assert.throws(() => verifyCoreCheckout(() => `${'f'.repeat(40)}\n`, sha), /does not match/);
+});
+
+// CI checks out the pinned SHA; this local smoke verifies that it remains fetchable.
 test('CLI publishes one publicly fetchable SHA to job output and run summary', {
   skip: process.env.GITHUB_ACTIONS === 'true',
 }, () => {

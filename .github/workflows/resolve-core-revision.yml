@@ -1,10 +1,10 @@
-name: Resolve public Core revision
+name: Resolve pinned public Core revision
 
 on:
   workflow_call:
     outputs:
       revision:
-        description: Public Core main SHA shared by all consumers in this run
+        description: Pinned public Core SHA shared by all consumers in this run
         value: ${{ jobs.resolve.outputs.revision }}
 
 permissions:
@@ -27,6 +27,6 @@ jobs:
         with:
           node-version: 22.21.0
 
-      - name: Resolve public Core main once
+      - name: Read pinned public Core revision
         id: core
         run: node scripts/resolve-core-revision.mjs
