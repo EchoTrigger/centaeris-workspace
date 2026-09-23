@@ -369,6 +369,16 @@ class WorkerContractTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "worker_job_kind_invalid"):
                 worker.claim_job(forbidden, "worker:test-owner")
 
+    def test_claimed_job_uses_returned_lease_identity(self):
+        job = {"jobId": "worker.noop:claim-owner", "jobKind": "worker.noop",
+               "status": "leased", "leaseOwner": "opaque-claim-identity-123"}
+        with patch.object(worker, "WORKER_JOB_KINDS", ("worker.noop",)), \
+                patch.object(worker, "runtime_request", return_value={"jobs": [job]}) as request, \
+                patch.object(worker, "execute_claimed_job") as execute:
+            self.assertTrue(worker.execute_next_job(0))
+        self.assertNotEqual(request.call_args.args[1]["workerId"], job["leaseOwner"])
+        execute.assert_called_once_with(job, job["leaseOwner"])
+
     def test_job_wait_uses_strict_v1_contract_and_longer_http_timeout(self):
         with patch.object(
             worker,
