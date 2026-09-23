@@ -35,6 +35,15 @@ def compose_config(**overrides):
 
 
 class DeploymentContractTests(unittest.TestCase):
+    def test_all_image_labels_use_the_pinned_core_revision(self):
+        pin = (ROOT / "core-revision.txt").read_text(encoding="utf-8").strip()
+        services = compose_config()["services"]
+        for name, service in services.items():
+            build = service.get("build")
+            if build is not None:
+                with self.subTest(service=name):
+                    self.assertEqual(build["labels"]["io.centaeris.core.revision"], pin)
+
     def test_long_running_foundation_services_restart_after_engine_recovery(self):
         services = compose_config()["services"]
         for service in ("postgres", "redis", "api"):

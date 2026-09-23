@@ -32,10 +32,11 @@ logger = logging.getLogger(__name__)
 
 
 class ModelProviderError(RuntimeError):
-    def __init__(self, reason_type: str, http_status: int | None = None):
+    def __init__(self, reason_type: str, http_status: int | None = None, retry_after: str | None = None):
         super().__init__(reason_type)
         self.reasonType = reason_type
         self.httpStatus = http_status
+        self.retryAfter = retry_after
 
 
 def safe_model_error_reason(error: Exception) -> str:
@@ -51,10 +52,13 @@ def model_payload(value) -> dict:
 
 
 def provider_error(error: Exception) -> ModelProviderError | None:
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    retry_after = headers.get("retry-after") if headers is not None else None
     if isinstance(error, AuthenticationError):
         return ModelProviderError("provider_authentication_failed", getattr(error, "status_code", 401))
     if isinstance(error, RateLimitError):
-        return ModelProviderError("provider_rate_limited", getattr(error, "status_code", 429))
+        return ModelProviderError("provider_rate_limited", getattr(error, "status_code", 429), retry_after)
     if isinstance(error, APITimeoutError):
         return ModelProviderError("provider_timeout")
     if isinstance(error, APIConnectionError):
@@ -63,16 +67,18 @@ def provider_error(error: Exception) -> ModelProviderError | None:
         return ModelProviderError(
             "provider_unavailable" if error.status_code >= 500 else "provider_request_rejected",
             error.status_code,
+            retry_after,
         )
     status_code = getattr(error, "status_code", None)
     if status_code in {401, 403}:
         return ModelProviderError("provider_authentication_failed", status_code)
     if status_code == 429:
-        return ModelProviderError("provider_rate_limited", status_code)
+        return ModelProviderError("provider_rate_limited", status_code, retry_after)
     if isinstance(status_code, int):
         return ModelProviderError(
             "provider_unavailable" if status_code >= 500 else "provider_request_rejected",
             status_code,
+            retry_after,
         )
     return None
 

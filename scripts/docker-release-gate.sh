@@ -12,6 +12,14 @@ cd "$workspace_root"
 
 : "${CENTAERIS_WORKSPACE_REVISION:?CENTAERIS_WORKSPACE_REVISION is required}"
 : "${CENTAERIS_CORE_REVISION:?CENTAERIS_CORE_REVISION is required}"
+test "$CENTAERIS_CORE_REVISION" = "$(cat "$workspace_root/core-revision.txt")" || {
+  echo "Core revision does not match Workspace pin" >&2
+  exit 66
+}
+test "$(git -C "$core_root" rev-parse HEAD)" = "$CENTAERIS_CORE_REVISION" || {
+  echo "Core checkout does not match Workspace pin" >&2
+  exit 66
+}
 
 if docker ps -aq --filter label=com.docker.compose.project=centaeris-workspace | grep -q .; then
   echo "refusing to reuse an existing centaeris-workspace Compose project" >&2
@@ -96,6 +104,7 @@ done
 "${compose[@]}" exec -T api python manage.py showmigrations app_core | grep -Eq '^[[:space:]]*\[X\][[:space:]]+0001_initial$'
 "${compose[@]}" exec -T api python manage.py showmigrations app_core | grep -Eq '^[[:space:]]*\[X\][[:space:]]+0002_session_event_tool_result_lookup$'
 "${compose[@]}" exec -T api python manage.py showmigrations app_core | grep -Eq '^[[:space:]]*\[X\][[:space:]]+0003_agentrun_pre_admission_cancelled$'
+"${compose[@]}" exec -T api python manage.py showmigrations app_core | grep -Eq '^[[:space:]]*\[X\][[:space:]]+0004_modelquotadomain_providercredential_quotadomain$'
 "${compose[@]}" exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"
 "${compose[@]}" exec -T web wget -qO- http://127.0.0.1:3000/ >/dev/null
 

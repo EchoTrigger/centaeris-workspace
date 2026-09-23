@@ -13,7 +13,8 @@ function Run([string]$Name, [scriptblock]$Command) {
     if ($LASTEXITCODE -ne 0) { throw "$Name failed with exit code $LASTEXITCODE" }
 }
 
-Run "Public Core revision" { node --test scripts/core-revision.test.mjs }
+Run "Pinned public Core revision" { node --test scripts/core-revision.test.mjs }
+Run "Pinned local Core checkout" { node scripts/verify-core-checkout.mjs }
 Run "Rust toolchain consistency" { node --test scripts/rust-toolchain.test.mjs }
 Run "Rust check" { cargo check --workspace --locked }
 Run "Rust tests" { cargo test --workspace --locked }

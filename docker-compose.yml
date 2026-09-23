@@ -9,7 +9,7 @@ x-api-build: &api-build
     org.opencontainers.image.revision: ${CENTAERIS_WORKSPACE_REVISION:-local}
     io.centaeris.source.revision: ${CENTAERIS_WORKSPACE_REVISION:-local}
     io.centaeris.core.source: https://github.com/EchoTrigger/centaeris
-    io.centaeris.core.revision: ${CENTAERIS_CORE_REVISION:-local}
+    io.centaeris.core.revision: ${CENTAERIS_CORE_REVISION:?CENTAERIS_CORE_REVISION is required}
 
 x-document-processor-image: &document-processor-image centaeris-document-processor:local
 x-processor-device: &processor-device ${KNOWLEDGE_PROCESSOR_DEVICE:?KNOWLEDGE_PROCESSOR_DEVICE is required}
