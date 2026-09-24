@@ -1,4 +1,6 @@
 from time import perf_counter
+import hashlib
+import json
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
@@ -32,6 +34,7 @@ from .response_schema import (
     ModelProvidersEnvelope,
     ModelTestResponse,
     ModelProviderTemplatesEnvelope,
+    ModelCatalogReconciliationEnvelope,
     RunIdsErrorResponse,
 )
 from .schema import ErrorResponse, StrictSchema
@@ -69,6 +72,8 @@ def _catalog_templates() -> tuple[dict, dict]:
         templates[provider["catalogId"]] = {
             "id": provider["catalogId"],
             "displayName": provider["displayName"],
+            "tier": provider.get("tier", "direct_api"),
+            "logoSvg": provider.get("logoSvg"),
             "api": provider["api"],
             "apiBase": provider["apiBase"],
             "models": models,
@@ -120,6 +125,135 @@ class UpdateModelRequest(StrictSchema):
 
 class EmptyRequest(StrictSchema):
     pass
+
+
+class ApplyModelCatalogReconciliationRequest(StrictSchema):
+    expected_digest: str = Field(alias="expectedDigest")
+
+
+def _model_catalog_reconciliation(templates: dict, route_overrides: dict, *, lock: bool = False) -> dict:
+    providers_query = ModelProvider.objects.filter(
+        template_id__isnull=False, archivedAt__isnull=True
+    ).order_by("id")
+    if lock:
+        providers_query = providers_query.select_for_update()
+    entries = []
+    for provider in providers_query:
+        template = templates.get(provider.template_id)
+        if template is None:
+            entries.append({"providerId": provider.id, "templateId": provider.template_id,
+                            "changes": [], "blockers": ["template_removed"]})
+            continue
+        current_query = ModelConfig.objects.filter(provider=provider, isCurrent=True).order_by("modelName")
+        if lock:
+            current_query = current_query.select_for_update()
+        current = {model.modelName: model for model in current_query}
+        target = {model["modelName"]: model for model in template["models"]}
+        blockers = []
+        changes = []
+        if provider.api != template["api"] or provider.apiBase != template["apiBase"]:
+            blockers.append("provider_route_changed")
+        if provider.displayName != template["displayName"]:
+            changes.append({"action": "rename_provider", "from": provider.displayName,
+                            "to": template["displayName"]})
+        for name, model in current.items():
+            expected = target.get(name)
+            if expected is None:
+                active_ids = list(AgentRun.objects.filter(
+                    modelConfig=model, status__in=["queued", "running"]
+                ).order_by("id").values_list("id", flat=True))
+                changes.append({"action": "retire", "modelName": name, "modelId": model.id,
+                                "activeAgentRunIds": active_ids})
+                if active_ids:
+                    blockers.append("retired_model_has_active_agent_runs")
+                continue
+            desired = (
+                expected["displayName"], expected.get("apiOverride"),
+                expected["contextTokens"], expected["maxOutputTokens"],
+                expected.get("thinkingMode") or "", expected.get("thinkingModes", []),
+                route_overrides.get((provider.template_id, name)) or template["apiBase"],
+            )
+            existing = (
+                model.displayName, model.apiOverride, model.contextTokens,
+                model.maxOutputTokens, model.thinkingMode, model.thinkingModes,
+                model.resolvedApiBase,
+            )
+            if desired != existing:
+                changes.append({"action": "revise", "modelName": name,
+                                "modelId": model.id, "revision": model.revision + 1})
+        for name in target.keys() - current.keys():
+            changes.append({"action": "add", "modelName": name})
+        changes.sort(key=lambda change: (change.get("modelName", ""), change["action"]))
+        entries.append({"providerId": provider.id, "templateId": provider.template_id,
+                        "changes": changes, "blockers": sorted(set(blockers))})
+    catalog_projection = {
+        template_id: {
+            "displayName": template["displayName"], "api": template["api"],
+            "apiBase": template["apiBase"], "models": template["models"],
+        }
+        for template_id, template in templates.items()
+    }
+    digest_input = {"entries": entries, "catalog": catalog_projection,
+                    "routeOverrides": sorted((list(key) + [base]) for key, base in route_overrides.items())}
+    digest = hashlib.sha256(json.dumps(digest_input, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return {"digest": digest, "providers": entries,
+            "blocked": any(entry["blockers"] for entry in entries)}
+
+
+@router.get(
+    "/admin/model-catalog-reconciliation",
+    auth=superuser_auth,
+    response={200: ModelCatalogReconciliationEnvelope} | COMMON_ERROR_RESPONSES,
+)
+def preview_model_catalog_reconciliation(request):
+    templates, route_overrides = _catalog_templates()
+    return _model_catalog_reconciliation(templates, route_overrides)
+
+
+@router.post(
+    "/admin/model-catalog-reconciliation",
+    auth=superuser_auth,
+    response={200: ModelCatalogReconciliationEnvelope} | COMMON_ERROR_RESPONSES,
+)
+def apply_model_catalog_reconciliation(request, payload: ApplyModelCatalogReconciliationRequest):
+    templates, route_overrides = _catalog_templates()
+    with transaction.atomic():
+        preview = _model_catalog_reconciliation(templates, route_overrides, lock=True)
+        if preview["digest"] != payload.expected_digest:
+            return Status(409, {"error": "model_catalog_reconciliation_stale"})
+        if preview["blocked"]:
+            return Status(409, {"error": "model_catalog_reconciliation_blocked"})
+        for entry in preview["providers"]:
+            template = templates[entry["templateId"]]
+            provider = ModelProvider.objects.get(id=entry["providerId"])
+            for change in entry["changes"]:
+                action = change["action"]
+                if action == "rename_provider":
+                    provider.displayName = template["displayName"]
+                    provider.save(update_fields=["displayName", "updatedAt"])
+                    continue
+                current = None
+                was_enabled = True
+                if action in {"retire", "revise"}:
+                    current = ModelConfig.objects.get(id=change["modelId"], isCurrent=True)
+                    was_enabled = current.enabled
+                    current.isCurrent = False
+                    current.enabled = False
+                    current.save(update_fields=["isCurrent", "enabled", "updatedAt"])
+                if action == "retire":
+                    continue
+                values = next(model for model in template["models"] if model["modelName"] == change["modelName"])
+                _new_model_config(
+                    provider=provider, display_name=values["displayName"],
+                    model_name=values["modelName"], api_override=values.get("apiOverride"),
+                    resolved_api_base=route_overrides.get((entry["templateId"], values["modelName"])),
+                    context_tokens=values["contextTokens"], max_output_tokens=values["maxOutputTokens"],
+                    thinking_mode=values.get("thinkingMode"), thinking_modes=values.get("thinkingModes", []),
+                    enabled=was_enabled,
+                    family_id=current.familyId if current is not None else None,
+                    revision=current.revision + 1 if current is not None else 1,
+                ).save()
+    return _model_catalog_reconciliation(templates, route_overrides)
 
 
 @router.get(

@@ -4,8 +4,14 @@ import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, Eye, EyeOff, KeyRound, Plus } from "lucide-react";
 import { apiJson as api } from "../api";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { ProviderLogo } from "../components/ProviderLogo";
 
 const API_OPTIONS = ["openai-completions", "openai-responses", "anthropic-messages"];
+const PROVIDER_TIERS = [
+  { id: "direct_api", label: "Direct API" },
+  { id: "coding_plan", label: "Coding Plans" },
+  { id: "token_plan", label: "Token Plans" },
+];
 let nextDraftId = 1;
 
 function draftId(kind) {
@@ -391,7 +397,7 @@ export default function ModelSettings({ onClose, onModelsChanged }) {
         const providerSelected = selectedProviderId === provider.id;
         return <div className="workspaceModelsProviderGroup" key={provider.id}>
           <button type="button" className={providerSelected && selection.kind === "provider" ? "is-active" : ""} onClick={() => { setSelection({ kind: "provider", providerId: provider.id }); setPickerOpen(false); }}>
-            <span>{form?.displayName || provider.displayName}</span>{provider.credentialVersion ? <i aria-label={t("modelSettings.configured")} /> : null}
+            <span className="workspaceModelsProviderIdentity"><ProviderLogo svg={templates.find((template) => template.id === provider.templateId)?.logoSvg} name={form?.displayName || provider.displayName} />{form?.displayName || provider.displayName}</span>{provider.credentialVersion ? <i aria-label={t("modelSettings.configured")} /> : null}
           </button>
           {providerSelected && !provider.templateId ? <div className="workspaceModelsTreeModels">
             {providerModels.map((model) => <button type="button" className={selection.kind === "model" && selection.modelId === model.id ? "is-selected" : ""} key={model.id} onClick={() => { setSelection({ kind: "model", providerId: provider.id, modelId: model.id }); setPickerOpen(false); }}>{modelForms[model.id]?.modelName || t("interface.newModel")}</button>)}
@@ -405,7 +411,10 @@ export default function ModelSettings({ onClose, onModelsChanged }) {
     <section className="workspaceModelsEditor">
       {pickerOpen ? <section className="workspaceModelsPicker" aria-label={t("interface.addProvider")}>
         <header className="workspaceModelsPickerHeader"><button type="button" aria-label={t("interface.backToModels")} onClick={() => setPickerOpen(false)}><ArrowLeft aria-hidden="true" /></button><strong>{t("interface.addProvider")}</strong></header>
-        <div className="workspaceModelsPickerContent"><section><div>{t("interface.custom")}</div><button type="button" className="workspaceModelsCustomCard" onClick={addCustomProvider}><span><strong>{t("interface.custom")}</strong><small>OpenAI / Anthropic</small></span><Plus aria-hidden="true" /></button></section><section><div>{t("interface.apiKey")}</div><div className="workspaceModelsPickerGrid">{availableTemplates.map((template) => <button type="button" key={template.id} onClick={() => addTemplateProvider(template)}><strong>{template.displayName}</strong><span>{template.id.endsWith("_cn") ? `${t("models.chinaRegion")} · ` : ""}{t("models.count", { count: template.models.length })}</span></button>)}</div></section></div>
+        <div className="workspaceModelsPickerContent"><section><div>{t("interface.custom")}</div><button type="button" className="workspaceModelsCustomCard" onClick={addCustomProvider}><span><strong>{t("interface.custom")}</strong><small>OpenAI / Anthropic</small></span><Plus aria-hidden="true" /></button></section>{PROVIDER_TIERS.map((tier) => {
+          const tierTemplates = availableTemplates.filter((template) => template.tier === tier.id);
+          return tierTemplates.length ? <section key={tier.id}><div>{tier.label}</div><div className="workspaceModelsPickerGrid">{tierTemplates.map((template) => <button type="button" key={template.id} onClick={() => addTemplateProvider(template)}><span className="workspaceModelsProviderIdentity"><ProviderLogo svg={template.logoSvg} name={template.displayName} /><strong>{template.displayName}</strong></span><span>{t("models.count", { count: template.models.length })}</span></button>)}</div></section> : null;
+        })}</div>
       </section> : <>
       <div className="workspaceModelsEditorScroll">
         {error ? <div className="workspaceModelsMessage is-error" role="alert">{error}</div> : null}

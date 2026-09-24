@@ -515,6 +515,8 @@ class ModelProviderTemplateModelResponse(StrictSchema):
 class ModelProviderTemplateResponse(StrictSchema):
     id: str
     display_name: str = Field(alias="displayName")
+    tier: str = "direct_api"
+    logo_svg: str | None = Field(default=None, alias="logoSvg")
     api: str
     api_base: str = Field(alias="apiBase")
     models: list[ModelProviderTemplateModelResponse]
@@ -522,6 +524,12 @@ class ModelProviderTemplateResponse(StrictSchema):
 
 class ModelProviderTemplatesEnvelope(StrictSchema):
     templates: list[ModelProviderTemplateResponse]
+
+
+class ModelCatalogReconciliationEnvelope(StrictSchema):
+    digest: str
+    providers: list[dict]
+    blocked: bool
 
 
 class AdminModelResponse(ModelResponse):

@@ -4818,6 +4818,8 @@ class ModelAdminAcceptanceTests(TestCase):
                 {
                     "catalogId": "banana",
                     "displayName": "Banana",
+                    "tier": "coding_plan",
+                    "logoSvg": '<svg viewBox="0 0 24 24"></svg>',
                     "api": "openai-completions",
                     "apiBase": "https://api.example.test/v1",
                     "models": [
@@ -4854,6 +4856,8 @@ class ModelAdminAcceptanceTests(TestCase):
                 {
                     "id": "banana",
                     "displayName": "Banana",
+                    "tier": "coding_plan",
+                    "logoSvg": '<svg viewBox="0 0 24 24"></svg>',
                     "api": "openai-completions",
                     "apiBase": "https://api.example.test/v1",
                     "models": [
@@ -4942,6 +4946,73 @@ class ModelAdminAcceptanceTests(TestCase):
             preset_model.thinkingModes,
             ["high", "max"],
         )
+
+    @patch("app_core.http.model_management.request_model_catalog")
+    def test_catalog_reconciliation_previews_and_revises_presets_without_rotating_key(
+        self, request_model_catalog
+    ):
+        def definition(name, context):
+            return {"model": name, "displayName": name, "contextTokens": context,
+                    "maxOutputTokens": 4096, "thinkingMode": None, "thinkingModes": [],
+                    "apiOverride": None, "apiBaseOverride": None}
+
+        provider = {"catalogId": "banana", "displayName": "Banana",
+                    "api": "openai-completions", "apiBase": "https://api.example.test/v1",
+                    "models": [definition("old", 64000), definition("keep", 64000)]}
+        request_model_catalog.return_value = {"providers": [provider]}
+        self.client.force_login(self.admin)
+        created = self.client.post(
+            "/api/admin/model-provider-templates/banana/instantiate",
+            data=json.dumps({"secret": "test-provider-secret"}), content_type="application/json",
+        )
+        self.assertEqual(created.status_code, 201)
+        provider_id = created.json()["provider"]["id"]
+        credential = ProviderCredential.objects.get(provider_id=provider_id)
+        version = credential.version
+        old = ModelConfig.objects.get(provider_id=provider_id, modelName="keep", isCurrent=True)
+
+        provider["displayName"] = "Banana API"
+        provider["models"] = [definition("keep", 128000), definition("new", 64000)]
+        workspace = Workspace.objects.create(name="Reconciliation", createdBy=self.admin)
+        workspace.members.add(self.admin)
+        agent = Agent.objects.create(workspace=workspace, owner=self.admin, name="Agent")
+        session = Session.objects.create(workspace=workspace, owner=self.admin, agent=agent)
+        retiring = ModelConfig.objects.get(provider_id=provider_id, modelName="old", isCurrent=True)
+        run = AgentRun.objects.create(workspace=workspace, session=session, user=self.admin,
+                                      modelConfig=retiring, prompt="Finish first")
+        blocked = self.client.get("/api/admin/model-catalog-reconciliation").json()
+        self.assertTrue(blocked["blocked"])
+        self.assertEqual(self.client.post(
+            "/api/admin/model-catalog-reconciliation",
+            data=json.dumps({"expectedDigest": blocked["digest"]}), content_type="application/json",
+        ).status_code, 409)
+        run.status = "completed"
+        run.save(update_fields=["status", "updatedAt"])
+        preview = self.client.get("/api/admin/model-catalog-reconciliation")
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual({change["action"] for change in preview.json()["providers"][0]["changes"]},
+                         {"rename_provider", "retire", "revise", "add"})
+        self.assertEqual(self.client.post(
+            "/api/admin/model-catalog-reconciliation",
+            data=json.dumps({"expectedDigest": "stale"}), content_type="application/json",
+        ).status_code, 409)
+        applied = self.client.post(
+            "/api/admin/model-catalog-reconciliation",
+            data=json.dumps({"expectedDigest": preview.json()["digest"]}),
+            content_type="application/json",
+        )
+        self.assertEqual(applied.status_code, 200)
+        self.assertEqual(applied.json()["providers"][0]["changes"], [])
+        self.assertEqual(set(ModelConfig.objects.filter(provider_id=provider_id, isCurrent=True)
+                             .values_list("modelName", flat=True)), {"keep", "new"})
+        revised = ModelConfig.objects.get(provider_id=provider_id, modelName="keep", isCurrent=True)
+        self.assertEqual(revised.familyId, old.familyId)
+        self.assertEqual(revised.revision, old.revision + 1)
+        old.refresh_from_db()
+        self.assertFalse(old.isCurrent)
+        credential.refresh_from_db()
+        self.assertEqual(credential.version, version)
+        self.assertEqual(ModelProvider.objects.get(id=provider_id).displayName, "Banana API")
 
     def test_model_display_name_is_optional_and_public_dto_falls_back_to_model_name(self):
         self.client.force_login(self.admin)
