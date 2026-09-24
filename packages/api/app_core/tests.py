@@ -4990,6 +4990,14 @@ class ModelAdminAcceptanceTests(TestCase):
         retired = next(change for change in preview.json()["providers"][0]["changes"]
                        if change["action"] == "retire")
         self.assertEqual(retired["activeAgentRunIds"], [run.id])
+        run.status = "completed"
+        run.save(update_fields=["status", "updatedAt"])
+        self.assertEqual(
+            self.client.get("/api/admin/model-catalog-reconciliation").json()["digest"],
+            preview.json()["digest"],
+        )
+        run.status = "queued"
+        run.save(update_fields=["status", "updatedAt"])
         self.assertEqual(self.client.post(
             "/api/admin/model-catalog-reconciliation",
             data=json.dumps({"expectedDigest": "stale"}), content_type="application/json",

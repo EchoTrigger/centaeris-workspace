@@ -194,7 +194,14 @@ def _model_catalog_reconciliation(templates: dict, route_overrides: dict, *, loc
         }
         for template_id, template in templates.items()
     }
-    digest_input = {"entries": entries, "catalog": catalog_projection,
+    digest_entries = [
+        {**entry, "changes": [
+            {key: value for key, value in change.items() if key != "activeAgentRunIds"}
+            for change in entry["changes"]
+        ]}
+        for entry in entries
+    ]
+    digest_input = {"entries": digest_entries, "catalog": catalog_projection,
                     "routeOverrides": sorted((list(key) + [base]) for key, base in route_overrides.items())}
     digest = hashlib.sha256(json.dumps(digest_input, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return {"digest": digest, "providers": entries,
