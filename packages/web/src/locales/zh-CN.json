@@ -748,7 +748,6 @@
   "context.MCP tools": "MCP 工具",
   "context.System prompt": "系统提示",
   "context.Skills": "技能",
-  "context.Autocompact buffer": "自动压缩缓冲区",
   "context.Free space": "可用空间",
   "context.Context window": "上下文窗口",
   "library.destination": "添加到{{destination}}",

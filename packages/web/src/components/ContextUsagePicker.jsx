@@ -50,15 +50,16 @@ export function ContextUsagePicker({ sessionId, isRunning }) {
   const maxContextTokens = contextUsage?.maxContextTokens || 0;
   const usedPercentage = contextUsage?.usedPercentage || 0;
   const breakdown = contextUsage?.breakdown;
-  const rows = breakdown ? [
+  const segments = breakdown ? [
     [t("context.Messages"), breakdown.messageTokens, "messages"],
     [t("context.System tools"), breakdown.systemToolTokens, "system-tools"],
     [t("context.MCP tools"), breakdown.mcpToolTokens, "mcp-tools"],
     [t("context.System prompt"), breakdown.systemPromptTokens, "system-prompt"],
     [t("context.Skills"), breakdown.skillsTokens, "skills"],
-    [t("context.Autocompact buffer"), breakdown.autoCompactBufferTokens, "buffer"],
+    ["buffer", breakdown.autoCompactBufferTokens, "buffer"],
     [t("context.Free space"), breakdown.freeSpaceTokens, "free"],
   ] : [];
+  const rows = segments.filter(([, , kind]) => kind !== "buffer");
 
   return (
     <details className="workspaceContextUsage" ref={pickerRef}>
@@ -73,7 +74,7 @@ export function ContextUsagePicker({ sessionId, isRunning }) {
         {breakdown ? (
           <>
             <div className="workspaceContextUsageBar">
-              {rows.filter(([, tokens]) => tokens > 0).map(([label, tokens, kind]) => (
+              {segments.filter(([, tokens]) => tokens > 0).map(([label, tokens, kind]) => (
                 <i key={label} className={`is-${kind}`} style={{ width: `${maxContextTokens ? (tokens / maxContextTokens) * 100 : 0}%` }} />
               ))}
             </div>

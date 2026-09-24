@@ -748,7 +748,6 @@
   "context.MCP tools": "MCP tools",
   "context.System prompt": "System prompt",
   "context.Skills": "Skills",
-  "context.Autocompact buffer": "Autocompact buffer",
   "context.Free space": "Free space",
   "context.Context window": "Context window",
   "library.destination": "Add to {{destination}}",
