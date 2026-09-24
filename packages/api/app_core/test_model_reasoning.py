@@ -19,6 +19,88 @@ async def events(values):
 
 
 class ModelReasoningTests(SimpleTestCase):
+    def test_gemini_tool_signature_survives_hosted_request_continuation(self):
+        model = Mock(modelName="gemini-3.8-flash", provider=Mock(template_id="google"))
+        response = {
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            "choices": [{"message": {"content": "", "tool_calls": [{
+                "id": "call-1",
+                "function": {"name": "read", "arguments": "{}"},
+                "extra_content": {"google": {"thought_signature": "opaque-signature"}},
+            }]}}],
+        }
+        result = openai_completions.parse_open_ai_completions_response(response, gemini=True)
+        self.assertEqual(result["toolCalls"][0]["id"], "call-1")
+        prompt = {
+            "maxOutputTokens": 128,
+            "messages": [
+                {"messageId": "user", "role": "user", "content": "read"},
+                {
+                    "messageId": "assistant", "role": "assistant", "content": "",
+                    "reasoningContent": result["continuationReasoningContent"],
+                    "toolCalls": [{"id": "call-1", "name": "read", "argsJson": "{}"}],
+                },
+                {"messageId": "tool", "role": "tool", "toolCallId": "call-1", "content": "ok"},
+            ],
+        }
+        with (
+            patch.object(openai_completions, "validate_prepared_prompt", return_value=prompt),
+            patch.object(openai_completions, "request_thinking_mode", return_value=None),
+        ):
+            request = openai_completions.build_open_ai_completions_request(model, {})
+        signature = request["messages"][1]["tool_calls"][0]["extra_content"]["google"]["thought_signature"]
+        self.assertEqual(signature, "opaque-signature")
+        self.assertNotIn("reasoning_content", request["messages"][1])
+
+    def test_gemini_imported_tool_history_uses_documented_placeholder(self):
+        model = Mock(modelName="gemini-3.8-flash", provider=Mock(template_id="google"))
+        prompt = {
+            "maxOutputTokens": 128,
+            "messages": [
+                {"messageId": "user", "role": "user", "content": "read"},
+                {"messageId": "assistant", "role": "assistant", "content": "", "toolCalls": [
+                    {"id": "call-1", "name": "read", "argsJson": "{}"},
+                ]},
+                {"messageId": "tool", "role": "tool", "toolCallId": "call-1", "content": "ok"},
+            ],
+        }
+        with (
+            patch.object(openai_completions, "validate_prepared_prompt", return_value=prompt),
+            patch.object(openai_completions, "request_thinking_mode", return_value=None),
+        ):
+            request = openai_completions.build_open_ai_completions_request(model, {})
+        signature = request["messages"][1]["tool_calls"][0]["extra_content"]["google"]["thought_signature"]
+        self.assertEqual(signature, "skip_thought_signature_validator")
+
+    async def test_gemini_stream_preserves_thought_signature(self):
+        model = Mock(modelName="gemini-3.8-flash", provider=Mock(template_id="google"))
+        frames = [
+            {"choices": [{"delta": {"tool_calls": [{
+                "index": 0, "id": "call-1", "function": {"name": "read", "arguments": "{}"},
+            }]}}]},
+            {"choices": [{"delta": {"tool_calls": [{
+                "index": 0, "extra_content": {"google": {"thought_signature": "stream-signature"}},
+            }]}}]},
+            {
+                "choices": [{"delta": {}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        ]
+        client = Mock()
+        client.chat.completions.create = AsyncMock(return_value=events(frames))
+        client.close = AsyncMock()
+        holder = {}
+        with (
+            patch.object(openai_completions, "async_open_ai_completions_client", new=AsyncMock(return_value=client)),
+            patch.object(openai_completions, "build_open_ai_completions_request", return_value={}),
+        ):
+            [event async for event in openai_completions.stream_open_ai_completions(
+                model, {}, holder, lambda kind, payload: (kind, payload)
+            )]
+        signatures = json.loads(holder["result"]["continuationReasoningContent"])["toolSignatures"]
+        self.assertEqual(signatures, {"call-1": "stream-signature"})
+        self.assertEqual(holder["result"]["toolCalls"], [{"id": "call-1", "name": "read", "argsJson": "{}"}])
+
     def test_live_reasoning_snapshot_and_signal_share_exact_contract(self):
         from types import SimpleNamespace
         from . import agent_run_stream
