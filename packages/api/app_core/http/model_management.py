@@ -582,11 +582,6 @@ def delete_model(request, model_id: str):
             return Status(404, {"error": "model_not_found"})
         if model.provider.template_id is not None:
             return Status(400, {"error": "preset_provider_models_read_only"})
-        active_agent_run_ids = list(
-            AgentRun.objects.filter(modelConfig=model, status__in=["queued", "running"]).values_list("id", flat=True)
-        )
-        if active_agent_run_ids:
-            return Status(409, {"error": "model_has_active_agent_runs", "agentRunIds": active_agent_run_ids})
         model.isCurrent = False
         model.enabled = False
         model.save(update_fields=["isCurrent", "enabled", "updatedAt"])

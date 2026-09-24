@@ -5153,7 +5153,7 @@ class ModelAdminAcceptanceTests(TestCase):
             self.assertEqual(rejected.status_code, 400)
             self.assertEqual(rejected.json(), {"error": "model_not_found"})
 
-    def test_model_delete_retires_current_revision_and_rejects_active_agent_runs(self):
+    def test_model_delete_retires_current_revision_and_preserves_active_agent_runs(self):
         self.client.force_login(self.admin)
         model = self.create_model()
         deleted = self.client.delete(f"/api/admin/models/{model.id}")
@@ -5173,13 +5173,16 @@ class ModelAdminAcceptanceTests(TestCase):
             modelConfig=activeModel,
             prompt="hello",
         )
-        rejected = self.client.delete(f"/api/admin/models/{activeModel.id}")
-        self.assertEqual(rejected.status_code, 409)
-        self.assertEqual(
-            rejected.json(), {"error": "model_has_active_agent_runs", "agentRunIds": [agent_run.id]}
-        )
+        retired = self.client.delete(f"/api/admin/models/{activeModel.id}")
+        self.assertEqual(retired.status_code, 204)
         activeModel.refresh_from_db()
-        self.assertTrue(activeModel.isCurrent)
+        self.assertFalse(activeModel.isCurrent)
+        self.assertFalse(activeModel.enabled)
+        agent_run.refresh_from_db()
+        self.assertEqual(agent_run.modelConfig_id, activeModel.id)
+        from .model_adapter.common import resolve_model_route
+        self.assertEqual(resolve_model_route(agent_run.modelConfig),
+                         ("openai-completions", "https://api.deepseek.com"))
 
     def test_model_provider_endpoints_require_https_and_security_policy_is_removed(self):
         self.client.force_login(self.admin)
