@@ -930,6 +930,10 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 .workspaceModelsProviderGroup + .workspaceModelsProviderGroup { margin-top: 3px; }
 .workspaceModelsProviderGroup > button, .workspaceModelsTreeModels button { width: 100%; min-height: 36px; display: flex; align-items: center; gap: 8px; border: 0; border-radius: 6px; background: transparent; color: var(--on-surface); font-size: 12px; text-align: left; }
 .workspaceModelsProviderGroup > button { justify-content: space-between; padding: 0 10px; font-weight: 600; }
+.workspaceModelsProviderIdentity { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.providerLogo, .providerLogoFallback { width: 18px; height: 18px; flex: 0 0 18px; }
+.providerLogoFallback { display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; background: var(--outline-variant); color: var(--process-text); font-size: 10px; font-weight: 700; }
+.workspaceModelsPickerGrid .workspaceModelsProviderIdentity { color: var(--on-surface); font-size: 12px; }
 .workspaceModelsProviderGroup > button:hover, .workspaceModelsProviderGroup > button.is-active, .workspaceModelsTreeModels button:hover, .workspaceModelsTreeModels button.is-selected { background: var(--surface-variant); }
 .workspaceModelsProviderGroup i { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 999px; background: var(--success); }
 .workspaceModelsTreeModels { padding: 2px 0 6px 12px; }
