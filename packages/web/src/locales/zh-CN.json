@@ -93,6 +93,7 @@
   "appRoute.selectAiModel": "选择 AI 模型",
   "appRoute.models": "模型",
   "appRoute.unableToRefreshModelsPleaseTryAgain": "无法刷新模型列表，请重试。",
+  "appRoute.modelListChangedSelectModel": "模型列表已更新。请确认当前模型后重新发送，消息草稿已保留。",
   "appRoute.unableToLoadConversationsRefreshThePageAndTry": "无法读取会话列表，请刷新后重试。",
   "appRoute.unableToRefreshConversationMaterials": "无法刷新会话材料",
   "appRoute.unableToLoadConversationHistoryRefreshThePageAnd": "无法读取会话记录，请刷新后重试。",

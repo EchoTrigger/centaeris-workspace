@@ -4972,6 +4972,8 @@ class ModelAdminAcceptanceTests(TestCase):
         old = ModelConfig.objects.get(provider_id=provider_id, modelName="keep", isCurrent=True)
 
         provider["displayName"] = "Banana API"
+        provider["api"] = "anthropic-messages"
+        provider["apiBase"] = "https://new.example.test/anthropic"
         provider["models"] = [definition("keep", 128000), definition("new", 64000)]
         workspace = Workspace.objects.create(name="Reconciliation", createdBy=self.admin)
         workspace.members.add(self.admin)
@@ -4980,18 +4982,14 @@ class ModelAdminAcceptanceTests(TestCase):
         retiring = ModelConfig.objects.get(provider_id=provider_id, modelName="old", isCurrent=True)
         run = AgentRun.objects.create(workspace=workspace, session=session, user=self.admin,
                                       modelConfig=retiring, prompt="Finish first")
-        blocked = self.client.get("/api/admin/model-catalog-reconciliation").json()
-        self.assertTrue(blocked["blocked"])
-        self.assertEqual(self.client.post(
-            "/api/admin/model-catalog-reconciliation",
-            data=json.dumps({"expectedDigest": blocked["digest"]}), content_type="application/json",
-        ).status_code, 409)
-        run.status = "completed"
-        run.save(update_fields=["status", "updatedAt"])
         preview = self.client.get("/api/admin/model-catalog-reconciliation")
         self.assertEqual(preview.status_code, 200)
+        self.assertFalse(preview.json()["blocked"])
         self.assertEqual({change["action"] for change in preview.json()["providers"][0]["changes"]},
-                         {"rename_provider", "retire", "revise", "add"})
+                         {"rename_provider", "update_provider_route", "retire", "revise", "add"})
+        retired = next(change for change in preview.json()["providers"][0]["changes"]
+                       if change["action"] == "retire")
+        self.assertEqual(retired["activeAgentRunIds"], [run.id])
         self.assertEqual(self.client.post(
             "/api/admin/model-catalog-reconciliation",
             data=json.dumps({"expectedDigest": "stale"}), content_type="application/json",
@@ -5010,9 +5008,32 @@ class ModelAdminAcceptanceTests(TestCase):
         self.assertEqual(revised.revision, old.revision + 1)
         old.refresh_from_db()
         self.assertFalse(old.isCurrent)
+        run.refresh_from_db()
+        self.assertEqual(run.modelConfig_id, retiring.id)
+        from .model_adapter.common import resolve_model_route
+        self.assertEqual(resolve_model_route(run.modelConfig),
+                         ("openai-completions", "https://api.example.test/v1"))
+        self.assertEqual(ModelConfig.objects.get(provider_id=provider_id, modelName="keep",
+                                                 isCurrent=True).resolvedApi,
+                         "anthropic-messages")
         credential.refresh_from_db()
         self.assertEqual(credential.version, version)
-        self.assertEqual(ModelProvider.objects.get(id=provider_id).displayName, "Banana API")
+        updated_provider = ModelProvider.objects.get(id=provider_id)
+        self.assertEqual(updated_provider.displayName, "Banana API")
+        self.assertEqual(updated_provider.apiBase, "https://new.example.test/anthropic")
+        run.status = "completed"
+        run.save(update_fields=["status", "updatedAt"])
+        with patch("app_core.http.workspaces.schedule_agent_run_lifecycle"):
+            continued = self.client.post(
+                f"/api/workspaces/{workspace.id}/sessions/{session.id}/messages",
+                data=json.dumps({"text": "Continue with the updated model", "agentId": agent.id,
+                                 "modelConfigRef": revised.id}),
+                content_type="application/json",
+            )
+        self.assertEqual(continued.status_code, 202)
+        next_run = AgentRun.objects.get(id=continued.json()["agentRunId"])
+        self.assertEqual(next_run.session_id, session.id)
+        self.assertEqual(next_run.modelConfig_id, revised.id)
 
     def test_model_display_name_is_optional_and_public_dto_falls_back_to_model_name(self):
         self.client.force_login(self.admin)

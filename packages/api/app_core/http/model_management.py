@@ -152,7 +152,9 @@ def _model_catalog_reconciliation(templates: dict, route_overrides: dict, *, loc
         blockers = []
         changes = []
         if provider.api != template["api"] or provider.apiBase != template["apiBase"]:
-            blockers.append("provider_route_changed")
+            changes.append({"action": "update_provider_route", "from": {
+                "api": provider.api, "apiBase": provider.apiBase,
+            }, "to": {"api": template["api"], "apiBase": template["apiBase"]}})
         if provider.displayName != template["displayName"]:
             changes.append({"action": "rename_provider", "from": provider.displayName,
                             "to": template["displayName"]})
@@ -164,17 +166,16 @@ def _model_catalog_reconciliation(templates: dict, route_overrides: dict, *, loc
                 ).order_by("id").values_list("id", flat=True))
                 changes.append({"action": "retire", "modelName": name, "modelId": model.id,
                                 "activeAgentRunIds": active_ids})
-                if active_ids:
-                    blockers.append("retired_model_has_active_agent_runs")
                 continue
             desired = (
                 expected["displayName"], expected.get("apiOverride"),
+                expected.get("apiOverride") or template["api"],
                 expected["contextTokens"], expected["maxOutputTokens"],
                 expected.get("thinkingMode") or "", expected.get("thinkingModes", []),
                 route_overrides.get((provider.template_id, name)) or template["apiBase"],
             )
             existing = (
-                model.displayName, model.apiOverride, model.contextTokens,
+                model.displayName, model.apiOverride, model.resolvedApi, model.contextTokens,
                 model.maxOutputTokens, model.thinkingMode, model.thinkingModes,
                 model.resolvedApiBase,
             )
@@ -231,6 +232,11 @@ def apply_model_catalog_reconciliation(request, payload: ApplyModelCatalogReconc
                 if action == "rename_provider":
                     provider.displayName = template["displayName"]
                     provider.save(update_fields=["displayName", "updatedAt"])
+                    continue
+                if action == "update_provider_route":
+                    provider.api = template["api"]
+                    provider.apiBase = template["apiBase"]
+                    provider.save(update_fields=["api", "apiBase", "updatedAt"])
                     continue
                 current = None
                 was_enabled = True

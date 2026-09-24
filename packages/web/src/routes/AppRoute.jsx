@@ -119,6 +119,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   const composerRef = useRef(null);
   const composerStartRectRef = useRef(null);
   const [models, setModels] = useState([]);
+  const modelsRef = useRef([]);
   const [modelId, setModelId] = useState("");
   const [thinkingMode, setThinkingMode] = useState("");
   const [sessions, setSessions] = useState([]);
@@ -208,12 +209,17 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   const activeSession = sessions.find((candidate) => candidate.id === sessionId);
 
   const acceptModels = useCallback((nextModels) => {
+    const previousModels = modelsRef.current;
+    modelsRef.current = nextModels;
     setModels(nextModels);
-    setModelId((current) => (
-      nextModels.some((model) => model.id === current)
-        ? current
-        : nextModels[0]?.id || ""
-    ));
+    setModelId((current) => {
+      if (nextModels.some((model) => model.id === current)) return current;
+      if (!current) return previousModels.length ? "" : nextModels[0]?.id || "";
+      const previous = previousModels.find((model) => model.id === current);
+      return nextModels.find((model) =>
+        model.providerId === previous?.providerId && model.modelName === previous?.modelName
+      )?.id || "";
+    });
   }, []);
 
   const clearContextPanel = useCallback(() => {
@@ -833,7 +839,20 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       if (!isCurrentRequest()) return;
       setPendingUserMessage(null);
       setDraft(text);
-      showStreamError(errorValue);
+      if (errorValue?.message === "model_not_found") {
+        try {
+          const response = await apiResponse("/api/models");
+          const data = await response.json();
+          if (isCurrentRequest()) {
+            acceptModels(data.models);
+            setError(t("appRoute.modelListChangedSelectModel"));
+          }
+        } catch {
+          if (isCurrentRequest()) showStreamError(errorValue);
+        }
+      } else {
+        showStreamError(errorValue);
+      }
     } finally {
       if (isCurrentRequest()) setSending(false);
     }

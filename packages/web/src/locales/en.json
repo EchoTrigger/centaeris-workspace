@@ -93,6 +93,7 @@
   "appRoute.selectAiModel": "Select AI model",
   "appRoute.models": "Models",
   "appRoute.unableToRefreshModelsPleaseTryAgain": "Unable to refresh models. Please try again.",
+  "appRoute.modelListChangedSelectModel": "The model list changed. Confirm your model and send again; your draft was kept.",
   "appRoute.unableToLoadConversationsRefreshThePageAndTry": "Unable to load conversations. Refresh the page and try again.",
   "appRoute.unableToRefreshConversationMaterials": "Unable to refresh conversation materials",
   "appRoute.unableToLoadConversationHistoryRefreshThePageAnd": "Unable to load conversation history. Refresh the page and try again.",
