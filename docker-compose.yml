@@ -215,6 +215,7 @@ services:
         POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
         POSTGRES_HOST: postgres
         POSTGRES_PORT: "5432"
+        POSTGRES_APPLICATION_NAME: centaeris-api
         STORAGE_ROOT: *storage-root
         STORAGE_STREAM_LANES: ${STORAGE_STREAM_LANES}
         STORAGE_STREAM_CHUNK_BYTES: ${STORAGE_STREAM_CHUNK_BYTES}
@@ -241,6 +242,7 @@ services:
         REDIS_URL: *redis-url
       BOOTSTRAP_SUPERADMIN_EMAIL: ${BOOTSTRAP_SUPERADMIN_EMAIL}
       BOOTSTRAP_SUPERADMIN_PASSWORD: ${BOOTSTRAP_SUPERADMIN_PASSWORD}
+      POSTGRES_APPLICATION_NAME: centaeris-api-init
     depends_on:
       postgres:
         condition: service_healthy
@@ -257,7 +259,9 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    environment: *api-environment
+    environment:
+      <<: *api-environment
+      API_POSTGRES_POOL_MAX_SIZE: ${API_POSTGRES_POOL_MAX_SIZE:-0}
     ports:
       - "${API_HOST_PORT:-8000}:8000"
     volumes:
@@ -284,6 +288,7 @@ services:
     restart: on-failure
     environment:
       <<: *api-environment
+      POSTGRES_APPLICATION_NAME: centaeris-mail-sender
       PASSWORD_RESET_MAIL_SENDER: "1"
       EMAIL_HOST: ${EMAIL_HOST:-}
       EMAIL_PORT: ${EMAIL_PORT:-587}
@@ -308,6 +313,7 @@ services:
     restart: unless-stopped
     environment:
       <<: *api-environment
+      POSTGRES_APPLICATION_NAME: centaeris-material-worker
       MATERIAL_PROCESSOR_NAMESPACE: ${COMPOSE_PROJECT_NAME:-centaeris-workspace}
       MATERIAL_PROCESSOR_IMAGE: *document-processor-image
       MATERIAL_PROCESSOR_DEVICE: *processor-device
@@ -332,7 +338,9 @@ services:
     image: centaeris-workspace-agent-api
     entrypoint: ["sh", "/app/packages/api/gc-entrypoint.sh"]
     restart: unless-stopped
-    environment: *api-environment
+    environment:
+      <<: *api-environment
+      POSTGRES_APPLICATION_NAME: centaeris-gc
     volumes:
       - type: volume
         source: storage-data

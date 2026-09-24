@@ -77,6 +77,20 @@ TEMPLATES = [
 
 ASGI_APPLICATION = "api.asgi.application"
 
+_postgres_pool_size = os.environ.get("API_POSTGRES_POOL_MAX_SIZE", "0")
+if not _postgres_pool_size.isascii() or not _postgres_pool_size.isdecimal() or not 0 <= int(_postgres_pool_size) <= 32:
+    raise RuntimeError("API_POSTGRES_POOL_MAX_SIZE must be an integer between 0 and 32")
+
+_postgres_options = {
+    "application_name": os.environ.get("POSTGRES_APPLICATION_NAME", "centaeris-api"),
+}
+if int(_postgres_pool_size):
+    _postgres_options["pool"] = {
+        "min_size": 0,
+        "max_size": int(_postgres_pool_size),
+        "timeout": 5,
+    }
+
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
@@ -85,6 +99,8 @@ DATABASES = {
         "PASSWORD": required_env("POSTGRES_PASSWORD"),
         "HOST": required_env("POSTGRES_HOST"),
         "PORT": required_env("POSTGRES_PORT"),
+        "CONN_MAX_AGE": 0,
+        "OPTIONS": _postgres_options,
     }
 }
 

@@ -3,7 +3,7 @@
 # 3) 不改任何生产镜像构建逻辑。与 docker-compose.yml 通过 -f 叠加使用。
 services:
   postgres:
-    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "log_connections=${PERF_POSTGRES_LOG_CONNECTIONS:-off}"]
 
   postgres-test:
     ports: !override ["127.0.0.1:55433:5432"]

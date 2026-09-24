@@ -18,6 +18,7 @@ dependencies = [
   "pillow==12.3.0",
   "pydantic==2.13.4",
   "psycopg[binary]==3.3.4",
+  "psycopg-pool==3.3.3",
   "redis==5.3.1",
   "starlette==1.6.0",
   "uvicorn==0.51.0",

@@ -161,20 +161,31 @@ impl PostgresRuntimeStore {
         {
             return Err("Postgres connection pool checkout timeout is too large".to_string());
         }
-        let config = postgres_config(database_url, limits.connect_timeout)?;
         let store = Self {
             ordinary_connections: Arc::new(PostgresConnectionPool::new(
-                config.clone(),
+                postgres_config(
+                    database_url,
+                    limits.connect_timeout,
+                    "centaeris-runtime-ordinary",
+                )?,
                 limits.ordinary,
                 limits.checkout_timeout,
             )),
             control_connections: Arc::new(PostgresConnectionPool::new(
-                config.clone(),
+                postgres_config(
+                    database_url,
+                    limits.connect_timeout,
+                    "centaeris-runtime-control",
+                )?,
                 limits.execution_control,
                 limits.checkout_timeout,
             )),
             listener_connections: Arc::new(PostgresConnectionPool::new(
-                config,
+                postgres_config(
+                    database_url,
+                    limits.connect_timeout,
+                    "centaeris-runtime-listener",
+                )?,
                 limits.listeners,
                 limits.checkout_timeout,
             )),
@@ -197,17 +208,29 @@ impl PostgresRuntimeStore {
         }
         let store = Self {
             ordinary_connections: Arc::new(PostgresConnectionPool::new(
-                postgres_config(database_url, DEFAULT_POSTGRES_CONNECT_TIMEOUT)?,
+                postgres_config(
+                    database_url,
+                    DEFAULT_POSTGRES_CONNECT_TIMEOUT,
+                    "centaeris-runtime-ordinary",
+                )?,
                 maximum,
                 checkout_timeout,
             )),
             control_connections: Arc::new(PostgresConnectionPool::new(
-                postgres_config(database_url, DEFAULT_POSTGRES_CONNECT_TIMEOUT)?,
+                postgres_config(
+                    database_url,
+                    DEFAULT_POSTGRES_CONNECT_TIMEOUT,
+                    "centaeris-runtime-control",
+                )?,
                 1,
                 checkout_timeout,
             )),
             listener_connections: Arc::new(PostgresConnectionPool::new(
-                postgres_config(database_url, DEFAULT_POSTGRES_CONNECT_TIMEOUT)?,
+                postgres_config(
+                    database_url,
+                    DEFAULT_POSTGRES_CONNECT_TIMEOUT,
+                    "centaeris-runtime-listener",
+                )?,
                 1,
                 checkout_timeout,
             )),
@@ -417,11 +440,13 @@ impl Drop for PooledConnection<'_> {
 fn postgres_config(
     database_url: &str,
     connect_timeout: Duration,
+    application_name: &str,
 ) -> Result<postgres::Config, String> {
     let mut config = database_url
         .parse::<postgres::Config>()
         .map_err(|error| format!("parse Postgres runtime database URL failed: {error}"))?;
     config.connect_timeout(connect_timeout);
+    config.application_name(application_name);
     Ok(config)
 }
 
@@ -601,6 +626,7 @@ mod tests {
                 postgres_config(
                     "postgresql://127.0.0.1:1/centaeris?connect_timeout=1",
                     DEFAULT_POSTGRES_CONNECT_TIMEOUT,
+                    "centaeris-runtime-ordinary",
                 )
                 .expect("test Postgres config"),
                 DEFAULT_POSTGRES_POOL_SIZE,

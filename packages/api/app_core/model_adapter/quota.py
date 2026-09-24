@@ -48,7 +48,12 @@ def _domain_state(key: int) -> tuple[int, float]:
 def _connection_params() -> dict:
     if connection.vendor != "postgresql":
         raise ModelProviderError("model_quota_backend_unavailable")
-    return connection.get_connection_params() | {"connect_timeout": 5}
+    # This connection holds a session advisory lock across the provider attempt.
+    # It must remain separate from Django's reusable ORM pool.
+    return connection.get_connection_params() | {
+        "connect_timeout": 5,
+        "application_name": "centaeris-api-quota",
+    }
 
 
 def _try_lock(conn, key: int, limit: int) -> int:

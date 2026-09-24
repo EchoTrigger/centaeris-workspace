@@ -111,6 +111,17 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertEqual(environment["RUNTIME_POSTGRES_CHECKOUT_TIMEOUT_MS"], "5000")
         self.assertEqual(environment["RUNTIME_POSTGRES_CONNECT_TIMEOUT_MS"], "3000")
 
+    def test_django_pool_budget_only_reaches_asgi_api(self):
+        services = compose_config(API_POSTGRES_POOL_MAX_SIZE="8")["services"]
+        self.assertEqual(services["api"]["environment"]["API_POSTGRES_POOL_MAX_SIZE"], "8")
+        self.assertEqual(services["api"]["environment"]["POSTGRES_APPLICATION_NAME"], "centaeris-api")
+        for service in ("api-init", "material-worker", "gc", "mail-sender"):
+            with self.subTest(service=service):
+                self.assertNotIn("API_POSTGRES_POOL_MAX_SIZE", services[service]["environment"])
+                self.assertNotEqual(services[service]["environment"]["POSTGRES_APPLICATION_NAME"], "centaeris-api")
+        self.assertNotIn("POSTGRES_HOST", services["worker"]["environment"])
+        self.assertNotIn("DATABASE_URL", services["worker"]["environment"])
+
     def test_processor_build_extra_follows_exact_device(self):
         command = [os.sys.executable, str(ROOT / "packages/document_processor/processor_build_extra.py")]
         for device, extra in (("cpu", "cpu"), ("gpu:0", "gpu")):
