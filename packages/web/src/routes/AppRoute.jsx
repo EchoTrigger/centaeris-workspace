@@ -28,7 +28,13 @@ import {
   attachmentPreviewUrl,
 } from "../chat/attachments.mjs";
 import { MAX_UPLOAD_BATCH_FILES } from "../upload";
-import { useEnterStartsNewLine } from "../preferences";
+import {
+  readModelThinkingMode,
+  readPreferredModelIdentity,
+  useEnterStartsNewLine,
+  writeModelThinkingMode,
+  writePreferredModelIdentity,
+} from "../preferences";
 import { HomePlane, HomeQuickActions } from "../shell/HomePlane";
 import { AgentMark } from "../shell/AgentMark";
 import { ShellSidebar } from "../shell/ShellSidebar";
@@ -194,10 +200,19 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       models: providerModels,
     }));
   }, [models, t]);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: Model identity resets a user override when defaults match.
   useEffect(() => {
-    setThinkingMode(currentModel?.thinkingMode || "");
-  }, [currentModel?.id, currentModel?.thinkingMode]);
+    setThinkingMode(readModelThinkingMode(user.id, workspace.id, currentModel));
+  }, [currentModel, user.id, workspace.id]);
+  const selectThinkingMode = useCallback((mode) => {
+    if (!currentModel) return;
+    writeModelThinkingMode(user.id, workspace.id, currentModel, mode);
+    setThinkingMode(mode);
+  }, [currentModel, user.id, workspace.id]);
+  const selectModel = useCallback((id) => {
+    const selected = models.find((model) => model.id === id);
+    if (selected) writePreferredModelIdentity(user.id, workspace.id, selected);
+    setModelId(id);
+  }, [models, user.id, workspace.id]);
   const hasActiveAgentRun = activeTranscriptRun !== null;
   const activeAgentRunId = activeTranscriptRun?.agentRunId || "";
   const pendingAttachments = useMemo(
@@ -214,13 +229,18 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     setModels(nextModels);
     setModelId((current) => {
       if (nextModels.some((model) => model.id === current)) return current;
-      if (!current) return previousModels.length ? "" : nextModels[0]?.id || "";
+      if (!current) {
+        if (previousModels.length) return "";
+        const preferred = readPreferredModelIdentity(user.id, workspace.id);
+        return nextModels.find((model) => JSON.stringify([model.providerId, model.modelName]) === preferred)?.id
+          || nextModels[0]?.id || "";
+      }
       const previous = previousModels.find((model) => model.id === current);
       return nextModels.find((model) =>
         model.providerId === previous?.providerId && model.modelName === previous?.modelName
       )?.id || "";
     });
-  }, []);
+  }, [user.id, workspace.id]);
 
   const clearContextPanel = useCallback(() => {
     previewRequestIdRef.current += 1;
@@ -1347,10 +1367,10 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
             sessionId={sessionId}
             currentModel={currentModel}
             thinkingMode={thinkingMode}
-            onThinkingModeChange={setThinkingMode}
+            onThinkingModeChange={selectThinkingMode}
             modelGroups={modelGroups}
             modelId={modelId}
-            onModelIdChange={setModelId}
+            onModelIdChange={selectModel}
             activeAgentRunId={activeAgentRunId}
             cancellingAgentRunId={cancellingAgentRunId}
             onCancelActiveAgentRun={cancelActiveAgentRun}
