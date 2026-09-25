@@ -42,6 +42,17 @@ reverse proxy. Do not expose internal service tokens or database ports through i
 - `REDIS_BROWSER_MAX_CONNECTIONS` bounds browser streaming connections per API
   process.
 - `API_WORKERS` must remain within the validated range.
+- Bundled Compose sets `API_POSTGRES_POOL_MAX_SIZE=8` on each ASGI API process;
+  standalone Django processes default to `0` unless explicitly configured.
+  `0` disables pooling. Django keeps `CONN_MAX_AGE=0`; its PostgreSQL
+  backend uses `psycopg_pool` for connection reuse. The setting does not reach
+  `api-init`, material processing, GC, or mail processes. Quota advisory locks
+  use separate dedicated sessions, and Runtime has its own connection budgets.
+  Before increasing API workers or replicas, budget
+  `API_WORKERS × API replicas × API_POSTGRES_POOL_MAX_SIZE` together with the
+  Runtime pools, quota sessions, other database clients, and operational reserve
+  against PostgreSQL `max_connections`. Set the value to `0` and replace only
+  the API to return to direct Django connections.
 - `RUNTIME_POSTGRES_POOL_SIZE`, `RUNTIME_POSTGRES_CONTROL_POOL_SIZE`, and
   `RUNTIME_POSTGRES_LISTENER_LIMIT` independently bound ordinary operations,
   execution-control probes/transitions, and PostgreSQL job listeners in each

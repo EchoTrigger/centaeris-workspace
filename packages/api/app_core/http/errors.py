@@ -198,7 +198,8 @@ def install_error_handlers(api) -> None:
     @api.exception_handler(Exception)
     def unexpected_error(request, error):
         logger.error(
-            "Unhandled API operation failure",
+            "Unhandled API operation failure (%s)",
+            type(error).__name__,
             extra={
                 "requestPath": request.path,
                 "exceptionType": type(error).__name__,

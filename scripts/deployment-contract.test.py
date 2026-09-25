@@ -112,15 +112,48 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertEqual(environment["RUNTIME_POSTGRES_CONNECT_TIMEOUT_MS"], "3000")
 
     def test_django_pool_budget_only_reaches_asgi_api(self):
-        services = compose_config(API_POSTGRES_POOL_MAX_SIZE="8")["services"]
+        services = compose_config()["services"]
         self.assertEqual(services["api"]["environment"]["API_POSTGRES_POOL_MAX_SIZE"], "8")
         self.assertEqual(services["api"]["environment"]["POSTGRES_APPLICATION_NAME"], "centaeris-api")
+        self.assertEqual(
+            compose_config(API_POSTGRES_POOL_MAX_SIZE="0")["services"]["api"]["environment"]["API_POSTGRES_POOL_MAX_SIZE"],
+            "0",
+        )
         for service in ("api-init", "material-worker", "gc", "mail-sender"):
             with self.subTest(service=service):
                 self.assertNotIn("API_POSTGRES_POOL_MAX_SIZE", services[service]["environment"])
                 self.assertNotEqual(services[service]["environment"]["POSTGRES_APPLICATION_NAME"], "centaeris-api")
         self.assertNotIn("POSTGRES_HOST", services["worker"]["environment"])
         self.assertNotIn("DATABASE_URL", services["worker"]["environment"])
+
+    def test_django_pool_settings_follow_the_api_deployment_budget(self):
+        probe = (
+            "import os; from api.settings import DATABASES; "
+            "db = DATABASES['default']; "
+            "size = int(os.environ.get('API_POSTGRES_POOL_MAX_SIZE', '0')); "
+            "assert db['CONN_MAX_AGE'] == 0; "
+            "assert (db['OPTIONS'].get('pool') == "
+            "({'min_size': 0, 'max_size': size, 'timeout': 5} if size else None))"
+        )
+        for service, override in (("api", None), ("api", "0"), ("api-init", None)):
+            with self.subTest(service=service, pool_size=override):
+                environment = {
+                    **os.environ,
+                    **compose_config()["services"][service]["environment"],
+                }
+                if service != "api":
+                    environment.pop("API_POSTGRES_POOL_MAX_SIZE", None)
+                elif override is not None:
+                    environment["API_POSTGRES_POOL_MAX_SIZE"] = override
+                environment["CREDENTIAL_ENCRYPTION_KEY"] = (
+                    "z5wA0vTzQGNG2LkVbNqnd3CPnGds4M8Xqy9lXgkqfZI="
+                )
+                environment["PYTHONPATH"] = str(ROOT / "packages" / "api")
+                result = subprocess.run(
+                    [os.sys.executable, "-c", probe],
+                    cwd=ROOT, env=environment, capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_processor_build_extra_follows_exact_device(self):
         command = [os.sys.executable, str(ROOT / "packages/document_processor/processor_build_extra.py")]
