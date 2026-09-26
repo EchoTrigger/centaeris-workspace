@@ -3054,7 +3054,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
         self.assertEqual(denied.status_code, 404)
         denied_runtime.assert_not_called()
 
-    def test_transcript_content_reads_bounded_utf8_ranges_and_reauthorizes(self):
+    def test_transcript_content_rejects_unversioned_spill_and_reauthorizes(self):
         owner = User.objects.create_user(username="content-owner@example.com", password="password")
         workspace = Workspace.objects.create(name="Content", createdBy=owner)
         workspace.members.add(owner)
@@ -3133,16 +3133,8 @@ class ApiVerticalSliceTests(TransactionTestCase):
                 plan = "\n".join(row[0] for row in cursor.fetchall())
             self.assertIn("session_event_tool_result_lookup", plan)
             first = self.client.get(f"/api/sessions/{session.id}/transcript/content", query)
-            self.assertEqual(first.status_code, 200, first.content)
-            self.assertEqual(first.json()["endOffset"], str(64 * 1024 - 2))
-            self.assertTrue(first.json()["hasMore"])
-            second = self.client.get(
-                f"/api/sessions/{session.id}/transcript/content",
-                {**query, "offset": first.json()["endOffset"]},
-            )
-            self.assertEqual(second.status_code, 200, second.content)
-            self.assertEqual(second.json()["content"], "世")
-            self.assertFalse(second.json()["hasMore"])
+            self.assertEqual(first.status_code, 409, first.content)
+            self.assertEqual(first.json(), {"error": "transcript_content_unavailable"})
             workspace.members.remove(owner)
             denied = self.client.get(f"/api/sessions/{session.id}/transcript/content", query)
             self.assertEqual(denied.status_code, 404)

@@ -3,7 +3,6 @@ import logging
 from typing import Literal
 
 from django.db import transaction
-from django.core.files.storage import default_storage
 from django.http import JsonResponse
 from django.db.models import Max, Q
 from django.utils import timezone
@@ -104,8 +103,6 @@ logger = logging.getLogger(__name__)
 router = Router(tags=["workspaces-sessions"], by_alias=True)
 TRANSCRIPT_PROJECTION_VERSION = "transcript.projection.v1"
 TRANSCRIPT_CONTENT_RANGE_BYTES = 64 * 1024
-TRANSCRIPT_SNAPSHOT_MANIFEST_BYTES = 1024 * 1024
-TRANSCRIPT_SNAPSHOT_SCHEMA = "workspace.snapshot.v1"
 CONTEXT_COMPACTION_HEADROOM_TOKENS = 32_768
 
 
@@ -874,33 +871,22 @@ def session_transcript_content(request, session_id: str):
         return _transcript_json_response(
             {"error": "transcript_content_reference_stale"}, status=409
         )
+    if payload.get("fullOutputPath") is not None or payload.get("outputStartByte") is not None:
+        # The committed event binds only a mutable path and byte range, not the
+        # original bytes. Even an equal-length file in the current snapshot may
+        # belong to a later write. Never rebind a historical reference to it.
+        return _transcript_json_response(
+            {"error": "transcript_content_unavailable"}, status=409
+        )
     try:
-        if payload.get("fullOutputPath") is None and payload.get("outputStartByte") is None:
-            inline_content = payload.get("modelContent")
-            if (
-                not isinstance(inline_content, str)
-                or len(inline_content.encode("utf-8")) != byte_length
-            ):
-                raise ValueError("transcript inline content is invalid")
-            content, end_offset = _transcript_utf8_range(
-                inline_content, int(offset_raw)
-            )
-        else:
-            if (
-                not isinstance(payload.get("outputStartByte"), int)
-                or isinstance(payload.get("outputStartByte"), bool)
-                or payload["outputStartByte"] < 0
-                or not isinstance(payload.get("fullOutputPath"), str)
-            ):
-                raise ValueError("transcript spill identity is invalid")
-            content, end_offset = _read_transcript_snapshot_range(
-                session,
-                payload["fullOutputPath"],
-                payload["outputStartByte"],
-                byte_length,
-                int(offset_raw),
-            )
-    except (OSError, ValueError, UnicodeDecodeError):
+        inline_content = payload.get("modelContent")
+        if (
+            not isinstance(inline_content, str)
+            or len(inline_content.encode("utf-8")) != byte_length
+        ):
+            raise ValueError("transcript inline content is invalid")
+        content, end_offset = _transcript_utf8_range(inline_content, int(offset_raw))
+    except ValueError:
         logger.exception(
             "Workspace transcript content range failed", extra={"sessionId": session.id}
         )
@@ -1714,18 +1700,6 @@ def _context_usage(event: SessionEvent, is_compacting: bool) -> dict:
     }
 
 
-def _read_exact(source, size: int) -> bytes:
-    chunks = []
-    remaining = size
-    while remaining:
-        chunk = source.read(remaining)
-        if not chunk:
-            raise ValueError("stored workspace snapshot ended early")
-        chunks.append(chunk)
-        remaining -= len(chunk)
-    return b"".join(chunks)
-
-
 def _transcript_utf8_range(content: str, offset: int) -> tuple[str, int]:
     encoded = content.encode("utf-8")
     if offset > len(encoded):
@@ -1744,72 +1718,6 @@ def _decode_transcript_range(encoded: bytes, offset: int) -> tuple[str, int]:
         except UnicodeDecodeError:
             continue
     raise UnicodeDecodeError("utf-8", encoded, 0, len(encoded), "invalid range boundary")
-
-
-def _read_transcript_snapshot_range(
-    session: Session,
-    path: str,
-    content_start: int,
-    byte_length: int,
-    offset: int,
-) -> tuple[str, int]:
-    if (
-        not session.workspaceStorageKey
-        or not session.workspaceSnapshotSizeBytes
-        or not path
-        or path.startswith(("/", "\\"))
-        or "\\" in path
-        or any(part in {"", ".", ".."} for part in path.split("/"))
-    ):
-        raise ValueError("transcript content snapshot identity is invalid")
-    with default_storage.open(session.workspaceStorageKey, "rb") as source:
-        manifest_length = int.from_bytes(_read_exact(source, 4), "big")
-        if not 0 < manifest_length <= TRANSCRIPT_SNAPSHOT_MANIFEST_BYTES:
-            raise ValueError("stored workspace snapshot manifest is invalid")
-        manifest_bytes = _read_exact(source, manifest_length)
-        manifest = json.loads(manifest_bytes.decode("utf-8"))
-        if (
-            json.dumps(manifest, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-            != manifest_bytes
-            or not isinstance(manifest, dict)
-            or set(manifest) != {"schema", "files"}
-            or manifest["schema"] != TRANSCRIPT_SNAPSHOT_SCHEMA
-            or not isinstance(manifest["files"], list)
-            or len(manifest["files"]) != session.workspaceFileCount
-        ):
-            raise ValueError("stored workspace snapshot manifest is invalid")
-        data_offset = 4 + manifest_length
-        target = None
-        expanded_size = 0
-        previous_path = None
-        for item in manifest["files"]:
-            if (
-                not isinstance(item, dict)
-                or set(item) != {"path", "sizeBytes", "sha256", "executable"}
-                or not isinstance(item["path"], str)
-                or not isinstance(item["sizeBytes"], int)
-                or isinstance(item["sizeBytes"], bool)
-                or item["sizeBytes"] < 0
-                or previous_path is not None
-                and previous_path >= item["path"]
-            ):
-                raise ValueError("stored workspace snapshot manifest is invalid")
-            if item["path"] == path:
-                target = (data_offset, item["sizeBytes"])
-            data_offset += item["sizeBytes"]
-            expanded_size += item["sizeBytes"]
-            previous_path = item["path"]
-        if (
-            expanded_size != session.workspaceExpandedSizeBytes
-            or data_offset != session.workspaceSnapshotSizeBytes
-            or target is None
-            or content_start + byte_length > target[1]
-        ):
-            raise ValueError("transcript content spill is unavailable")
-        requested = min(TRANSCRIPT_CONTENT_RANGE_BYTES, byte_length - offset)
-        source.seek(target[0] + content_start + offset)
-        encoded = _read_exact(source, requested)
-    return _decode_transcript_range(encoded, offset)
 
 
 def _session_for_update(user, session_id: str, *, lock: bool):

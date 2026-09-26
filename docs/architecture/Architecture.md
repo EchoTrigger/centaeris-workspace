@@ -122,6 +122,18 @@ Office, PDF, and image processing is lazy and version-bound. Long documents are
 processed incrementally without a fixed page-count ceiling while retaining
 pixel, output-size, timeout, and memory limits.
 
+Historical transcript output must be bound to committed bytes. Current tool
+spill events record a mutable workspace path and byte range, without a content
+hash or retained snapshot identity. The API therefore reports their complete
+output as unavailable instead of reading the Session's current snapshot. This
+also applies before a later run: another tool can overwrite a path in the same
+execution. Complete inline output remains readable; the committed event and its
+preview are retained without rewriting history.
+A future full-output capture must establish immutable identity at capture time,
+with explicit retention and authorization; copying a file on first historical
+read cannot reconstruct that evidence. Material evidence receipts remain a
+separate existing source of immutable read/search results.
+
 ## Execution
 
 Each AgentRun receives one frozen execution profile and temporary container.

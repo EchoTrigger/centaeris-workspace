@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { TranscriptContentReader } from "../../src/chat/transcriptContentReader.ts";
+import { ApiError } from "../../src/api.ts";
+import { createWorkspaceTranscriptTransport } from "../../src/chat/transcriptTransport.ts";
 
 function source(text) {
   const bytes = new TextEncoder().encode(text);
@@ -58,4 +60,31 @@ test("failed continuation can retry without duplicating text", async () => {
   assert.equal(reader.getSnapshot().content, text);
   assert.equal(reader.getSnapshot().error, false);
   assert.ok(reader.getSnapshot().content.startsWith(loadedBefore));
+});
+
+test("unavailable historical output reports an error without automatic retry or fallback", async () => {
+  const paths = [];
+  const transport = createWorkspaceTranscriptTransport({
+    request: async (path) => {
+      paths.push(path);
+      throw new ApiError("transcript_content_unavailable", 409);
+    },
+  });
+  const identity = {
+    sessionId: "session_1", projectionGeneration: "generation-1",
+    reference: { refId: "tool-output:call-history", revision: "2", byteLength: "70000" },
+  };
+  const reader = new TranscriptContentReader((offset, signal) =>
+    transport.loadContentRange(identity, offset, signal));
+  await reader.loadAll();
+  assert.equal(reader.getSnapshot().content, "");
+  assert.equal(reader.getSnapshot().loading, false);
+  assert.equal(reader.getSnapshot().error, true);
+  assert.equal(paths.length, 1);
+  await reader.loadAll();
+  assert.equal(paths.length, 1);
+  await reader.retry();
+  assert.deepEqual(paths, [paths[0], paths[0]]);
+  assert.equal(reader.getSnapshot().error, true);
+  reader.dispose();
 });

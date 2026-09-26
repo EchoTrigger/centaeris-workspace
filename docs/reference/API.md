@@ -73,8 +73,15 @@ Every request rechecks ownership and membership and returns `Cache-Control: no-s
 For `session-event:<eventId>:<field>`, the API delegates to Runtime's authenticated
 `/internal/transcript/content` route. Runtime performs a session-scoped event lookup
 bound to the current, valid projection generation; Core resolves the visible field
-and verifies the reference. Existing `tool-output:<callId>` reads retain the scoped
-snapshot path. Message text loads automatically and renders as one Markdown
+and verifies the reference. `tool-output:<callId>` reads serve complete inline
+content from the committed tool result. Spilled output carries only a mutable
+path and byte range, without an immutable content identity; these references
+return HTTP 409 `transcript_content_unavailable`, even when the current workspace
+snapshot contains a file of the same path and length. Neither initial reads nor
+continuations fall back to that snapshot. This applies to existing and newly
+created unversioned spill references. The committed event and its preview are
+retained; full spill expansion requires a future durable capture contract.
+Message text loads automatically and renders as one Markdown
 document. Tool detail navigation replaces the current range rather than appending
 all previously loaded output.
 

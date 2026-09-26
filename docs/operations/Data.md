@@ -27,6 +27,17 @@ Other users and deleted objects are excluded. Different content with a conflicti
 name in the target folder receives `(1)`, `(2)`, etc. before the extension.
 This does not merge historical duplicates or change manual note/artifact workflows.
 
+Historical tool spill references containing only a workspace path and byte
+range cannot prove the original output. The transcript content API returns
+`transcript_content_unavailable` for them, including records written before the
+fix. This reader policy needs no database migration and does not rewrite or
+delete Session events, snapshots, or published artifacts. It does not backfill
+old references from current workspace bytes. Committed previews are retained,
+and complete inline output remains readable subject to current authorization. Restoring the
+old snapshot reader would reintroduce incorrect historical content; reverting
+code is not a content-recovery procedure. Full-output retention requires a
+separate immutable capture contract.
+
 ## Trash and deletion
 
 Supported product objects use a 30-day trash lifecycle where defined by their
