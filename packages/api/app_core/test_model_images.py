@@ -4,7 +4,6 @@ import base64
 import copy
 import json
 from io import BytesIO
-from pathlib import Path
 from types import SimpleNamespace
 
 from django.test import SimpleTestCase, TransactionTestCase
@@ -21,6 +20,7 @@ from .agent_run_authorization_factory import create_agent_run_authorization
 from .models import Workspace, ModelConfig, AgentRun
 from .testing import create_session
 from .runtime_contract import MODEL_RUN_SCHEMA
+from .core_test_fixtures import core_fixture
 
 
 def image_prompt():
@@ -70,7 +70,7 @@ class ModelImageTests(SimpleTestCase):
 
     def test_core_generated_corpus_and_limits(self):
         from .model_adapter.images import MODEL_INPUT_IMAGE_MAX_BYTES, MODEL_INPUT_IMAGE_MAX_PIXELS
-        path = Path(__file__).resolve().parents[4] / "centaeris/packages/core/tests/fixtures/model_images.json"
+        path = core_fixture("model_images.json")
         corpus = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(corpus["maxImageBytes"], MODEL_INPUT_IMAGE_MAX_BYTES)
         self.assertEqual(corpus["maxImagePixels"], MODEL_INPUT_IMAGE_MAX_PIXELS)
@@ -144,7 +144,7 @@ class InternalModelImageTests(TransactionTestCase):
         session = create_session(workspace=workspace, owner=user)
         run = AgentRun.objects.create(workspace=workspace, session=session, user=user, modelConfig=model, prompt="image")
         authorization = create_agent_run_authorization(run, image_digest="sha256:" + "a" * 64)
-        path = Path(__file__).resolve().parents[4] / "centaeris/packages/core/tests/fixtures/model_images.json"
+        path = core_fixture("model_images.json")
         prompt = json.loads(path.read_text(encoding="utf-8"))["cases"][0]["preparedPrompt"]
         decoded = base64.b64decode(prompt["inputImages"][0]["dataBase64"])
         prompt["inputImages"][0]["dataBase64"] = base64.b64encode(

@@ -1,16 +1,13 @@
 """Run the same provider reasoning corpus as the public Core, without services."""
 
 import json
-from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 from django.test import SimpleTestCase
 
 from .model_adapter import anthropic_messages, openai_completions, openai_responses
 from . import model_adapter
-
-
-CORPUS = Path(__file__).resolve().parents[4] / "centaeris/packages/core/tests/fixtures/model_reasoning.json"
+from .core_test_fixtures import core_fixture
 
 
 async def events(values):
@@ -105,7 +102,7 @@ class ModelReasoningTests(SimpleTestCase):
         from types import SimpleNamespace
         from . import agent_run_stream
 
-        reasoning = json.loads(CORPUS.with_name("live_reasoning.json").read_text(encoding="utf-8"))
+        reasoning = json.loads(core_fixture("live_reasoning.json").read_text(encoding="utf-8"))
         meta = {"messageId": "message:turn-1:assistant", "turnId": "turn-1", "afterSequence": "4", "revision": "2", "reasoning": json.dumps(reasoning)}
         state = agent_run_stream._live_state(meta, "answer")
         self.assertEqual(state["reasoning"], reasoning)
@@ -138,7 +135,7 @@ class ModelReasoningTests(SimpleTestCase):
             "responses": (openai_responses, "open_ai_responses", "parse_open_ai_responses_response", "responses"),
             "compatible": (openai_completions, "open_ai_completions", "parse_open_ai_completions_response", "chat.completions"),
         }
-        for case in json.loads(CORPUS.read_text(encoding="utf-8")):
+        for case in json.loads(core_fixture("model_reasoning.json").read_text(encoding="utf-8")):
             module, name, parser, endpoint = adapters[case["protocol"]]
             for mode in ("json", "stream", "interrupted"):
                 streaming = mode != "json"
