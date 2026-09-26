@@ -38,6 +38,7 @@ def main(skip_frontend_tests=False):
         ("Rust toolchain consistency", ["node", "--test", "scripts/rust-toolchain.test.mjs"]),
         ("Rust check", ["cargo", "check", "--workspace", "--locked"]),
         ("Rust tests", ["cargo", "test", "--workspace", "--locked"]),
+        ("Transcript exporter cache isolation", [py, "-B", "scripts/test_transcript_schema.py"]),
         ("Transcript generated contract", [py, "scripts/transcript-schema.py", "--check"]),
         ("Outbox gate isolation and discovery guards", [py, "scripts/test_runtime_outbox_gate.py"]),
         ("Outbox PostgreSQL regressions", [*api, "scripts/runtime_outbox_gate.py"]),

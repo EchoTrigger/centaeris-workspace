@@ -16,6 +16,12 @@ Core owns pages, patches, removals, resume cursors and content ranges; Workspace
 owns HTTP request envelopes, patch pages and error responses. The exporter
 imports those types, rather than copying their fields into another registry.
 
+The two Rust examples share the name `transcript_schema`. The generator isolates
+their build outputs below `target/transcript-schema/core` and
+`target/transcript-schema/workspace` (or the same suffixes under
+`CARGO_TARGET_DIR`) so cached executables cannot be confused. The local gate
+exercises repeated generation/checks with two dependency-free Cargo exporters.
+
 Request schemas describe Rust deserialization (including optional fields that
 may be omitted); response schemas describe serialization (nullable fields must
 still be present). Rust remains the request validator; Python uses the generated

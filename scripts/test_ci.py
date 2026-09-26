@@ -26,7 +26,8 @@ class PortableCITests(unittest.TestCase):
             self.assertTrue(any("build" in c and "packages/web" in c for c in calls))
             self.assertEqual(any("test:unit" in c for c in calls), not skip)
             for script in ("scripts/runtime_outbox_gate.py", "scripts/agent-run-authorization-gate.py",
-                           "scripts/transcript-schema.py", "scripts/platform-mcp-client-gate.py"):
+                           "scripts/transcript-schema.py", "scripts/test_transcript_schema.py",
+                           "scripts/platform-mcp-client-gate.py"):
                 self.assertTrue(any(script in c for c in calls), script)
             self.assertTrue(any("scripts/python_test_gate.py" in c and "api" == c[-1] for c in calls))
 
