@@ -8,8 +8,9 @@ ENV PATH="/app/.venv/bin:$PATH" \
     HOME=/home/processor
 
 COPY --from=uv /uv /uvx /bin/
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=5 update \
+    && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
         fonts-dejavu-core \
         fonts-noto-cjk \
         libgl1 \
