@@ -13,6 +13,7 @@ boundaries, and release verification.
   Core-derived wire structure and Python validation.
 - [Platform materials and MCP](architecture/PlatformMaterials.md): material
   access, durable processing, evidence receipts and citation presentation.
+- [Versioning](reference/Versioning.md): product versions, Core revision, and contract identities.
 - [API](reference/API.md): REST, SSE, and internal service contracts.
 - [Web chat presentation](reference/WebChatPresentation.md): typography roles,
   motion inventory, disclosure rules and focused browser checks.

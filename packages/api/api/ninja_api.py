@@ -28,7 +28,7 @@ from app_core.http.workspaces import router as workspaces_router
 
 api = NinjaAPI(
     title="Centaeris Workspace Agent API",
-    version="1.0.0",
+    version="0.1.0",
     docs_url="/docs" if settings.DEBUG else None,
     openapi_url="/openapi.json" if settings.DEBUG else None,
     urls_namespace="workspace_agent_api",

@@ -13,6 +13,7 @@ function Run([string]$Name, [scriptblock]$Command) {
     if ($LASTEXITCODE -ne 0) { throw "$Name failed with exit code $LASTEXITCODE" }
 }
 
+Run "Product version parity" { python -B scripts/test_product_version.py }
 Run "Pinned public Core revision" { node --test scripts/core-revision.test.mjs }
 Run "Pinned local Core checkout" { node scripts/verify-core-checkout.mjs }
 Run "Rust toolchain consistency" { node --test scripts/rust-toolchain.test.mjs }

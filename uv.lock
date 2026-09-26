@@ -139,7 +139,7 @@ wheels = [
 
 [[package]]
 name = "api"
-version = "1.0.0"
+version = "0.1.0"
 source = { editable = "packages/api" }
 dependencies = [
     { name = "anthropic" },
@@ -294,7 +294,7 @@ wheels = [
 
 [[package]]
 name = "centaeris-document-processor"
-version = "1.0.0"
+version = "0.1.0"
 source = { editable = "packages/document_processor" }
 dependencies = [
     { name = "openpyxl" },
@@ -324,7 +324,7 @@ provides-extras = ["cpu", "gpu"]
 
 [[package]]
 name = "centaeris-sandbox-tools"
-version = "1.0.0"
+version = "0.1.0"
 source = { virtual = "packages/hosted_execution" }
 dependencies = [
     { name = "openpyxl" },
@@ -343,7 +343,7 @@ requires-dist = [
 
 [[package]]
 name = "centaeris-workspace"
-version = "1.0.0"
+version = "0.1.0"
 source = { virtual = "." }
 
 [[package]]
@@ -2156,7 +2156,7 @@ wheels = [
 
 [[package]]
 name = "workspace-agent-worker"
-version = "1.0.0"
+version = "0.1.0"
 source = { editable = "packages/worker" }
 
 [[package]]

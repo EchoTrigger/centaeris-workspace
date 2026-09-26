@@ -162,7 +162,7 @@ class ScopedAuthentication:
 
 
 def create_mcp_app():
-    server = Server("centaeris-workspace", version="1.0.0", on_list_tools=_list_tools, on_call_tool=_call_tool)
+    server = Server("centaeris-workspace", version="0.1.0", on_list_tools=_list_tools, on_call_tool=_call_tool)
     # Separate explicit allowlist: never inherit Django's possible wildcard.
     hosts = getattr(settings, "PLATFORM_MCP_ALLOWED_HOSTS", ["localhost", "127.0.0.1"])
     if not hosts or any(not host or "*" in host or "/" in host for host in hosts):
