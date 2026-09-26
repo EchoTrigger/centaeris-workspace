@@ -68,3 +68,7 @@ __pypackages__
 **/*.tar
 **/*.tar.gz
 **/*.7z
+
+# Local guidance and development patches must not enter images.
+AGENTS.md
+.cargo/config.toml

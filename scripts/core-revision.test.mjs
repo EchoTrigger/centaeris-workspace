@@ -31,8 +31,10 @@ test('reads the checked-in revision and propagates failures without a fallback',
 });
 
 test('local Core checkout must match the pinned revision', () => {
-  assert.equal(verifyCoreCheckout(() => `${sha}\n`, sha), sha);
-  assert.throws(() => verifyCoreCheckout(() => `${'f'.repeat(40)}\n`, sha), /does not match/);
+  const clean = (_command, args) => args.includes('rev-parse') ? `${sha}\n` : '';
+  assert.equal(verifyCoreCheckout(clean, sha, 'arbitrary directory'), sha);
+  assert.throws(() => verifyCoreCheckout(() => `${'f'.repeat(40)}\n`, sha, 'arbitrary directory'), /does not match/);
+  assert.throws(() => verifyCoreCheckout((_command, args) => args.includes('rev-parse') ? sha : ' M Cargo.toml', sha, 'arbitrary directory'), /tracked modifications/);
 });
 
 // CI checks out the pinned SHA; this local smoke verifies that it remains fetchable.

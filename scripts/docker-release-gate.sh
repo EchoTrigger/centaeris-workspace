@@ -7,17 +7,13 @@ if [[ "${CENTAERIS_CI_DESTRUCTIVE_DOCKER:-}" != "1" ]]; then
 fi
 
 workspace_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-core_root="$(cd "$workspace_root/../centaeris" && pwd)"
 cd "$workspace_root"
+python3 scripts/core-pin.py
 
 : "${CENTAERIS_WORKSPACE_REVISION:?CENTAERIS_WORKSPACE_REVISION is required}"
 : "${CENTAERIS_CORE_REVISION:?CENTAERIS_CORE_REVISION is required}"
 test "$CENTAERIS_CORE_REVISION" = "$(cat "$workspace_root/core-revision.txt")" || {
   echo "Core revision does not match Workspace pin" >&2
-  exit 66
-}
-test "$(git -C "$core_root" rev-parse HEAD)" = "$CENTAERIS_CORE_REVISION" || {
-  echo "Core checkout does not match Workspace pin" >&2
   exit 66
 }
 
@@ -70,7 +66,7 @@ target.write_text("\n".join(rendered) + "\n", encoding="utf-8")
 PY
 
 "${compose[@]}" config --quiet
-"${compose[@]}" config --format json | WORKSPACE_ROOT="$workspace_root" CORE_ROOT="$core_root" python3 -c '
+"${compose[@]}" config --format json | WORKSPACE_ROOT="$workspace_root" python3 -c '
 import json, os, pathlib, sys
 config = json.load(sys.stdin)
 assert config["name"] == "centaeris-workspace"
@@ -81,12 +77,10 @@ for service_name, consumer in (("document-processor", "material-worker"), ("work
     assert not service.get("profiles")
     assert service_name in config["services"][consumer]["depends_on"]
 workspace = pathlib.Path(os.environ["WORKSPACE_ROOT"]).resolve()
-core = pathlib.Path(os.environ["CORE_ROOT"]).resolve()
 for name in required_builds:
     assert pathlib.Path(config["services"][name]["build"]["context"]).resolve() == workspace
 for name in ("runtime", "workspace-general"):
-    contexts = config["services"][name]["build"]["additional_contexts"]
-    assert pathlib.Path(contexts["centaeris"]).resolve() == core
+    assert not config["services"][name]["build"].get("additional_contexts")
 expected_volumes = {"agent-memory", "plugin-data", "postgres-data", "runtime-data", "storage-data"}
 assert set(config["volumes"]) == expected_volumes
 for key, value in config["volumes"].items():

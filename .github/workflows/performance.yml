@@ -9,6 +9,9 @@ on:
       - scripts/resolve-core-revision.mjs
       - core-revision.txt
       - scripts/core-revision.test.mjs
+      - scripts/core-source*.mjs
+      - scripts/verify-core-checkout.mjs
+      - scripts/core-pin.py
       - scripts/rust-toolchain.test.mjs
       - Cargo.lock
       - Cargo.toml
@@ -27,6 +30,9 @@ on:
       - scripts/resolve-core-revision.mjs
       - core-revision.txt
       - scripts/core-revision.test.mjs
+      - scripts/core-source*.mjs
+      - scripts/verify-core-checkout.mjs
+      - scripts/core-pin.py
       - scripts/rust-toolchain.test.mjs
       - Cargo.lock
       - Cargo.toml
@@ -63,14 +69,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: centaeris-workspace
-          persist-credentials: false
-
-      - name: Check out exact Core revision
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: EchoTrigger/centaeris
-          ref: ${{ env.CENTAERIS_CORE_REVISION }}
-          path: centaeris
           persist-credentials: false
 
       - name: Set up Node.js

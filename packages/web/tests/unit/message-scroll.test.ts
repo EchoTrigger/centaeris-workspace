@@ -1,3 +1,4 @@
+import { coreFile } from '../../../../scripts/core-source.mjs';
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -63,5 +64,5 @@ describe("message anchoring", () => {
 
 it("keeps desktop and web scrolling rules identical", () => {
   assert.equal(readFileSync(new URL("../../src/chat/messageScroll.ts", import.meta.url), "utf8"),
-    readFileSync(new URL("../../../../../centaeris/packages/ui/src/components/chat/messageScroll.ts", import.meta.url), "utf8"));
+    readFileSync(coreFile("packages/ui/src/components/chat/messageScroll.ts"), "utf8"));
 });

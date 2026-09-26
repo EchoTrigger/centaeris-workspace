@@ -1,3 +1,4 @@
+import { coreFile } from '../../../../scripts/core-source.mjs';
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -60,7 +61,7 @@ test("platform snapshots hydrate without legacy events and stale or foreign resp
 });
 
 test("live snapshots recover from history, ignore stale revisions and transition to one sealed block", () => {
-  const reasoning = JSON.parse(readFileSync(new URL("../../../../../centaeris/packages/core/tests/fixtures/live_reasoning.json", import.meta.url), "utf8"));
+  const reasoning = JSON.parse(readFileSync(coreFile("packages/core/tests/fixtures/live_reasoning.json"), "utf8"));
   assert.equal(reasoningPreview(reasoning.text), "核对 input 保留 code 与 来源");
   const live = (revision, text) => liveEntry(revision, text, null, { turnId: "turn_1", messageId: "answer", reasoning });
   let view = validateHistoryPage(page(historyAgentRun([]))).agentRuns[0];
@@ -82,7 +83,7 @@ test("live snapshots recover from history, ignore stale revisions and transition
 });
 
 test("committed reasoning survives history reconstruction and separates tools", () => {
-  const payload = JSON.parse(readFileSync(new URL("../../../../../centaeris/packages/core/tests/fixtures/reasoning_block.json", import.meta.url), "utf8"));
+  const payload = JSON.parse(readFileSync(coreFile("packages/core/tests/fixtures/reasoning_block.json"), "utf8"));
   const reasoning = event("reasoning_block", 3, payload);
   const history = page(historyAgentRun([reasoning]));
   const view = validateHistoryPage(history).agentRuns[0];

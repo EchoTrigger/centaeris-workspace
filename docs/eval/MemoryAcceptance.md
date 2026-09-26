@@ -6,7 +6,7 @@ It does not add a background model or a second memory store.
 
 ## Offline discovery and storage checks
 
-Run from Workspace with the matching sibling Core checkout:
+Run from Workspace with the pinned Core dependency resolved by Cargo:
 
 ```powershell
 cargo test --locked -p runtime_server memory -- --nocapture

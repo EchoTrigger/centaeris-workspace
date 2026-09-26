@@ -42,3 +42,6 @@ __pycache__/
 /perf/certs/out/
 /perf/k6/bin/
 /perf/results/
+
+# Explicit local Cargo patches are never publication inputs.
+/.cargo/config.toml

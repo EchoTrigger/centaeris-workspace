@@ -7,7 +7,6 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const biomeEntry = resolve(repoRoot, "node_modules/@biomejs/biome/bin/biome");
-const ciScriptPath = resolve(repoRoot, "scripts/ci.ps1");
 const webPackagePath = resolve(repoRoot, "packages/web/package.json");
 
 function runFixture(source) {
@@ -51,11 +50,10 @@ test("unused imports and variables block the gate", () => {
 });
 
 test("local CI runs lint, typecheck, and a production Web build", () => {
-  const ciScript = readFileSync(ciScriptPath, "utf8");
-  assert.match(
-    ciScript,
-    /Run "Web production validation" \{ npm run build --workspace packages\/web \}/,
-  );
+  const gate = spawnSync(process.platform === "win32" ? "python" : "python3", ["scripts/test_ci.py"], {
+    cwd: repoRoot, encoding: "utf8",
+  });
+  assert.equal(gate.status, 0, `${gate.stdout}${gate.stderr}`);
   const webPackage = JSON.parse(readFileSync(webPackagePath, "utf8"));
   assert.equal(webPackage.scripts.build, "npm run lint && npm run typecheck && vite build");
 });

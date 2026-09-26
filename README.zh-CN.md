@@ -4,9 +4,9 @@
 
 Centaeris Workspace 是运行 Centaeris 智能体的托管产品，提供工作区成员管理、持久任务、托管执行、文档处理、Django 控制平面和 Web 客户端。公开源代码采用 `AGPL-3.0-only` 许可开发。
 
-不依赖特定宿主的 Runtime Framework 是外部 Rust 源码依赖。当前开发工作副本通过显式 Cargo 路径和命名 Docker 构建上下文引用它。可复现发布必须为这两种引用准备同一个精确的公共 Runtime 修订版本。仓库不使用跨仓库 npm 或 Python 源码依赖。
+Runtime Framework 是固定到精确公共 Git 提交的 Rust 依赖。Cargo 和 Docker 构建使用同一份锁定源码，不要求相邻的 Core 工作副本，也没有跨仓 npm/Python 源码依赖。跨平台开发、升级依赖和显式本地联调见 [Core 开发指南](docs/development/CoreDependency.md)。
 
-Compose 仅通过额外的命名构建上下文向 Rust 服务镜像传入 Runtime 源码。API 镜像的构建上下文只包含本仓库。超级用户通过上传经过验证的 ZIP 安装或更新插件；Workspace 镜像的构建上下文不包含扩展源码仓库。
+超级用户通过经过验证的 ZIP 安装插件；Workspace 镜像构建上下文不包含扩展源码仓库。
 
 ## 外观
 
@@ -20,8 +20,8 @@ Workspace 使用 `react-i18next` 支持英文和简体中文，默认简体中�
 
 ## 开发
 
-```powershell
-Copy-Item .env.example .env
+```sh
+cp .env.example .env
 # 填写所有留空的密钥。
 uv sync --locked
 npm ci
@@ -31,13 +31,13 @@ docker compose config --quiet
 
 启动完整本地服务栈：
 
-```powershell
-pwsh -File scripts\start-local.ps1
+```sh
+docker compose build && docker compose up -d
 ```
 
-启动脚本会先构建所需的执行镜像和文档处理镜像，再启动持久服务。这些镜像是正常运行所必需的组成部分。Runtime 会先将配置的执行镜像解析为不可变 Docker 标识，再授权 AgentRun。
+命令会先构建所需的执行镜像和文档处理镜像，再启动持久服务。这些镜像是正常运行所必需的组成部分。Runtime 会先将配置的执行镜像解析为不可变 Docker 标识，再授权 AgentRun。
 
-运行 `pwsh -File scripts/ci.ps1` 执行全部本地检查。文档入口为 [docs/README.md](docs/README.md)，文档正文目前主要使用英文。
+运行 `python scripts/ci.py`（Python 3.12；macOS/Linux 可使用 `python3`） 执行全部本地检查。文档入口为 [docs/README.md](docs/README.md)，文档正文目前主要使用英文。
 
 捆绑 Web 字体的版权、来源和许可证记录见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)；其链接的许可证文件包含在部署的 Web 产物中。
 

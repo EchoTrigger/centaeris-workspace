@@ -6,16 +6,14 @@ Hosted product for running Centaeris agents with workspace membership, durable
 jobs, managed execution, document processing, a Django control plane, and a web
 client. The public source is developed under `AGPL-3.0-only`.
 
-The host-agnostic Runtime Framework remains an external Rust source dependency.
-The current development checkout resolves it through explicit Cargo paths and a
-named Docker build context. A reproducible release must materialize one exact
-public Runtime revision for both paths. There is no npm or Python
-cross-repository source dependency.
+The host-agnostic Runtime Framework is an external Rust Git dependency pinned to
+one public commit. Cargo and Docker builds use the same locked source without
+requiring a sibling checkout. There are no npm or Python cross-repository source
+dependencies. See [Core development](docs/development/CoreDependency.md) for
+portable setup, pin updates and explicit local co-development.
 
-Compose passes only the Runtime source through an additional named build
-context for Rust service images. The API image context contains only this
-repository. Superusers install or update Plugins by uploading a validated ZIP;
-extension source repositories are not included in a Workspace image context.
+Superusers install Plugins from validated ZIP files. Extension source repositories
+are not included in Workspace image contexts.
 
 ## Appearance
 
@@ -36,8 +34,8 @@ tests cover the Chinese default, switching, and persistence.
 
 ## Develop
 
-```powershell
-Copy-Item .env.example .env
+```sh
+cp .env.example .env
 # Fill every blank secret.
 uv sync --locked
 npm ci
@@ -47,16 +45,16 @@ docker compose config --quiet
 
 Start the complete local stack:
 
-```powershell
-pwsh -File scripts\start-local.ps1
+```sh
+docker compose build && docker compose up -d
 ```
 
-The start script builds required execution and document-processor images before
+The build command prepares required execution and document-processor images before
 starting persistent services. These images are part of normal operation, not
 optional development extras. Runtime resolves the configured execution image to
 an immutable Docker identity before authorizing an AgentRun.
 
-Run all local gates with `pwsh -File scripts/ci.ps1`. Start documentation at
+Run all local gates with `python scripts/ci.py` (Python 3.12). Start documentation at
 [docs/README.md](docs/README.md).
 
 Bundled web font copyright, source, and license records are indexed in

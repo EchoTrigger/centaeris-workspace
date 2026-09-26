@@ -6,7 +6,7 @@ version. `scripts/test_product_version.py` checks their agreement in the local C
 gate.
 
 `core-revision.txt` selects one complete Core commit. Local builds require the
-sibling Core checkout to match that commit; CI checks out the same revision.
+resolved Cargo Git source to match that commit; CI uses the same locked revision.
 Publishing Workspace requires the selected Core commit to be publicly fetchable.
 The example environment uses the same revision for image labels.
 

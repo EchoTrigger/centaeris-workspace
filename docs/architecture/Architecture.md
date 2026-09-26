@@ -280,10 +280,10 @@ completion before outputs can be committed.
 
 ## Source dependency
 
-Rust packages currently resolve the public Runtime through explicit development
-paths. Compose accepts the same source through a named build context. A release
-must materialize one exact Runtime revision for both build paths; npm and Python
-remain local to this repository.
+Rust packages resolve the public Runtime through exact Git revision dependencies.
+Compose builds fetch the same locked source without an adjacent checkout. Pin,
+manifest, lockfile and example image-label revisions are checked together; npm
+and Python remain local to this repository.
 
 ## Hosted authorization verification
 

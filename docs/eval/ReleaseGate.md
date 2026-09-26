@@ -34,7 +34,7 @@ A live owner must not be consumed. Direct test-database cleanup is fixture
 management only and cannot count as lifecycle acceptance. Record zero remaining
 waiters before any manual cleanup, with no replayed tools or fabricated results.
 
-The local gate runs `scripts/runtime_outbox_gate.py` in the API dependency
+The portable `python scripts/ci.py` gate runs `scripts/runtime_outbox_gate.py` in the API dependency
 environment. It uses only `TEST_POSTGRES_*`, creates a random disposable database,
 checks non-empty Rust test discovery, runs the PostgreSQL outbox regressions, and
 drops only that database. Coverage includes acknowledged-history stability,
@@ -65,8 +65,7 @@ Runtime/Redis calls at a closed loopback port. It does not use deployed database
 settings. CI provisions its own PostgreSQL 18 service. SQLite migration/drift
 checks and the independent Python-to-Rust authorization gate remain in place.
 
-The local gate includes `pwsh -NoProfile -File
-scripts/agent-run-authorization-gate.ps1`. It checks the shared authorization
+The local gate includes `python scripts/agent-run-authorization-gate.py`. It checks the shared authorization
 fixture and boundary corpus in Python and Rust, then verifies Python-generated
 synthetic signatures in Rust. It requires a non-empty artifact and a Rust
 consumption receipt; consumer failures block the gate. Vector tests use no
@@ -99,7 +98,7 @@ Runtime, protocol, security, deployment, and performance gates remain automated.
 Use [FrontendManualAcceptance.md](FrontendManualAcceptance.md) for the retained
 browser interaction, authorization-UI, and appearance checks.
 
-1. `pwsh -File scripts/ci.ps1`
+1. `python scripts/ci.py`
 2. `node scripts/performance-eval.mjs`; review the independent phase report in
    [PerformanceEvaluation.md](PerformanceEvaluation.md). The 4,095-observation
    storage-growth tests are intentionally excluded from the normal test suite;
@@ -134,19 +133,18 @@ and that timed-out blocking work retains its permit until exit. Long AgentRun
 steps must not inherit the short-request deadline. Material processing runs in its
 dedicated Worker with a bounded processing deadline, outside Runtime HTTP.
 These are acceptance requirements, not a claim that an isolated run was executed.
-Sibling Rust paths must become exact Git revisions before distribution.
+Rust dependencies use exact public Git revisions in Cargo.toml and Cargo.lock.
 
 CI and Performance use the shared pinned Core revision from `core-revision.txt`;
-all dependent jobs check out that full public SHA. The run summary records a
-link to it, and Docker image labels retain the same SHA. Local builds and the
-Docker release gate require the sibling Core checkout to match the pin. Core
+all dependent jobs resolve that full public SHA through Cargo. The run summary records a
+link to it, and Docker image labels retain the same SHA. Source gates verify Cargo metadata and reject local patches; the Docker gate verifies manifest/lock/example pin parity. Core
 `main` advancing does not silently change Workspace builds.
 
 The local gate tests strict pin parsing, output recording, and public fetchability
 with `node --test scripts/core-revision.test.mjs`; this requires network access.
 In GitHub Actions, the live smoke test is skipped because the downstream
 checkouts exercise it. To reproduce a CI run, check out the pinned Core SHA
-alongside the tested Workspace SHA.
+through Cargo from the tested Workspace SHA.
 
 The checked-in CI workflow runs the source, browser, and Compose gates from a
 clean checkout. Required status checks must be enabled on the public `main`

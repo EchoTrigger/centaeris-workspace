@@ -1,3 +1,4 @@
+import { resolveCoreSource, coreFile } from './core-source.mjs';
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -7,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { postgresSources, validateCachePrefixMeasurement, validateCapturedPostgres, validatePostgresMeasurement } from "./performance-eval-artifact.mjs";
 
 const workspace = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const core = resolve(workspace, "../centaeris");
+const core = resolveCoreSource({ allowLocal: false });
 const reference = JSON.parse(readFileSync(resolve(workspace, "docs/eval/fixtures/performance-repair-v1.json"), "utf8"));
 assert.equal(reference.schema, "centaeris.performance_repair_eval.v1");
 
@@ -18,14 +19,14 @@ let capturedPostgres;
 if (postgresArtifactIndex !== -1) {
   assert(args[postgresArtifactIndex + 1], "--postgres-artifact requires a path");
   const currentHashes = Object.fromEntries(postgresSources.map((source) => [source,
-    createHash("sha256").update(readFileSync(resolve(workspace, source))).digest("hex")]));
+    createHash("sha256").update(readFileSync(source.startsWith("core/") ? coreFile(source.slice(5)) : resolve(workspace, source))).digest("hex")]));
   capturedPostgres = validateCapturedPostgres(JSON.parse(readFileSync(resolve(args[postgresArtifactIndex + 1]), "utf8")), currentHashes);
 }
 
 function gate(cwd, packageName, filter, extra = []) {
   const args = ["test", "--locked", "-p", packageName, filter, "--", "--nocapture", "--test-threads=1", ...extra];
   process.stderr.write(`Running current gate: cargo ${args.join(" ")}\n`);
-  const result = spawnSync("cargo", args, { cwd, env: { ...process.env, CARGO_BUILD_JOBS: "1" }, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
+  const result = spawnSync("cargo", args, { cwd, env: { ...process.env, CARGO_BUILD_JOBS: "1", CARGO_TARGET_DIR: process.env.CARGO_TARGET_DIR ?? resolve(workspace, "target") }, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
   const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
   if (result.error || result.status !== 0) {
     process.stderr.write(output);

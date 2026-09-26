@@ -1,56 +1,7 @@
-param(
-    [switch]$SkipFrontendTests
-)
-
+param([switch]$SkipFrontendTests)
 $ErrorActionPreference = "Stop"
-if ($IsWindows) {
-    $env:ComSpec = Join-Path $env:SystemRoot "System32\cmd.exe"
-}
-
-function Run([string]$Name, [scriptblock]$Command) {
-    Write-Host "==> $Name"
-    & $Command
-    if ($LASTEXITCODE -ne 0) { throw "$Name failed with exit code $LASTEXITCODE" }
-}
-
-Run "Product version parity" { python -B scripts/test_product_version.py }
-Run "Pinned public Core revision" { node --test scripts/core-revision.test.mjs }
-Run "Pinned local Core checkout" { node scripts/verify-core-checkout.mjs }
-Run "Rust toolchain consistency" { node --test scripts/rust-toolchain.test.mjs }
-Run "Rust check" { cargo check --workspace --locked }
-Run "Rust tests" { cargo test --workspace --locked }
-Run "Transcript generated contract" { python scripts/transcript-schema.py --check }
-Run "Outbox gate isolation and discovery guards" { python scripts/test_runtime_outbox_gate.py }
-Run "Outbox PostgreSQL regressions" { uv run --frozen --package api python scripts/runtime_outbox_gate.py }
-Run "AgentRun authorization parity" { pwsh -NoProfile -File scripts/agent-run-authorization-gate.ps1 }
-Run "Deployment identity contracts" { uv run --frozen --package api python scripts/deployment-contract.test.py }
-Run "Python discovery gate regressions" { python scripts/python_test_gate.py gate }
-Run "Worker tests" { python scripts/python_test_gate.py worker }
-Run "Performance harness isolation" { python -m unittest discover -s perf/tests -v }
-Run "Performance workload metrics" { node --test perf/tests/k6-metrics.test.mjs }
-Run "Document processor tests" { uv run --frozen --package centaeris-document-processor python scripts/python_test_gate.py document_processor }
-Run "Django fresh migration" { uv run --frozen --package api python packages/api/manage.py migrate --noinput --settings=api.migration_test_settings }
-Run "Django migration drift" { uv run --frozen --package api python packages/api/manage.py makemigrations --check --dry-run --settings=api.migration_test_settings --skip-checks }
-Run "Full Django PostgreSQL suite" { uv run --frozen --package api python scripts/python_test_gate.py api }
-Run "First-party MCP Rust/Python client" { uv run --frozen --package api python scripts/platform-mcp-client-gate.py }
-Run "Node install" { npm ci }
-Run "Performance artifact validation" { node --test scripts/performance-eval-artifact.test.mjs }
-Run "Web production validation" { npm run build --workspace packages/web }
-if (-not $SkipFrontendTests) {
-    Run "Web unit tests" { npm run test:unit --workspace packages/web }
-}
-Run "Compose structure" {
-    $config = docker compose --env-file .env.example config --format json | ConvertFrom-Json
-    foreach ($service in @("document-processor", "workspace-general")) {
-        if (-not $config.services.PSObject.Properties.Name.Contains($service)) {
-            throw "Required Runtime image service is missing: $service"
-        }
-        if ($config.services.$service.profiles) {
-            throw "Required Runtime image service cannot be profile-gated: $service"
-        }
-        $consumer = if ($service -eq "document-processor") { "material-worker" } else { "runtime" }
-        if (-not $config.services.$consumer.depends_on.$service) {
-            throw "$consumer must depend on required image service: $service"
-        }
-    }
-}
+$PSNativeCommandUseErrorActionPreference = $true
+$arguments = @((Join-Path $PSScriptRoot "ci.py"))
+if ($SkipFrontendTests) { $arguments += "--skip-frontend-tests" }
+python @arguments
+exit $LASTEXITCODE

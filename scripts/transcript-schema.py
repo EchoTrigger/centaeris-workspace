@@ -1,6 +1,7 @@
 """Export Core blocks and Workspace transcript envelopes from their owning types."""
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 
@@ -14,11 +15,11 @@ def main():
     args = parser.parse_args()
     def capture(command):
         return subprocess.run(command, cwd=ROOT, check=True, capture_output=True,
-                              encoding="utf-8").stdout
-    metadata = json.loads(capture(["cargo", "metadata", "--format-version=1", "--locked"]))
-    core = next(package for package in metadata["packages"] if package["name"] == "centaeris-core")
+                              encoding="utf-8", env={**os.environ,
+                              "CARGO_TARGET_DIR": os.environ.get("CARGO_TARGET_DIR", str(ROOT / "target"))}).stdout
+    core = Path(capture(["node", "scripts/core-source.mjs"]).strip())
     command = [
-        "cargo", "run", "--quiet", "--locked", "--manifest-path", core["manifest_path"],
+        "cargo", "run", "--quiet", "--locked", "--manifest-path", str(core / "packages/core/Cargo.toml"),
         "--example", "transcript_schema", "--features", "contract-schema",
     ]
     artifacts = [(OUTPUT, json.loads(capture(command))),

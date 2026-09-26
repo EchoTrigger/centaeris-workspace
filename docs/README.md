@@ -20,6 +20,10 @@ boundaries, and release verification.
 - [Configuration](reference/Configuration.md): environment variables and secret
   boundaries.
 
+## Development
+
+- [Core dependency](development/CoreDependency.md): portable checkout, exact Git pins and local co-development.
+
 ## Operations
 
 - [Deployment](operations/Deployment.md): build, initialization, health, update,

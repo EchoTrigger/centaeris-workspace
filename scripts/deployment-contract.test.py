@@ -35,6 +35,13 @@ def compose_config(**overrides):
 
 
 class DeploymentContractTests(unittest.TestCase):
+    def test_images_build_from_workspace_without_adjacent_source_contexts(self):
+        for name, service in compose_config()["services"].items():
+            if "build" in service:
+                with self.subTest(service=name):
+                    self.assertEqual(Path(service["build"]["context"]).resolve(), ROOT)
+                    self.assertFalse(service["build"].get("additional_contexts"))
+
     def test_all_image_labels_use_the_pinned_core_revision(self):
         pin = (ROOT / "core-revision.txt").read_text(encoding="utf-8").strip()
         services = compose_config()["services"]
@@ -65,7 +72,7 @@ class DeploymentContractTests(unittest.TestCase):
         source = (ROOT / "scripts/docker-release-gate.sh").read_text(encoding="utf-8")
         validator = source.split("python3 -c '\n", 1)[1].split("\n'\n", 1)[0]
         config = compose_config()
-        env = {**os.environ, "WORKSPACE_ROOT": str(ROOT), "CORE_ROOT": str(ROOT.parent / "centaeris")}
+        env = {**os.environ, "WORKSPACE_ROOT": str(ROOT)}
         def validate(value):
             return subprocess.run([os.sys.executable, "-c", validator],
                                   input=json.dumps(value), env=env, capture_output=True, text=True)
