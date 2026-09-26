@@ -263,7 +263,7 @@ dependencies = [
 [[package]]
 name = "centaeris-core"
 version = "0.1.0"
-source = "git+https://github.com/EchoTrigger/centaeris.git?rev=aba59b51a4f6aa1cc4589aa4475fc7c8a912ad4d#aba59b51a4f6aa1cc4589aa4475fc7c8a912ad4d"
+source = "git+https://github.com/EchoTrigger/centaeris.git?rev=36ff1148e0a8648212e68f975e5d009edb8667c7#36ff1148e0a8648212e68f975e5d009edb8667c7"
 dependencies = [
  "base64 0.22.1",
  "centaeris-model-catalog",
@@ -285,7 +285,7 @@ dependencies = [
 [[package]]
 name = "centaeris-mcp"
 version = "0.1.0"
-source = "git+https://github.com/EchoTrigger/centaeris.git?rev=aba59b51a4f6aa1cc4589aa4475fc7c8a912ad4d#aba59b51a4f6aa1cc4589aa4475fc7c8a912ad4d"
+source = "git+https://github.com/EchoTrigger/centaeris.git?rev=36ff1148e0a8648212e68f975e5d009edb8667c7#36ff1148e0a8648212e68f975e5d009edb8667c7"
 dependencies = [
  "centaeris-core",
  "futures",
@@ -299,7 +299,7 @@ dependencies = [
 [[package]]
 name = "centaeris-model-catalog"
 version = "0.1.0"
-source = "git+https://github.com/EchoTrigger/centaeris.git?rev=aba59b51a4f6aa1cc4589aa4475fc7c8a912ad4d#aba59b51a4f6aa1cc4589aa4475fc7c8a912ad4d"
+source = "git+https://github.com/EchoTrigger/centaeris.git?rev=36ff1148e0a8648212e68f975e5d009edb8667c7#36ff1148e0a8648212e68f975e5d009edb8667c7"
 dependencies = [
  "serde",
  "serde_json",
@@ -308,7 +308,7 @@ dependencies = [
 [[package]]
 name = "centaeris-runtime-sqlite"
 version = "0.1.0"
-source = "git+https://github.com/EchoTrigger/centaeris.git?rev=aba59b51a4f6aa1cc4589aa4475fc7c8a912ad4d#aba59b51a4f6aa1cc4589aa4475fc7c8a912ad4d"
+source = "git+https://github.com/EchoTrigger/centaeris.git?rev=36ff1148e0a8648212e68f975e5d009edb8667c7#36ff1148e0a8648212e68f975e5d009edb8667c7"
 dependencies = [
  "centaeris-core",
  "rusqlite",

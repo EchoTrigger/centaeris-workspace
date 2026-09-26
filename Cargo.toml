@@ -50,16 +50,16 @@ zstd = "=0.13.3"
 
 [workspace.dependencies.centaeris-core]
 git = "https://github.com/EchoTrigger/centaeris.git"
-rev = "aba59b51a4f6aa1cc4589aa4475fc7c8a912ad4d"
+rev = "36ff1148e0a8648212e68f975e5d009edb8667c7"
 
 [workspace.dependencies.centaeris-model-catalog]
 git = "https://github.com/EchoTrigger/centaeris.git"
-rev = "aba59b51a4f6aa1cc4589aa4475fc7c8a912ad4d"
+rev = "36ff1148e0a8648212e68f975e5d009edb8667c7"
 
 [workspace.dependencies.centaeris-mcp]
 git = "https://github.com/EchoTrigger/centaeris.git"
-rev = "aba59b51a4f6aa1cc4589aa4475fc7c8a912ad4d"
+rev = "36ff1148e0a8648212e68f975e5d009edb8667c7"
 
 [workspace.dependencies.centaeris-runtime-sqlite]
 git = "https://github.com/EchoTrigger/centaeris.git"
-rev = "aba59b51a4f6aa1cc4589aa4475fc7c8a912ad4d"
+rev = "36ff1148e0a8648212e68f975e5d009edb8667c7"
