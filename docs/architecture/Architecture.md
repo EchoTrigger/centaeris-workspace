@@ -244,6 +244,21 @@ the advanced model state; it never dispatches the recorded call again.
 Preparation attempts are reserved durably and share the configured five-attempt
 budget across restarts. Uncertain outcomes remain failures, not replay requests.
 
+The supported worker dispatches one step per claimed attempt. Recovery returns
+before the worker yields that lease; yield clears its owner, and the next claim
+gets a new owner even on the same worker. A lost step response schedules a job
+retry rather than resending the step with the old owner. Thus replacement in
+this flow crosses a lease boundary while retaining the Run and frozen workspace
+generation. Session workspace publication checks that lease before and after
+upload, and Session terminal/checkpoint appends check it inside their transaction.
+Execution workspace staging alone does not publish a checkpoint or advance the
+Session workspace.
+
+This guarantee depends on the supported dispatch flow. The internal step endpoint
+does not independently enforce one invocation per lease. A custom caller,
+automatically retrying proxy, or future recovery within one lease requires a new
+admission/fencing review; the current contract does not certify those flows.
+
 ## Hosted execution capacity
 
 Hosted admission is owned by the API; Workspace is its tenant boundary. A
@@ -333,6 +348,16 @@ or treat their service authentication as proof of resource access. Snapshot
 commit still checks the locked lease and generation before and after object
 storage I/O. File-mutation event persistence and Memory coordination remain
 separate responsibilities.
+
+Workspace snapshot uploads use bounded streaming into a request-owned temporary
+file on the storage filesystem. Only fully validated, flushed bytes are linked
+atomically to their content-addressed key, without overwriting an existing file.
+Concurrent identical uploads verify and reuse that file. Failed upload cleanup
+removes only its temporary file, never the shared key: an expired uploader must
+not delete a replacement owner's published snapshot. This uses the same local
+filesystem/atomic-link requirement as immutable evidence storage. A process crash
+can leave an unreferenced temporary or staged object; it does not grant that
+object a committed Session or recovery-checkpoint reference.
 
 Input batch resolvers live for one request. They reuse only a verified snapshot
 of the signed authorization facts, invalidating it when payload, digest,

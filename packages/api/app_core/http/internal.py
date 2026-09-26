@@ -1,10 +1,11 @@
 import hashlib
 import json
 import logging
+import os
+import tempfile
 
 from asgiref.sync import sync_to_async
 from django.conf import settings
-from django.core.files import File
 from django.core.files.storage import default_storage
 from django.db import connection, transaction
 from django.db.models import Q
@@ -19,7 +20,7 @@ from app_core.artifact_publish import (
     publish_artifact as publish_artifact_operation,
     published_artifact,
 )
-from app_core.assets import DeferredInputResolutionError, delete_stored_object
+from app_core.assets import DeferredInputResolutionError, _sync_directory
 from app_core.deferred_input import (
     DeferredInputBindingError,
     resolve_deferred_input as resolve_deferred_input_operation,
@@ -289,36 +290,52 @@ def _store_workspace_snapshot(request, candidate: dict, storage_key: str) -> Non
         return
     reader = _WorkspaceSnapshotReader(request, candidate)
     if default_storage.exists(storage_key):
-        digest = hashlib.sha256()
-        size = 0
-        with default_storage.open(storage_key, "rb") as source:
-            while chunk := source.read(64 * 1024):
-                size += len(chunk)
-                if size > candidate["snapshotSizeBytes"]:
-                    raise SessionWorkspaceError("session_workspace_snapshot_invalid")
-                digest.update(chunk)
-        if (
-            size != candidate["snapshotSizeBytes"]
-            or f"sha256:{digest.hexdigest()}" != candidate["snapshotSha256"]
-        ):
-            raise SessionWorkspaceError("session_workspace_snapshot_invalid")
+        _verify_workspace_snapshot(candidate, storage_key)
         while reader.read(64 * 1024):
             pass
         reader.require_complete()
         return
+
+    # Match the immutable-file publication used by assets: a shared hash key
+    # must never expose partial input or be removed by another upload's cleanup.
+    # Storage is local; unsupported atomic linking fails without a copy fallback.
+    final_path = default_storage.path(storage_key)
+    parent = os.path.dirname(final_path)
+    os.makedirs(parent, exist_ok=True)
+    descriptor, temporary_path = tempfile.mkstemp(
+        dir=parent, prefix=".centaeris-immutable-", suffix=".tmp"
+    )
     try:
-        stored_key = default_storage.save(
-            storage_key,
-            File(reader, name="workspace.snapshot"),
-        )
-        if stored_key != storage_key:
-            delete_stored_object(stored_key)
-            raise SessionWorkspaceError("session_workspace_storage_key_conflict")
-        reader.require_complete()
-    except Exception:
-        if default_storage.exists(storage_key):
-            delete_stored_object(storage_key)
-        raise
+        with os.fdopen(descriptor, "wb") as temporary:
+            while chunk := reader.read(64 * 1024):
+                temporary.write(chunk)
+            reader.require_complete()
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        try:
+            os.link(temporary_path, final_path)
+        except FileExistsError:
+            _verify_workspace_snapshot(candidate, storage_key)
+        else:
+            _sync_directory(parent)
+    finally:
+        os.unlink(temporary_path)
+
+
+def _verify_workspace_snapshot(candidate: dict, storage_key: str) -> None:
+    digest = hashlib.sha256()
+    size = 0
+    with default_storage.open(storage_key, "rb") as source:
+        while chunk := source.read(64 * 1024):
+            size += len(chunk)
+            if size > candidate["snapshotSizeBytes"]:
+                raise SessionWorkspaceError("session_workspace_snapshot_invalid")
+            digest.update(chunk)
+    if (
+        size != candidate["snapshotSizeBytes"]
+        or f"sha256:{digest.hexdigest()}" != candidate["snapshotSha256"]
+    ):
+        raise SessionWorkspaceError("session_workspace_snapshot_invalid")
 
 
 def _workspace_snapshot_manifest(manifest_bytes: bytes, candidate: dict) -> list[dict]:

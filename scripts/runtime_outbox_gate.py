@@ -44,6 +44,7 @@ def main():
         'postgres_same_worker_reclaim_fences_old_writes_and_result_transaction',
         'postgres_worker_cancel_checks_claim_but_user_cancel_targets_job',
         'postgres_hosted_worker_reclaim_changes_claim_identity',
+        'postgres_runtime_job_yield_requeues_same_job_without_queued_outbox_and_fences_old_owner',
         'postgres_subagent_projection_uses_core_durable_job_binding',
         'hosted_execution_capacity_is_shared_across_replicas_and_released_on_yield',
         'postgres_runtime_store_validates_waiter_owner_index_on_reopen',

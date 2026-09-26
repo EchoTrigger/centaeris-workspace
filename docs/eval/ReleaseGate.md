@@ -126,6 +126,18 @@ material-link failures.
 
 Gates must not read production data, real Plugin content, or developer secrets.
 
+Execution replacement acceptance protects the supported worker's single-step
+dispatch: recovery yields the current lease before another claim, and an unknown
+step response does not resend that step under the same owner. The disposable
+PostgreSQL gate includes yield/reclaim identity and fenced terminal appends.
+API tests use independent PostgreSQL connections and barriers during snapshot
+upload to cover lease expiry/replacement, changed baselines, terminal Runs, and
+idempotent publication. Real filesystem tests must preserve a new owner's
+published snapshot when an old upload resumes, and permit valid retries after
+invalid or interrupted input without exposing partial canonical files.
+Staging an execution snapshot alone is not checkpoint publication. These checks
+do not certify custom same-lease step callers or a proxy that retries steps.
+
 Execution-capacity acceptance uses a fresh isolated database with the current
 initial schema. Across independent API/Runtime/worker replicas, verify initial
 queue limits (128 global, 32 per Workspace) and execution leases (8 global, 4 per
