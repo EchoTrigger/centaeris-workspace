@@ -1139,6 +1139,36 @@ class AgentRun(models.Model):
         return super().save(*args, **kwargs)
 
 
+class HostedOperationReceipt(models.Model):
+    """Minimal accepted command identity, retained even when its resources disappear."""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    workspace = models.ForeignKey(Workspace, on_delete=models.PROTECT)
+    command = models.CharField(max_length=32)
+    operationId = models.CharField(max_length=128)
+    requestDigest = models.CharField(max_length=64)
+    # Deliberately not cascading FKs: resource erasure must not enable resubmission.
+    sessionId = models.CharField(max_length=64)
+    agentRunId = models.CharField(max_length=64, null=True)
+    turnId = models.CharField(max_length=64, null=True)
+    acceptedAt = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "workspace", "command", "operationId"],
+                name="hosted_operation_scope_unique",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(command="createSession", agentRunId__isnull=True, turnId__isnull=True)
+                    | models.Q(command="submitMessage", agentRunId__isnull=False, turnId__isnull=False)
+                ),
+                name="hosted_operation_result_valid",
+            ),
+        ]
+
+
 class SessionEvent(models.Model):
     eventId = models.CharField(primary_key=True, max_length=160)
     workspace = models.ForeignKey(Workspace, on_delete=models.PROTECT)

@@ -32,7 +32,7 @@ class PrivateAgentTests(TestCase):
                 with self.subTest(session_id=session_id):
                     response = self.client.post(
                         f"/api/workspaces/{self.workspace.id}/sessions/{session_id}/messages",
-                        data=json.dumps({"text": "hello", "modelConfigRef": model.id}),
+                        data=json.dumps({"operationId": "test-operation-33", "text": "hello", "modelConfigRef": model.id}),
                         content_type="application/json",
                     )
                     self.assertEqual(response.status_code, 404)
@@ -40,7 +40,7 @@ class PrivateAgentTests(TestCase):
             profile.assert_not_called()
             response = self.client.post(
                 f"/api/workspaces/{self.workspace.id}/sessions/{active.id}/messages",
-                data=json.dumps({"text": "hello", "modelConfigRef": model.id}),
+                data=json.dumps({"operationId": "test-operation-41", "text": "hello", "modelConfigRef": model.id}),
                 content_type="application/json",
             )
             self.assertEqual(response.status_code, 503)
@@ -193,22 +193,22 @@ class PrivateAgentTests(TestCase):
 
         created = self.client.post(
             f"/api/workspaces/{self.workspace.id}/sessions",
-            data=json.dumps({"agentId": member_agent.id}),
+            data=json.dumps({"operationId": "test-operation-194", "agentId": member_agent.id}),
             content_type="application/json",
         )
         denied = self.client.post(
             f"/api/workspaces/{self.workspace.id}/sessions",
-            data=json.dumps({"agentId": owner_agent.id}),
+            data=json.dumps({"operationId": "test-operation-199", "agentId": owner_agent.id}),
             content_type="application/json",
         )
         unknown = self.client.post(
             f"/api/workspaces/{self.workspace.id}/sessions",
-            data=json.dumps({"agentId": "banana"}),
+            data=json.dumps({"operationId": "test-operation-204", "agentId": "banana"}),
             content_type="application/json",
         )
 
         self.assertEqual(created.status_code, 201, created.content)
-        self.assertEqual(created.json()["session"]["agentId"], member_agent.id)
+        self.assertEqual(Session.objects.get(id=created.json()["sessionId"]).agent_id, member_agent.id)
         self.assertEqual(denied.status_code, 404)
         self.assertEqual(denied.json(), {"error": "agent_not_found"})
         self.assertEqual(unknown.status_code, 404)
@@ -259,7 +259,7 @@ class PrivateAgentTests(TestCase):
         self.assertEqual(
             self.client.post(
                 f"/api/workspaces/{self.workspace.id}/sessions/{deleted_session.id}/messages",
-                data=json.dumps({"text": "must not run", "modelConfigRef": model.id}),
+                data=json.dumps({"operationId": "test-operation-260", "text": "must not run", "modelConfigRef": model.id}),
                 content_type="application/json",
             ).status_code,
             404,
@@ -308,7 +308,7 @@ class PrivateAgentTests(TestCase):
         )
         message = self.client.post(
             f"/api/workspaces/{self.workspace.id}/sessions/{active_session.id}/messages",
-            data=json.dumps({"text": "continue", "modelConfigRef": model.id}),
+            data=json.dumps({"operationId": "test-operation-309", "text": "continue", "modelConfigRef": model.id}),
             content_type="application/json",
         )
         self.assertEqual(message.status_code, 410)

@@ -1,6 +1,7 @@
 // k6 场景共享助手：手动 cookie 管理（Secure cookie 在 http 上需显式回发）、
 // 登录、provider/model 幂等创建、发消息、轮询终态。
 import http from 'k6/http';
+import crypto from 'k6/crypto';
 import { sleep } from 'k6';
 
 export const API = __ENV.API_BASE || 'http://localhost:18000';
@@ -103,9 +104,12 @@ export function firstWorkspaceId(store, csrf) {
 
 // 发消息（sessionId=new 即创建会话并启动 run），返回 {sessionId, agentRunId}
 export function startRun(store, csrf, workspaceId, agentId, modelId, text) {
+  const operationId = Array.from(new Uint8Array(crypto.randomBytes(16)),
+    (byte) => byte.toString(16).padStart(2, '0')).join('');
   const res = request('POST',
     `/api/workspaces/${workspaceId}/sessions/new/messages`, store,
-    { agentId, text: text || 'Perf load.', attachmentRefs: [], modelConfigRef: modelId },
+    { operationId, agentId,
+      text: text || 'Perf load.', attachmentRefs: [], modelConfigRef: modelId },
     csrf, { type: 'post_message' });
   if (res.status !== 202) throw new Error(`message failed: ${res.status} ${res.body}`);
   const body = res.json();

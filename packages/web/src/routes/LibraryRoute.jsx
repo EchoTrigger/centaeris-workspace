@@ -9,6 +9,7 @@ import {
   Search, Trash2, Upload, X,
 } from "lucide-react";
 import { apiJson as api, apiUrl, jsonOptions } from "../api";
+import { OperationClient } from "../chat/operationReceipts";
 import { MarkdownContent } from "../chat/MarkdownContent";
 import { useModalDialog } from "../components/useModalDialog";
 import { AgentMark } from "../shell/AgentMark";
@@ -61,6 +62,16 @@ function LibraryPageContent() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { workspace, agents } = useRouteLoaderData("workspace");
+  const { user } = useRouteLoaderData("authenticated");
+  const operations = useMemo(() => new OperationClient({ userId: user.id, workspaceId: workspace.id, command: "createSession" }), [user.id, workspace.id]);
+  const operationScopeRef = useRef({ operations, active: true });
+  if (operationScopeRef.current.operations !== operations) operationScopeRef.current = { operations, active: true };
+  useEffect(() => {
+    const scope = operationScopeRef.current;
+    if (scope.operations !== operations) return undefined;
+    scope.active = true;
+    return () => { scope.active = false; };
+  }, [operations]);
   const base = `/w/${encodeURIComponent(workspace.id)}`;
   const [searchParams] = useSearchParams();
   const fileInputRef = useRef(null);
@@ -372,19 +383,60 @@ function LibraryPageContent() {
     setDialog("");
     if (!selectedItems.length || selectedItems.some(isFolder) || !workspace || working) return;
     setWorking(true);
+    const scope = operationScopeRef.current;
+    const isCurrent = () => scope.active && operationScopeRef.current === scope;
     try {
-      const created = await api(`/api/workspaces/${workspace.id}/sessions`, jsonOptions("POST", {
-        agentId,
-      }));
-      await Promise.all(selectedItems.map((item) => api(`/api/sessions/${created.session.id}/assets`, jsonOptions("POST", {
-        assetKind: "userLibraryObject", assetId: item.id,
-      }))));
-      navigate(`${base}/agents/${encodeURIComponent(created.session.agentId)}?sessionId=${encodeURIComponent(created.session.id)}`);
+      const accepted = await operations.submit(`/api/workspaces/${workspace.id}/sessions`, { agentId }, [], selectedItems.map((item) => item.id).sort());
+      await finishCreatedChat(accepted, isCurrent);
     } catch (requestError) {
-      setError(t("libraryRoute.unableToStartChatValue", { value1: requestError.message }));
+      if (!isCurrent()) return;
+      setError(requestError?.message === "operation_pending_input_changed" ? t("operations.changedInput") : t("libraryRoute.unableToStartChatValue", { value1: requestError.message }));
     } finally {
-      setWorking(false);
+      if (isCurrent()) setWorking(false);
     }
+  }
+
+  async function finishCreatedChat(accepted, isCurrent, linkAssets = true) {
+    if (!isCurrent()) return;
+    const pending = operations.pending();
+    if (pending?.operationId !== accepted.operationId) throw new Error("operation_identity_changed");
+    const { session } = await api(`/api/sessions/${encodeURIComponent(accepted.sessionId)}`);
+    if (!isCurrent()) return;
+    if (session?.id !== accepted.sessionId || typeof session.agentId !== "string") throw new Error("session_response_invalid");
+    if (linkAssets) await Promise.all(pending.assetIds.map((assetId) => api(`/api/sessions/${accepted.sessionId}/assets`, jsonOptions("POST", {
+      assetKind: "userLibraryObject", assetId,
+    }))));
+    if (!isCurrent()) return;
+    operations.complete(accepted.operationId);
+    navigate(`${base}/agents/${encodeURIComponent(session.agentId)}?sessionId=${encodeURIComponent(session.id)}`);
+  }
+
+  async function checkPendingChat() {
+    const operationId = operations.pending()?.operationId;
+    const scope = operationScopeRef.current;
+    const isCurrent = () => scope.active && operationScopeRef.current === scope;
+    setWorking(true);
+    setError("");
+    try { await operations.recover(); }
+    catch (requestError) {
+      if (!isCurrent()) return;
+      if (requestError?.status === 410 && requestError.message === "operation_resource_unavailable") {
+        if (operationId) operations.complete(operationId);
+        setError(t("operations.unavailable"));
+      } else setError(t(requestError?.message === "operation_not_found" ? "operations.notFound" : "operations.checkFailed"));
+    } finally { if (isCurrent()) setWorking(false); }
+  }
+
+  async function openPendingChat(linkAssets = true) {
+    const scope = operationScopeRef.current;
+    const isCurrent = () => scope.active && operationScopeRef.current === scope;
+    setWorking(true);
+    setError("");
+    try {
+      const accepted = await operations.recover();
+      if (accepted) await finishCreatedChat(accepted, isCurrent, linkAssets);
+    } catch { if (isCurrent()) setError(t("operations.acceptedReadFailed")); }
+    finally { if (isCurrent()) setWorking(false); }
   }
 
   function startChat() {
@@ -472,6 +524,14 @@ function LibraryPageContent() {
           </div>
 
           {libraryView === "materials" ? <>
+            {operations.pending() ? <div className="transcriptStreamStatus" role="status">
+              {t(operations.pending().receipt ? "operations.accepted" : "operations.pending")}
+              <button type="button" disabled={working} onClick={() => void checkPendingChat()}>{t("operations.check")}</button>
+              {operations.pending().receipt ? <>
+                <button type="button" disabled={working} onClick={() => void openPendingChat()}>{t("operations.finishLinks")}</button>
+                <button type="button" disabled={working} onClick={() => void openPendingChat(false)}>{t("operations.skipLinks")}</button>
+              </> : null}
+            </div> : null}
             {folderPath.length > 0 && <nav className="libraryBreadcrumb" aria-label={t("libraryRoute.currentFolder")}><button type="button" onClick={() => navigate(`${base}/library`)}>{t("libraryObjectRoute.library")}</button>{folderPath.map((folder) => <span key={folder.id}><ChevronRight aria-hidden="true" /><button type="button" onClick={() => navigate(libraryUrl(folder.id))}>{folder.displayName}</button></span>)}</nav>}
             {error && <div className="errorBanner libraryError" role="alert">{error}<button type="button" onClick={loadLibrary}>{t("libraryObjectRoute.retry")}</button></div>}
             <div className={`libraryList ${selectedItems.length ? "hasSelection" : ""}`} role="table" aria-label={t("libraryRoute.personalLibraryFiles")}>

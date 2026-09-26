@@ -2,6 +2,7 @@ import { useTranslation } from "../i18n";
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Link, matchPath, useNavigate, useRouteLoaderData } from "react-router";
 import { apiResponse } from "../api";
+import { OperationClient, acceptedConversationReviewLink, consumeReviewedOperation, loadAcceptedConversation } from "../chat/operationReceipts";
 import { WorkspaceContextPanel } from "../components/WorkspaceContextPanel";
 import { DocumentPreview } from "../components/DocumentPreview";
 import { officeFileType } from "../chat/officeFormats.mjs";
@@ -96,6 +97,9 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   const { t } = useTranslation();
   const { user } = useRouteLoaderData("authenticated");
   const { workspace, agents } = useRouteLoaderData("workspace");
+  const operations = useMemo(() => new OperationClient({ userId: user.id, workspaceId: workspace.id, command: "submitMessage" }), [user.id, workspace.id]);
+  const recoveredOperation = operations.pending()?.receipt || null;
+  const [operationReviewLink, setOperationReviewLink] = useState(null);
   const navigate = useNavigate();
   const searchParams = new URLSearchParams(location.search);
   const requestedSessionId = searchParams.get("sessionId") || "";
@@ -405,6 +409,8 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         setPendingAttachmentIds([]);
         setPendingUploadFiles([]);
         updateActiveTranscriptRun(activeEnvelope.agentRun);
+        const pendingOperation = operations.pending();
+        if (pendingOperation?.receipt?.sessionId === sessionId) operations.complete(pendingOperation.operationId);
         if (activeEnvelope.agentRun) {
           connectLoadedAgentRun(activeEnvelope.agentRun.agentRunId, workspace.id, sessionId, controller, {
             cursor: activeEnvelope.agentRun.streamCursor,
@@ -422,7 +428,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       controller.abort();
       chatControllerRef.current?.dispose();
     };
-  }, [sessionId, workspace?.id, clearConversationProjection, stopActiveStream, transcriptStore, transcriptTransport, toolOperations, updateActiveTranscriptRun]);
+  }, [sessionId, workspace?.id, operations, clearConversationProjection, stopActiveStream, transcriptStore, transcriptTransport, toolOperations, updateActiveTranscriptRun]);
 
   function showStreamError(errorValue) {
     if (errorValue?.name === "AbortError") return;
@@ -708,7 +714,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     }
   }
 
-  async function sendMessage(event) {
+  async function sendMessage(event, replaceUnconfirmedInput = false) {
     event?.preventDefault();
     const text = draft.trim();
     if (!workspace || !text || sending || loadingHistory) return;
@@ -721,7 +727,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         || pathname.startsWith(`${workspaceBase}/settings/`);
       return locationOwnsRequest && requestScope.active && requestScopeRef.current === requestScope;
     };
-    if (hasActiveAgentRun) {
+    if (hasActiveAgentRun && !operations.pending()) {
       if (!sessionId || !activeAgentRunId) return;
       if (pendingAttachmentIds.length || pendingUploadFiles.length) {
         setError(t("appRoute.supplementalInputDoesNotSupportAttachmentsYetRemoveThe"));
@@ -771,41 +777,25 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     setWorkTime({ startedAtMs, sessionId: targetSessionId });
     setPendingUserMessage({ text, baselineUserBlocks, startedAtMs });
     setDraft("");
+    let accepted = false;
     try {
-      let body;
-      if (targetSessionId === "new" && uploadFiles.length) {
-        body = new FormData();
-        body.append("text", text);
-        body.append("modelConfigRef", modelId);
-        body.append("agentId", activeAgent.id);
-        if (requestedProjectId) body.append("projectId", requestedProjectId);
-        if (thinkingMode) body.append("thinkingMode", thinkingMode);
-        uploadFiles.forEach((file) => body.append("files", file));
-      } else {
-        body = JSON.stringify({
+      const messageData = await operations.submit(`/api/workspaces/${workspace.id}/sessions/${targetSessionId}/messages`, {
           text,
           agentId: activeAgent.id,
           ...(targetSessionId === "new" && requestedProjectId ? { projectId: requestedProjectId } : {}),
           modelConfigRef: modelId,
           ...(thinkingMode ? { thinkingMode } : {}),
-          attachmentRefs,
-        });
-      }
-      const messageResponse = await apiResponse(`/api/workspaces/${workspace.id}/sessions/${targetSessionId}/messages`, {
-        method: "POST",
-        body,
-      });
-      const messageData = await messageResponse.json();
+          ...(uploadFiles.length ? {} : { attachmentRefs }),
+      }, uploadFiles, [], replaceUnconfirmedInput);
+      accepted = true;
       // Navigation invalidates only this UI result, never the server's accepted work.
       if (!isCurrentRequest()) return;
+      const { session: acceptedSession } = await (await apiResponse(`/api/sessions/${encodeURIComponent(messageData.sessionId)}`)).json();
+      if (!isCurrentRequest()) return;
       if (
-        typeof messageData?.agentRunId !== "string"
-        || !messageData.agentRunId
-        || typeof messageData.turnId !== "string"
-        || !messageData.turnId
-        || messageData.turnId === messageData.agentRunId
-        || messageData.session?.agentId !== activeAgent.id
-        || (targetSessionId === "new" && (messageData.session?.projectId || "") !== requestedProjectId)
+        acceptedSession?.id !== messageData.sessionId
+        || acceptedSession.agentId !== activeAgent.id
+        || (targetSessionId === "new" && (acceptedSession.projectId || "") !== requestedProjectId)
       ) {
         throw new Error("AgentRun acceptance identity is invalid");
       }
@@ -815,8 +805,8 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       setSessions((items) =>
         sortSessions(
           sessionId
-            ? items.map((session) => (session.id === resolvedSessionId ? messageData.session : session))
-            : [messageData.session, ...items],
+            ? items.map((session) => (session.id === resolvedSessionId ? acceptedSession : session))
+            : [acceptedSession, ...items.filter((session) => session.id !== resolvedSessionId)],
         ),
       );
       if (!sessionId) {
@@ -827,39 +817,28 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         setSending(false);
         onSessionAccepted(`/w/${encodeURIComponent(workspace.id)}/agents/${encodeURIComponent(activeAgent.id)}?sessionId=${encodeURIComponent(resolvedSessionId)}`);
       } else {
+        stopActiveStream();
         const controller = new AbortController();
         streamAbortRef.current = controller;
-        const currentTranscript = transcriptStore.getListSnapshot();
-        if (!currentTranscript.projectionVersion || !currentTranscript.projectionGeneration) {
-          throw new Error("transcript view identity is missing after AgentRun acceptance");
-        }
-        const activeEnvelope = await transcriptTransport.loadActiveAgentRun({
-          sessionId: resolvedSessionId,
-          projectionVersion: currentTranscript.projectionVersion,
-          projectionGeneration: currentTranscript.projectionGeneration,
-          sourceHighWater: currentTranscript.appliedSourceHighWater,
-        }, controller.signal);
-        if (!activeEnvelope.agentRun || activeEnvelope.agentRun.agentRunId !== messageData.agentRunId) {
-          throw new Error("accepted AgentRun is not active");
-        }
-        updateActiveTranscriptRun(activeEnvelope.agentRun);
-        connectAgentRun(messageData.agentRunId, workspace.id, resolvedSessionId, controller, {
-          cursor: activeEnvelope.agentRun.streamCursor,
-          viewEpoch: currentTranscript.viewEpoch,
-          identity: {
-            sessionId: resolvedSessionId,
-            projectionVersion: currentTranscript.projectionVersion,
-            projectionGeneration: currentTranscript.projectionGeneration,
-          },
-        }).catch((streamError) => {
-          handleAgentRunStreamFailure(streamError, messageData.agentRunId);
+        const resume = await loadAcceptedConversation(resolvedSessionId, { transport: transcriptTransport, store: transcriptStore, setActive: updateActiveTranscriptRun, isCurrent: isCurrentRequest }, controller.signal);
+        operations.complete(messageData.operationId);
+        if (!resume || resume.agentRunId !== messageData.agentRunId) setPendingUserMessage(null);
+        if (resume) connectAgentRun(resume.agentRunId, workspace.id, resolvedSessionId, controller, resume).catch((streamError) => {
+          handleAgentRunStreamFailure(streamError, resume.agentRunId);
         });
       }
     } catch (errorValue) {
       if (!isCurrentRequest()) return;
+      if (errorValue?.message === "operation_result_stale") return;
       setPendingUserMessage(null);
-      setDraft(text);
-      if (errorValue?.message === "model_not_found") {
+      if (!accepted) setDraft(text);
+      if (accepted) {
+        setError(t("operations.acceptedReadFailed"));
+      } else if (errorValue?.message === "operation_pending_input_changed") {
+        setError(t("operations.changedInput"));
+      } else if (errorValue?.message === "operation_input_acceptance_unconfirmed") {
+        setError(t("operations.inputUnconfirmed"));
+      } else if (errorValue?.message === "model_not_found") {
         try {
           const response = await apiResponse("/api/models");
           const data = await response.json();
@@ -876,6 +855,70 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     } finally {
       if (isCurrentRequest()) setSending(false);
     }
+  }
+
+  async function checkPendingOperation() {
+    const operationId = operations.pending()?.operationId;
+    const scope = requestScopeRef.current;
+    const isCurrent = () => scope.active && requestScopeRef.current === scope;
+    setSending(true);
+    setError("");
+    try {
+      const accepted = await operations.recover();
+      if (accepted && operations.pending()?.inputChanged) {
+        const { session } = await (await apiResponse(`/api/sessions/${encodeURIComponent(accepted.sessionId)}`)).json();
+        if (!isCurrent()) return;
+        if (session?.id !== accepted.sessionId || typeof session.agentId !== "string" || !session.agentId) throw new Error("session_response_invalid");
+        setOperationReviewLink({ operationId: accepted.operationId, ...acceptedConversationReviewLink(workspace.id, session) });
+      }
+    } catch (requestError) {
+      if (!isCurrent()) return;
+      if (requestError?.message === "operation_resource_unavailable" && requestError.status === 410) {
+        if (operationId) operations.complete(operationId);
+        setError(t("operations.unavailable"));
+      } else setError(t(requestError?.message === "operation_not_found" ? "operations.notFound" : "operations.checkFailed"));
+    } finally { if (isCurrent()) setSending(false); }
+  }
+
+  async function consumeOperationReview(operationId) {
+    const scope = requestScopeRef.current;
+    const isCurrent = () => scope.active && requestScopeRef.current === scope;
+    setSending(true);
+    try {
+      await consumeReviewedOperation(operations, operationId, async (id) => (await (await apiResponse(`/api/sessions/${encodeURIComponent(id)}`)).json()).session);
+      if (isCurrent()) setError("");
+    } catch { if (isCurrent()) setError(t("operations.checkFailed")); }
+    finally { if (isCurrent()) setSending(false); }
+  }
+
+  async function openRecoveredOperation() {
+    if (!recoveredOperation) return;
+    const scope = requestScopeRef.current;
+    const isCurrent = () => scope.active && requestScopeRef.current === scope;
+    setSending(true);
+    try {
+      const accepted = await operations.recover();
+      if (!accepted || !isCurrent()) return;
+      const { session } = await (await apiResponse(`/api/sessions/${encodeURIComponent(accepted.sessionId)}`)).json();
+      if (!isCurrent()) return;
+      if (session?.id !== recoveredOperation.sessionId || typeof session.agentId !== "string") throw new Error("session_response_invalid");
+      // Reading the accepted Session is a separate step from command admission.
+      if (session.id === activeSessionIdRef.current) {
+        stopActiveStream();
+        const controller = new AbortController();
+        streamAbortRef.current = controller;
+        const resume = await loadAcceptedConversation(session.id, { transport: transcriptTransport, store: transcriptStore, setActive: updateActiveTranscriptRun, isCurrent }, controller.signal);
+        if (resume) connectAgentRun(resume.agentRunId, workspace.id, session.id, controller, resume).catch((failure) => handleAgentRunStreamFailure(failure, resume.agentRunId));
+        operations.complete(recoveredOperation.operationId);
+      }
+      setDraft("");
+      setPendingUserMessage(null);
+      setPendingAttachmentIds([]);
+      setPendingUploadFiles([]);
+      setError("");
+      navigate(`${workspaceBase}/agents/${encodeURIComponent(session.agentId)}?sessionId=${encodeURIComponent(session.id)}`);
+    } catch { if (isCurrent()) setError(t("operations.acceptedReadFailed")); }
+    finally { if (isCurrent()) setSending(false); }
   }
 
   async function loadOlderHistory() {
@@ -1344,6 +1387,19 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
               ) : null}
             </div>
           ) : null}
+          {operations.pending() ? <div className="transcriptStreamStatus" role="status">
+            {t(recoveredOperation ? "operations.accepted" : "operations.pending")}
+            <button type="button" disabled={sending} onClick={() => void checkPendingOperation()}>{t("operations.check")}</button>
+            {recoveredOperation && !operations.pending().inputChanged ? <button type="button" disabled={sending} onClick={() => void openRecoveredOperation()}>{t("operations.open")}</button> : null}
+            {recoveredOperation && operations.pending().inputChanged && operationReviewLink?.operationId === recoveredOperation.operationId ? <a
+              href={operationReviewLink.href} target={operationReviewLink.target} rel={operationReviewLink.rel}
+              onClick={() => void consumeOperationReview(recoveredOperation.operationId)}
+            >{t("operations.reviewSeparate")}</a> : null}
+            {!recoveredOperation ? <>
+              <span>{t("operations.correctHint")}</span>
+              <button type="button" disabled={sending || loadingHistory || !draft.trim() || !modelId} onClick={() => void sendMessage(null, true)}>{t("operations.correct")}</button>
+            </> : null}
+          </div> : null}
           <WorkspaceComposer
             formRef={composerRef}
             fileInputRef={fileInputRef}

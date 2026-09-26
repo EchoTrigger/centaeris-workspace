@@ -19,6 +19,52 @@ the canonical `sandbox_unavailable` category for receipt recovery. Old results
 are not replayed or rewritten. Container selection and authorization checks are
 unchanged; nono is not introduced into hosted execution.
 
+## Hosted command acceptance
+
+`POST /api/workspaces/{workspaceId}/sessions` (`createSession`) and
+`POST /api/workspaces/{workspaceId}/sessions/{sessionId}/messages`
+(`submitMessage`, including `sessionId=new`) require `operationId` in JSON or
+the supported multipart form. It is 1–128 ASCII letters, digits, or `- _ . :`.
+Unknown fields and missing operation identities fail validation. A caller creates
+one identity for one intended command and retains it across uncertain responses.
+
+An accepted create returns HTTP 201; an accepted submission returns HTTP 202.
+Both return exactly `operationId`, `command`, `status: "accepted"`, `sessionId`,
+`agentRunId`, and `turnId`. The last two fields are null for `createSession`.
+The receipt records acceptance, not the current Run state or a Session snapshot.
+Read the Session and Run separately; a replay after completion still returns the
+original accepted identities.
+
+`GET /api/workspaces/{workspaceId}/operations/{command}/{operationId}` retrieves
+the same receipt with HTTP 200 and `Cache-Control: no-store` without starting execution.
+Unknown query fields are rejected. A missing receipt
+returns HTTP 404 `operation_not_found`. Loss of access also returns 404; neither
+response authorizes a client to replace an uncertain operation identity.
+
+Receipt identity is scoped by authenticated user, Workspace, command, and
+`operationId`. The server hashes the validated command input, including its
+target Session and upload content identities. Model defaults and server-generated
+attachment IDs are not request identity. A matching replay returns the original
+receipt without repeating current model selection, queue admission, or lifecycle
+scheduling. Changed input under the same identity returns HTTP 409
+`operation_conflict`, after current resource authorization. An unavailable
+original resource returns HTTP 410 `operation_resource_unavailable`; retrying
+does not recreate deleted resources.
+
+Business rows and the receipt commit in one transaction. Failed admission does
+not consume the identity. A scheduling failure after acceptance is reconciled
+against the same Run. This is command acceptance deduplication, not an
+exactly-once guarantee for model calls or external tool effects. Existing
+commands without operation identities are not reconstructed from message text.
+
+The browser retains pending identity and input digests in tab-scoped storage,
+without persisting prompts or file bytes. Uncertain retries keep the same ID,
+including when a later retry is rejected. Explicit correction of an unresolved
+message also keeps that ID: if the original input wins the race, the correction
+conflicts and the original receipt is recovered. A receipt lookup alone does
+not prove which input version was accepted; the user must inspect that Session.
+Receipt recovery does not cancel execution or repeat external tool effects.
+
 ## Model input images
 
 Internal model requests consume Core's `prepared_prompt.v1`.

@@ -339,6 +339,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
                 f"/api/workspaces/{workspace.id}/sessions/new/messages",
                 data=json.dumps(
                     {
+                        "operationId": "test-operation-338",
                         "text": "hello",
                         "agentId": agent.id,
                         "modelConfigRef": model.id,
@@ -400,6 +401,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
             messageResponse = self.client.post(
                 f"/api/workspaces/{workspace.id}/sessions/new/messages",
                 data=json.dumps({
+                    "operationId": "test-operation-400",
                     "text": "帮我看牙科 SOP",
                     "agentId": "centaeris",
                     "modelConfigRef": model.id,
@@ -412,7 +414,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
         agentRunId = message["agentRunId"]
         self.assertEqual(message["turnId"], AgentRun.objects.get(id=agentRunId).turn_id)
         self.assertNotEqual(message["turnId"], agentRunId)
-        self.assertEqual(message["session"]["id"], sessionId)
+        self.assertEqual(message["status"], "accepted")
         self.assertNotIn("authorizationRef", message)
         self.assertEqual(
             list(
@@ -649,7 +651,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
 
         missing = self.client.post(
             f"/api/workspaces/{workspace.id}/sessions/new/messages",
-            data=json.dumps({"text": "hello", "modelConfigRef": model.id}),
+            data=json.dumps({"operationId": "test-operation-650", "text": "hello", "modelConfigRef": model.id}),
             content_type="application/json",
         )
         self.assertEqual(missing.status_code, 400, missing.content)
@@ -659,6 +661,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
             f"/api/workspaces/{workspace.id}/sessions/{session.id}/messages",
             data=json.dumps(
                 {
+                    "operationId": "test-operation-658",
                     "text": "hello",
                     "agentId": "research-agent",
                     "modelConfigRef": model.id,
@@ -686,7 +689,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
         ):
             response = self.client.post(
                 f"/api/workspaces/{workspace.id}/sessions/{session.id}/messages",
-                data=json.dumps({"text": "hello", "modelConfigRef": model.id}),
+                data=json.dumps({"operationId": "test-operation-687", "text": "hello", "modelConfigRef": model.id}),
                 content_type="application/json",
             )
 
@@ -1859,7 +1862,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
         )
         session = create_session(workspace=workspace, owner=user)
         self.client.force_login(user)
-        payload = json.dumps({"text": "hello", "modelConfigRef": model.id})
+        payload = {"text": "hello", "modelConfigRef": model.id}
 
         with patch(
             "app_core.http.workspaces.schedule_agent_run_lifecycle",
@@ -1867,12 +1870,12 @@ class ApiVerticalSliceTests(TransactionTestCase):
         ) as schedule:
             first = self.client.post(
                 f"/api/workspaces/{workspace.id}/sessions/{session.id}/messages",
-                data=payload,
+                data=json.dumps({**payload, "operationId": "first-run"}),
                 content_type="application/json",
             )
             second = self.client.post(
                 f"/api/workspaces/{workspace.id}/sessions/{session.id}/messages",
-                data=payload,
+                data=json.dumps({**payload, "operationId": "second-run"}),
                 content_type="application/json",
             )
 
@@ -2062,6 +2065,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
             f"/api/workspaces/{workspace.id}/sessions/new/messages",
             data=json.dumps(
                 {
+                    "operationId": "test-operation-2061",
                     "text": "project child",
                     "agentId": "centaeris",
                     "projectId": project["id"],
@@ -2072,7 +2076,6 @@ class ApiVerticalSliceTests(TransactionTestCase):
         )
 
         self.assertEqual(message.status_code, 202, message.content)
-        self.assertEqual(message.json()["session"]["projectId"], project["id"])
         self.assertEqual(
             Session.objects.get(id=message.json()["sessionId"]).project_id,
             project["id"],
@@ -2081,7 +2084,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
 
         rejected = self.client.post(
             f"/api/workspaces/{workspace.id}/sessions",
-            data=json.dumps({"agentId": "centaeris", "projectId": "banana"}),
+            data=json.dumps({"operationId": "test-operation-2082", "agentId": "centaeris", "projectId": "banana"}),
             content_type="application/json",
         )
         self.assertEqual(rejected.status_code, 404)
@@ -4509,6 +4512,7 @@ class ModelQuotaMigrationTests(TransactionTestCase):
         old_target = ("app_core", "0003_agentrun_pre_admission_cancelled")
         new_target = ("app_core", "0004_modelquotadomain_providercredential_quotadomain")
         executor = MigrationExecutor(connection)
+        latest_targets = executor.loader.graph.leaf_nodes()
         executor.migrate([old_target])
         try:
             old_apps = executor.loader.project_state([old_target]).apps
@@ -4530,7 +4534,7 @@ class ModelQuotaMigrationTests(TransactionTestCase):
             self.assertEqual(credential.encryptedSecret, "existing-encrypted-value")
             self.assertIsNone(credential.quotaDomain_id)
         finally:
-            MigrationExecutor(connection).migrate([new_target])
+            MigrationExecutor(connection).migrate(latest_targets)
 
 
 class ModelQuotaAdmissionTests(TransactionTestCase):
@@ -5026,7 +5030,7 @@ class ModelAdminAcceptanceTests(TestCase):
         with patch("app_core.http.workspaces.schedule_agent_run_lifecycle"):
             continued = self.client.post(
                 f"/api/workspaces/{workspace.id}/sessions/{session.id}/messages",
-                data=json.dumps({"text": "Continue with the updated model", "agentId": agent.id,
+                data=json.dumps({"operationId": "test-operation-5027", "text": "Continue with the updated model", "agentId": agent.id,
                                  "modelConfigRef": revised.id}),
                 content_type="application/json",
             )
@@ -5139,7 +5143,7 @@ class ModelAdminAcceptanceTests(TestCase):
         for modelRef in [modelId, "banana"]:
             rejected = self.client.post(
                 f"/api/workspaces/{workspace.id}/sessions/{session.id}/messages",
-                data=json.dumps({"text": "hello", "modelConfigRef": modelRef}),
+                data=json.dumps({"operationId": "test-operation-5140", "text": "hello", "modelConfigRef": modelRef}),
                 content_type="application/json",
             )
             self.assertEqual(rejected.status_code, 400)
@@ -7102,6 +7106,7 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         response = self.client.post(
             f"/api/workspaces/{self.workspace.id}/sessions/new/messages",
             data={
+                "operationId": "test-operation-7102",
                 "text": "read the attached PDF",
                 "agentId": "centaeris",
                 "modelConfigRef": self.model.id,
@@ -7175,6 +7180,7 @@ class WorkspaceAssetAcceptanceTests(TestCase):
             f"/api/workspaces/{self.workspace.id}/sessions/new/messages",
             data=json.dumps(
                 {
+                    "operationId": "test-operation-7174",
                     "text": "must not create a session",
                     "agentId": "centaeris",
                     "modelConfigRef": self.model.id,
@@ -7199,6 +7205,7 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         rejected = self.client.post(
             f"/api/workspaces/{self.workspace.id}/sessions/new/messages",
             data=json.dumps({
+                "operationId": "test-operation-7199",
                 "text": "reject unknown effort",
                 "agentId": "centaeris",
                 "modelConfigRef": self.model.id,
@@ -7212,6 +7219,7 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         accepted = self.client.post(
             f"/api/workspaces/{self.workspace.id}/sessions/new/messages",
             data=json.dumps({
+                "operationId": "test-operation-7212",
                 "text": "use selected effort",
                 "agentId": "centaeris",
                 "modelConfigRef": self.model.id,
@@ -7252,6 +7260,7 @@ class WorkspaceAssetAcceptanceTests(TestCase):
             response = self.client.post(
                 f"/api/workspaces/{self.workspace.id}/sessions/new/messages",
                 data={
+                    "operationId": "test-operation-7252",
                     "text": "must roll back",
                     "agentId": "centaeris",
                     "modelConfigRef": self.model.id,
@@ -7286,7 +7295,7 @@ class WorkspaceAssetAcceptanceTests(TestCase):
 
         response = self.client.post(
             f"/api/workspaces/{self.workspace.id}/sessions/{self.session.id}/messages",
-            data=json.dumps({"text": "must fail", "modelConfigRef": self.model.id}),
+            data=json.dumps({"operationId": "test-operation-7287", "text": "must fail", "modelConfigRef": self.model.id}),
             content_type="application/json",
         )
 
@@ -7306,6 +7315,7 @@ class WorkspaceAssetAcceptanceTests(TestCase):
             f"/api/workspaces/{self.workspace.id}/sessions/{self.session.id}/messages",
             data=json.dumps(
                 {
+                    "operationId": "test-operation-7305",
                     "text": "read frozen attachment",
                     "modelConfigRef": self.model.id,
                     "attachmentRefs": [link.id],

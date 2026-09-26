@@ -663,12 +663,13 @@ class TranscriptCitationsResponse(StrictSchema):
     bindings: list[TranscriptCitationBinding]
 
 
-class AgentRunAcceptedResponse(StrictSchema):
-    agent_run_id: str = Field(alias="agentRunId")
-    turn_id: str = Field(alias="turnId")
+class HostedOperationResponse(StrictSchema):
+    operation_id: str = Field(alias="operationId")
+    command: Literal["createSession", "submitMessage"]
+    status: Literal["accepted"]
     session_id: str = Field(alias="sessionId")
-    session: SessionResponse
-    status: str
+    agent_run_id: str | None = Field(alias="agentRunId")
+    turn_id: str | None = Field(alias="turnId")
 
 
 class AgentRunCancellationResponse(StrictSchema):

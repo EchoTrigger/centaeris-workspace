@@ -34,8 +34,10 @@ rename requires coordinated Core and Workspace updates, with no old-field alias.
 
 1. Django authenticates the user and checks workspace membership and resource
    access.
-2. The API creates an immutable AgentRun authorization containing the exact
-   workspace, model, execution profile, files, and Plugin activation.
+2. The API commits the caller's operation receipt with the Session/AgentRun and
+   immutable AgentRun authorization containing the exact workspace, model,
+   execution profile, files, and Plugin activation. A currently authorized
+   retry returns that acceptance identity without creating another Run.
 3. The worker claims the durable job and asks Runtime Server to start or resume
    the AgentRun.
 4. Runtime Server validates the authorization and composes Core with the
@@ -44,6 +46,13 @@ rename requires coordinated Core and Workspace updates, with no old-field alias.
    processing remain adapters behind current contracts.
 6. Durable events are committed to PostgreSQL. Redis carries bounded live state
    for connected browsers. The API exposes one ordered logical stream.
+
+The command receiver, connected browser, execution owner, and ExecutionHost have
+different responsibilities. A receipt says that a command was accepted; it is
+not the current Run status or a transcript projection watermark. Django owns
+hosted admission and receipt persistence; Core continues to own execution and
+terminal runtime semantics. Browser recovery queries the receipt before
+resubmitting the same command identity after an uncertain response.
 
 ## Worker concurrency
 

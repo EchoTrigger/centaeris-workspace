@@ -117,7 +117,8 @@ def main():
         from app_core.models import MaterialProcessingTask
         assert not DerivedRepresentation.objects.filter(ownerId=item.pk).exists()
         response = browser.post(f"/api/workspaces/{workspace.id}/sessions/{session.id}/messages",
-            data=json.dumps({"text": "Use list_materials and read_material to read the attached acceptance file. "
+            data=json.dumps({"operationId": uuid.uuid4().hex,
+                "text": "Use list_materials and read_material to read the attached acceptance file. "
                 "Report its acceptance code and include the exact citationId returned by read_material in your final answer. "
                 "If processing is pending, use get_operation and then read_material again when completed. "
                 "Do not use filesystem or legacy knowledge tools. Finish after reading it.",

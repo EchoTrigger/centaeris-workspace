@@ -16,6 +16,14 @@ Record the tested commit, browser/version, viewport, account role, and result.
   requests are in flight; confirm late responses cannot overwrite the new view.
 - Check the context panel, status placement, Markdown/code rendering, citations,
   and attachment cards at desktop and narrow viewports.
+- Lose the submission response after acceptance, then retry and reload the tab.
+  Check the pending submission and open its original Session without creating
+  another Run. Repeat after that Run has completed; acceptance must not require
+  an active Run. A changed draft or different bytes in a same-named attachment
+  must not silently replace the unresolved operation identity.
+- Revoke access or delete the accepted Session before recovery. Confirm no
+  cached receipt exposes content or recreates a deleted resource, and a confirmed
+  unavailable operation can be dismissed before a new intentional submission.
 
 ## Identity and administration
 
@@ -31,6 +39,9 @@ Record the tested commit, browser/version, viewport, account role, and result.
 
 - Upload, open, search, preview, and remove representative image, code, PDF, and
   supported Office files; verify library/trash state and access revocation.
+- Start a chat from selected materials, interrupt material linking after Session
+  acceptance, and recover the same Session to finish linking without creating
+  another empty Session.
 - Switch light/dark theme and language, then reload; confirm the last choice,
   layout, icons, interpolation, and focus indicators remain coherent.
 - Compare the main workbench at 100%, 150%, and 200% zoom for clipping, overlap,

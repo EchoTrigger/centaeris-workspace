@@ -1,17 +1,26 @@
 import json
 import logging
+import re
 from typing import Literal
 
 from django.db import transaction
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.db.models import Max, Q
 from django.utils import timezone
 from ninja import Router, Status
 from ninja.responses import codes_4xx
 from pydantic import Field, ValidationError, field_validator
 
-from app_core.assets import MAX_DIRECT_INPUT_BYTES, captured_input_fields
+from app_core.assets import captured_input_fields
 from app_core.execution_admission import queued_admission_error
+from app_core.hosted_operations import (
+    OPERATION_ID_PATTERN,
+    HostedOperationError,
+    accept_operation,
+    replay_operation,
+    request_digest,
+    serialize_operation,
+)
 from app_core.agent_identity import validate_agent_id
 from app_core.models import (
     Agent,
@@ -72,7 +81,7 @@ from .response_schema import (
     SessionContextUsageEnvelope,
     TranscriptContentRangeResponse,
     TranscriptTurnMetadataResponse,
-    AgentRunAcceptedResponse,
+    HostedOperationResponse,
     AgentRunCancellationResponse,
     AgentRunSupplementResponse,
     SessionsEnvelope,
@@ -113,6 +122,14 @@ class AgentSessionCreationError(Exception):
         self.code = code
 
 
+class AcceptedOperationReplay(Exception):
+    """Leave the acceptance transaction before cleaning up losing upload objects."""
+
+    def __init__(self, receipt):
+        super().__init__("operation_already_accepted")
+        self.receipt = receipt
+
+
 class RewriteLastUserTailRequest(StrictSchema):
     type: Literal["rewriteLastUser"]
     target_message_id: str = Field(alias="targetMessageId", min_length=1, max_length=160)
@@ -120,6 +137,7 @@ class RewriteLastUserTailRequest(StrictSchema):
 
 
 class SessionMessageRequest(StrictSchema):
+    operation_id: str = Field(alias="operationId", pattern=OPERATION_ID_PATTERN)
     text: str = ""
     agent_id: str | None = Field(default=None, alias="agentId")
     project_id: str | None = Field(default=None, alias="projectId")
@@ -138,6 +156,7 @@ class SessionMessageRequest(StrictSchema):
 
 
 class SessionCreateRequest(StrictSchema):
+    operation_id: str = Field(alias="operationId", pattern=OPERATION_ID_PATTERN)
     agent_id: str = Field(alias="agentId")
     project_id: str | None = Field(default=None, alias="projectId")
 
@@ -486,7 +505,7 @@ def list_workspace_sessions(request, workspace_id: str):
 @router.post(
     "/workspaces/{workspace_id}/sessions",
     auth=session_auth,
-    response={201: SessionEnvelope} | COMMON_ERROR_RESPONSES,
+    response={201: HostedOperationResponse} | COMMON_ERROR_RESPONSES,
 )
 def create_workspace_session(request, workspace_id: str, payload: SessionCreateRequest):
     workspace = _workspace_for_user(request.user, workspace_id)
@@ -497,6 +516,13 @@ def create_workspace_session(request, workspace_id: str, payload: SessionCreateR
         if membership is None:
             return Status(404, {"error": "workspace_not_found"})
         workspace = membership.workspace
+        digest = request_digest(payload)
+        try:
+            receipt = replay_operation(request.user, workspace_id, "createSession", payload.operation_id, digest)
+        except HostedOperationError as error:
+            return Status(error.status, {"error": error.code})
+        if receipt is not None:
+            return Status(201, serialize_operation(receipt))
         agent = Agent.objects.select_for_update().filter(
             id=payload.agent_id,
             workspace=workspace,
@@ -522,7 +548,31 @@ def create_workspace_session(request, workspace_id: str, payload: SessionCreateR
             agent=agent,
             project=project,
         )
-    return Status(201, {"session": serialize_session(session)})
+        receipt = accept_operation(request.user, workspace, "createSession", payload.operation_id, digest, session)
+    return Status(201, serialize_operation(receipt))
+
+
+@router.get(
+    "/workspaces/{workspace_id}/operations/{command}/{operation_id}",
+    auth=session_auth,
+    response={200: HostedOperationResponse} | COMMON_ERROR_RESPONSES,
+)
+def get_hosted_operation(request, response: HttpResponse, workspace_id: str,
+                         command: Literal["createSession", "submitMessage"],
+                         operation_id: str):
+    response["Cache-Control"] = "no-store"
+    if request.GET or re.fullmatch(OPERATION_ID_PATTERN, operation_id) is None:
+        return Status(400, {"error": "request_invalid"})
+    try:
+        with transaction.atomic():
+            if locked_workspace_membership_for(request.user, workspace_id) is None:
+                return Status(404, {"error": "operation_not_found"})
+            receipt = replay_operation(request.user, workspace_id, command, operation_id)
+            if receipt is None:
+                return Status(404, {"error": "operation_not_found"})
+            return serialize_operation(receipt)
+    except HostedOperationError as error:
+        return Status(error.status, {"error": error.code})
 
 
 @router.get(
@@ -1077,7 +1127,7 @@ def _canonical_waterline(value: str) -> bool:
     "/workspaces/{workspace_id}/sessions/{session_id}/messages",
     auth=session_auth,
     response={
-        202: AgentRunAcceptedResponse,
+        202: HostedOperationResponse,
         codes_4xx: ErrorResponse,
         503: ErrorResponse,
     },
@@ -1105,6 +1155,18 @@ def create_session_message(
         or attachment_refs != sorted(set(attachment_refs))
     ):
         return Status(400, {"error": "invalid_attachment_refs"})
+    try:
+        digest = request_digest(payload, session_id=session_id, uploads=uploads)
+        with transaction.atomic():
+            if locked_workspace_membership_for(request.user, workspace_id) is None:
+                return Status(404, {"error": "session_not_found"})
+            receipt = replay_operation(request.user, workspace_id, "submitMessage", payload.operation_id, digest)
+            if receipt is not None:
+                return Status(202, serialize_operation(receipt))
+    except ValueError as error:
+        return Status(400, {"error": str(error)})
+    except HostedOperationError as error:
+        return Status(error.status, {"error": error.code})
     try:
         model = ModelConfig.objects.get(
             id=payload.model_config_ref,
@@ -1167,12 +1229,7 @@ def create_session_message(
     stored = []
     if uploads:
         try:
-            if any(upload.size > MAX_DIRECT_INPUT_BYTES for upload in uploads):
-                raise ValueError("attachment_too_large")
-            stored = _store_upload_batch(
-                uploads,
-                f"users/{request.user.id}/library",
-            )
+            stored = _store_upload_batch(uploads, f"users/{request.user.id}/library")
         except ValueError as error:
             return Status(400, {"error": str(error)})
     try:
@@ -1181,6 +1238,9 @@ def create_session_message(
             if membership is None:
                 raise AgentSessionCreationError(404, "session_not_found")
             workspace = membership.workspace
+            receipt = replay_operation(request.user, workspace_id, "submitMessage", payload.operation_id, digest)
+            if receipt is not None:
+                raise AcceptedOperationReplay(receipt)
             admission_error = queued_admission_error(workspace.id)
             if admission_error is not None:
                 raise AgentSessionCreationError(*admission_error)
@@ -1275,7 +1335,12 @@ def create_session_message(
                 session.title = prompt[:80]
             session.updatedAt = timezone.now()
             session.save(update_fields=["title", "updatedAt"])
-    except AgentSessionCreationError as database_error:
+            receipt = accept_operation(request.user, workspace, "submitMessage", payload.operation_id,
+                                       digest, session, agent_run)
+    except AcceptedOperationReplay as replay:
+        _delete_stored_upload_batch(stored)
+        return Status(202, serialize_operation(replay.receipt))
+    except (AgentSessionCreationError, HostedOperationError) as database_error:
         try:
             _delete_stored_upload_batch(stored)
         except RuntimeError as cleanup_error:
@@ -1303,13 +1368,7 @@ def create_session_message(
         )
     return Status(
         202,
-        {
-            "agentRunId": agent_run.id,
-            "turnId": agent_run.turn_id,
-            "sessionId": session.id,
-            "session": serialize_session(session),
-            "status": "queued",
-        },
+        serialize_operation(receipt),
     )
 
 
@@ -1324,15 +1383,16 @@ def _parse_session_message_request(request):
         try:
             uploads = _require_uploads(
                 request,
-                {"text", "modelConfigRef", "agentId", "projectId", "thinkingMode"},
+                {"operationId", "text", "modelConfigRef", "agentId", "projectId", "thinkingMode"},
             )
         except ValueError as error:
             return None, uploads, str(error)
         if (
-            not {"text", "modelConfigRef", "agentId"}.issubset(request.POST)
+            not {"operationId", "text", "modelConfigRef", "agentId"}.issubset(request.POST)
             or not set(request.POST).issubset(
-                {"text", "modelConfigRef", "agentId", "projectId", "thinkingMode"}
+                {"operationId", "text", "modelConfigRef", "agentId", "projectId", "thinkingMode"}
             )
+            or len(request.POST.getlist("operationId")) != 1
             or len(request.POST.getlist("text")) != 1
             or len(request.POST.getlist("modelConfigRef")) != 1
             or len(request.POST.getlist("agentId")) != 1
@@ -1341,6 +1401,7 @@ def _parse_session_message_request(request):
         ):
             return None, uploads, "message_fields_invalid"
         value = {
+            "operationId": request.POST["operationId"],
             "text": request.POST["text"],
             "modelConfigRef": request.POST["modelConfigRef"],
             "agentId": request.POST["agentId"],

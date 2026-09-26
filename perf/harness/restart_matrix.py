@@ -10,6 +10,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -356,6 +357,7 @@ class Experiment:
         text = text or ("restart-matrix parent waiting" if self.state == "waiting" else
                         f"restart matrix {self.state} {self.fault}: call your tool once, then finish")
         body = self.client.call("POST", f"/api/workspaces/{workspace['id']}/sessions/new/messages", {
+            "operationId": uuid.uuid4().hex,
             "agentId": agent["id"], "text": text, "attachmentRefs": [], "modelConfigRef": model_id,
         })
         run_id = body["agentRunId"]

@@ -98,6 +98,15 @@ Runtime, protocol, security, deployment, and performance gates remain automated.
 Use [FrontendManualAcceptance.md](FrontendManualAcceptance.md) for the retained
 browser interaction, authorization-UI, and appearance checks.
 
+Hosted command acceptance tests must cover a committed-but-lost response,
+concurrent identical submissions, retries after completion, changed input under
+the same operation identity, authorization revocation and deleted resources,
+upload content identity, transaction rollback, and scheduling failure. The
+forward migration preserves existing business rows without fabricating old
+receipts. Browser tests retain the operation identity across uncertain responses
+and reloads, and distinguish receipt recovery from downstream projection or
+material-link failures.
+
 1. `python scripts/ci.py`
 2. `node scripts/performance-eval.mjs`; review the independent phase report in
    [PerformanceEvaluation.md](PerformanceEvaluation.md). The 4,095-observation
@@ -107,7 +116,7 @@ browser interaction, authorization-UI, and appearance checks.
    an explicit manual run.
 3. Populate a private `.env`, then run `docker compose config --quiet`.
 4. On fresh Postgres, migrate from zero through
-   `0004_modelquotadomain_providercredential_quotadomain` and confirm the Workspace app starts
+   `0005_hosted_operation_receipt` and confirm the Workspace app starts
    from the current migration leaf. Existing credentials must retain their encrypted
    values and remain unconfigured until assigned an explicit quota domain.
 5. Build Runtime, API, worker, web, and execution images from root Compose

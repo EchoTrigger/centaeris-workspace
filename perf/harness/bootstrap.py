@@ -14,6 +14,7 @@ import sys
 import subprocess
 import urllib.error
 import urllib.request
+import uuid
 
 API = os.environ.get("API_BASE", "http://localhost:18000")
 EMAIL = os.environ.get("PERF_ADMIN_EMAIL", "perf-admin@localhost.invalid")
@@ -154,6 +155,7 @@ def main():
         "POST",
         f"/api/workspaces/{workspace['id']}/sessions/new/messages",
         {
+            "operationId": uuid.uuid4().hex,
             "agentId": agent["id"],
             "text": "Run the perf smoke: call your tool once, then finish.",
             "attachmentRefs": [],
@@ -162,7 +164,7 @@ def main():
         csrf,
     )
     body = step("message", status, body)
-    session_id = body.get("sessionId") or body["agentRunId"]
+    session_id = body["sessionId"]
     agent_run_id = body["agentRunId"]
     print(f"     session: {session_id}  run: {agent_run_id}")
 

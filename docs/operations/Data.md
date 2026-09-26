@@ -13,6 +13,20 @@
 Redis carries bounded transient browser and Runtime live state. Its loss can
 interrupt a live connection but must not erase durable history or jobs.
 
+## Command receipts
+
+Hosted command receipts retain their request digest and accepted result IDs in
+PostgreSQL. They do not store prompts, uploaded bytes, or credentials. Their
+deduplication identity does not expire by time in v1, and deleting a Session or
+Run must not remove that identity and turn a replay into a new command. Permanent
+deletion of the owning user or Workspace may remove its scoped receipts; those
+scope identities must never be reused.
+
+The forward migration adds receipt storage without inventing receipts for
+historical Sessions or Runs. API clients must send the new required operation
+identity when the server is upgraded. Backups and restores include receipts
+with business rows; restoring only one side loses the acceptance guarantee.
+
 ## File identity
 
 Database rows identify and authorize files; bytes remain in Storage. A complete
