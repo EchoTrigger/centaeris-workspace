@@ -81,6 +81,50 @@ must remain visible; cancellation must not count as successful draining.
 
 ## Tests
 
+### P6 API connection-pool validation
+
+After the normal isolated setup/build, use the dedicated controller:
+
+```powershell
+python perf/harness/pool_validation.py build
+python perf/harness/pool_validation.py up
+python perf/harness/pool_validation.py run --experiment-id p6-unique-id
+python perf/harness/pool_validation.py stop
+```
+
+The existing document processor image must also be available under the isolated
+`centaeris-perf-processor:local` tag. This controller uses the same ownership and
+configuration validation as `control.py`, with the checked-in `compose.pool.yml`
+overlay. It does not read the private root `.env`. It fixes one API process and
+two worker slots; CPU/memory budgets are explicit in that overlay. Docker startup
+may also start unrelated containers according to their own restart policies;
+the experiment never changes those containers.
+
+Two continuous-history stages use pool size 8 followed by explicit 0. Each admits
+at most twelve paced mock runs over a 60-second arrival window, at most two
+outstanding Runs, with three independent SSE observers per Run. Admission stops
+on HTTP/SSE failure, unsuccessful Run, service exit/OOM, missing resource sample,
+or sampled database connections reaching 80% of `max_connections`. A child process
+has a 210-second hard deadline; admitted work is not cancelled or counted as
+successful merely to drain it. Exact accepted IDs, successful observer terminals
+and durable completed Runs must agree. If a failure leaves active work, preserve
+the evidence and investigate before stopping the stack.
+
+Only the API is replaced between stages. All other container identities are
+checked, including worker and PostgreSQL. The test env file is restored after
+the experiment; running API configuration remains the last measured stage until
+stopped/replaced, so the restored file alone is not a rollback action.
+
+`Pool.Dockerfile` adds a perf-only ASGI wrapper to the normal API image. It samples
+the existing pool in the actual serving PID every second without creating a pool
+or borrowing a connection. Its `P6_POOL_PROBE` records include numeric pool
+statistics and typed errors correlated with HTTP 500s, excluding credentials,
+request bodies and exception messages. No metrics endpoint or production API
+code is added. Pool samples, PostgreSQL connection logs, request latency/status,
+resource samples, image identities and exact Run outcomes stay in the external
+evidence directory. Saturation, host-wide capacity and throughput improvement are
+not certified by this bounded correctness/rollback check.
+
 For the bounded historical-notification amplification probe, run
 `python perf/harness/outbox_profile.py --experiment-id outbox-001`. It requires
 an idle isolated stack with no active waiters, temporarily stops its worker,

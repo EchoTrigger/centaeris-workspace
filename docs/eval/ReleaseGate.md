@@ -126,6 +126,14 @@ material-link failures.
 
 Gates must not read production data, real Plugin content, or developer secrets.
 
+API PostgreSQL pool changes additionally use the bounded P6 controller described
+in `perf/README.md`. It records actual serving-process pool statistics, typed
+request errors, three SSE observers per accepted Run, and exact durable terminal
+accounting. Verify pool 8 followed by explicit 0 with only the API container
+replaced. Keep the workload budget, stop conditions, image identities and raw
+evidence outside the repository. A successful low-load run does not establish
+throughput or explain an earlier unobserved timeout.
+
 Execution replacement acceptance protects the supported worker's single-step
 dispatch: recovery yields the current lease before another claim, and an unknown
 step response does not resend that step under the same owner. The disposable
