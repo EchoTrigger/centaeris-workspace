@@ -120,13 +120,20 @@ For `session-event:<eventId>:<field>`, the API delegates to Runtime's authentica
 `/internal/transcript/content` route. Runtime performs a session-scoped event lookup
 bound to the current, valid projection generation; Core resolves the visible field
 and verifies the reference. `tool-output:<callId>` reads serve complete inline
-content from the committed tool result. Spilled output carries only a mutable
-path and byte range, without an immutable content identity; these references
-return HTTP 409 `transcript_content_unavailable`, even when the current workspace
-snapshot contains a file of the same path and length. Neither initial reads nor
-continuations fall back to that snapshot. This applies to existing and newly
-created unversioned spill references. The committed event and its preview are
-retained; full spill expansion requires a future durable capture contract.
+content from the committed tool result. Newly observed spills can also resolve
+through a hosted immutable UTF-8 capture keyed by the committed event. The host
+observes the successful create-only write, then publishes the matching byte range
+after the fenced event commit; publication also verifies the event's Execution
+against the existing execution-start ledger. Core event fields are unchanged.
+Reads use at most two 64 KiB database chunks and verify each chunk's length and
+SHA-256. No initial read or continuation falls back to a current workspace path
+or snapshot. Old, missing, purged, corrupt, or not-yet-published captures return
+HTTP 409 `transcript_content_unavailable`; the committed event and preview remain.
+Archive failure, restart before publication, or exhausted capture budgets may
+leave full text unavailable without changing tool success or replaying a tool.
+Session deletion denies reads immediately and purges captured bytes, retaining
+a tombstone. Agent trash expiration also collects its captures. Membership loss
+denies subsequent reads but does not delete shared history.
 Message text loads automatically and renders as one Markdown
 document. Tool detail navigation replaces the current range rather than appending
 all previously loaded output.

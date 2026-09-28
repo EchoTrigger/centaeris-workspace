@@ -33,7 +33,7 @@ class TranscriptContentIdentityTests(TestCase):
         self.client.force_login(self.owner)
         self.url = f"/api/sessions/{self.session.id}/transcript/content"
 
-    def commit_output(self, content, *, spilled):
+    def commit_output(self, content, *, spilled, sequence=1):
         payload = {
             "callId": "call-history", "toolName": "shell", "resultState": "successWithOutput",
             "modelContent": "original preview" if spilled else content,
@@ -42,14 +42,14 @@ class TranscriptContentIdentityTests(TestCase):
             "outputStartByte": len(self.prefix) if spilled else None,
             "summary": "output", "operations": [], "modelInputImages": [], "latencyMs": 1,
         }
-        event_id = f"event:{self.run.id}:1"
+        event_id = f"event:{self.run.id}:{sequence}"
         SessionEvent.objects.create(
             eventId=event_id, workspace=self.workspace, session=self.session,
-            agent_run=self.run, sequence=1, agent_run_sequence=1,
+            agent_run=self.run, sequence=sequence, agent_run_sequence=sequence,
             projects_to_agent_run_stream=True, createdAtMs=1,
             payload={
                 "schemaVersion": "session.event.v1", "eventVersion": 1,
-                "eventId": event_id, "type": "tool_result", "sequence": 1,
+                "eventId": event_id, "type": "tool_result", "sequence": sequence,
                 "sessionId": self.session.id, "agentRunId": self.run.id,
                 "turnId": self.run.turn_id, "createdAtMs": 1, "payload": payload,
             },
@@ -159,3 +159,80 @@ class TranscriptContentIdentityTests(TestCase):
         response = self.client.get(self.url, {**query, "byteLength": "3"})
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json(), {"error": "transcript_content_reference_stale"})
+
+    def archive(self, content):
+        from .models import TranscriptOutputCapture, TranscriptOutputChunk
+        data = content.encode("utf-8")
+        capture = TranscriptOutputCapture.objects.create(
+            event=SessionEvent.objects.get(session=self.session), executionId="execution-original",
+            sha256="sha256:" + hashlib.sha256(data).hexdigest(), byteLength=len(data),
+            chunkSize=65536,
+        )
+        for start in range(0, len(data), capture.chunkSize):
+            chunk = data[start:start + capture.chunkSize]
+            TranscriptOutputChunk.objects.create(capture=capture, index=start // capture.chunkSize,
+                data=chunk, sha256="sha256:" + hashlib.sha256(chunk).hexdigest())
+        return capture
+
+    def test_captured_output_survives_equal_length_snapshot_replacement(self):
+        original = "A" * (50 * 1024 + 1)
+        query = self.commit_output(original, spilled=True)
+        self.archive(original)
+        self.replace_snapshot("B" * len(original))
+        response = self.client.get(self.url, query)
+        self.assertEqual(response.status_code, 200, response.content[:200])
+        self.assertEqual(response.json()["content"], original)
+
+    def test_captured_utf8_pages_reauthorize_and_do_not_mix_versions(self):
+        original = "x" * (65536 - 2) + "世界" + "z" * 65536
+        query = self.commit_output(original, spilled=True)
+        self.archive(original)
+        first = self.client.get(self.url, query)
+        self.assertEqual(first.status_code, 200, first.content[:200])
+        self.assertEqual(first.json()["endOffset"], "65534")
+        self.replace_snapshot("y" * len(original.encode()))
+        second = self.client.get(self.url, {**query, "offset": "65534"})
+        self.assertEqual(second.status_code, 200, second.content[:200])
+        third = self.client.get(self.url, {**query, "offset": second.json()["endOffset"]})
+        self.assertEqual(first.json()["content"] + second.json()["content"] + third.json()["content"], original)
+        self.workspace.members.remove(self.owner)
+        self.assertEqual(self.client.get(self.url, query).status_code, 404)
+
+    def test_missing_or_corrupt_capture_never_falls_back_to_snapshot(self):
+        original = "a" * 70000
+        query = self.commit_output(original, spilled=True)
+        capture = self.archive(original)
+        self.replace_snapshot(original)
+        capture.chunks.filter(index=0).update(data=b"b" * 65536)
+        self.assert_unavailable(self.client.get(self.url, query))
+        capture.chunks.all().delete()
+        self.assert_unavailable(self.client.get(self.url, query))
+
+    def test_deleting_session_purges_capture_bytes(self):
+        query = self.commit_output("a" * 70000, spilled=True)
+        capture = self.archive("a" * 70000)
+        self.run.status = "completed"
+        self.run.save(update_fields=["status"])
+        response = self.client.delete(f"/api/sessions/{self.session.id}")
+        self.assertEqual(response.status_code, 200, response.content)
+        capture.refresh_from_db()
+        self.assertIsNotNone(capture.purgedAt)
+        self.assertFalse(capture.chunks.exists())
+        self.assertEqual(self.client.get(self.url, query).status_code, 404)
+
+    def test_expired_agent_trash_purges_captures_but_dry_run_keeps_them(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        from .deleted_resource_gc import expire_trash
+        self.commit_output("a" * 70000, spilled=True)
+        capture = self.archive("a" * 70000)
+        agent = self.session.agent
+        agent.status = "deleted"
+        agent.deletedAt = timezone.now() - timedelta(days=40)
+        agent.save(update_fields=["status", "deletedAt"])
+        expire_trash(timezone.now() - timedelta(days=30), dry_run=True)
+        self.assertTrue(capture.chunks.exists())
+        expire_trash(timezone.now() - timedelta(days=30), dry_run=False)
+        capture.refresh_from_db()
+        self.assertIsNotNone(capture.purgedAt)
+        self.assertFalse(capture.chunks.exists())

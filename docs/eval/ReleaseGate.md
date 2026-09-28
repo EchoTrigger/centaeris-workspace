@@ -2,6 +2,21 @@
 
 Run from the repository root. Any failure blocks release.
 
+Hosted transcript capture acceptance is included in the API PostgreSQL gate.
+`test_transcript_capture_contract.py` invokes the Rust capture writer against
+the same migrated disposable database, requires its explicit success receipt,
+and reads its rows through the authenticated Django content endpoint. It covers
+uncommitted and wrong-Execution rejection, immutable/idempotent publication,
+equal-length snapshot replacement, UTF-8 continuation, transaction rollback on
+a failed chunk, deletion during blocked chunk I/O, and forward migration without
+fabricated captures. Capture identity tests additionally cover missing/corrupt
+chunks, membership revocation, immediate deletion and expired-Agent cleanup.
+The Rust `transcript_capture` tests exercise Core's real large-result spill via
+a synthetic host and verify that archive-budget exhaustion leaves tool success
+unchanged. The ignored Rust Django-contract entry point is deliberately executed
+by the API test; it must not be counted as covered merely by ordinary cargo tests.
+These tests do not constitute a production-load or fresh-Docker deployment gate.
+
 Sandbox-loss recovery requires an isolated-stack behavioral gate before release:
 verify a pre-dispatch loss resumes from the advanced checkpoint with a new tool
 call ID; the original failed call remains exactly once. Verify the recovery

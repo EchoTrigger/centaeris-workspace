@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from app_core.transcript_output import read_output_range, purge_session_outputs
 from typing import Literal
 
 from django.db import transaction
@@ -662,6 +663,7 @@ def delete_session(request, session_id: str):
         session.deletedAt = deleted_at
         session.deletedBy = request.user
         session.purgedAt = deleted_at
+        purge_session_outputs(session, deleted_at)
         session.save(
             update_fields=[
                 "status",
@@ -717,6 +719,7 @@ def permanently_delete_session(request, session_id: str):
         if session.purgedAt is not None:
             return Status(410, {"error": "session_purged"})
         session.purgedAt = timezone.now()
+        purge_session_outputs(session, session.purgedAt)
         session.save(update_fields=["purgedAt", "updatedAt"])
     return {"deleted": True}
 
@@ -921,21 +924,15 @@ def session_transcript_content(request, session_id: str):
         return _transcript_json_response(
             {"error": "transcript_content_reference_stale"}, status=409
         )
-    if payload.get("fullOutputPath") is not None or payload.get("outputStartByte") is not None:
-        # The committed event binds only a mutable path and byte range, not the
-        # original bytes. Even an equal-length file in the current snapshot may
-        # belong to a later write. Never rebind a historical reference to it.
-        return _transcript_json_response(
-            {"error": "transcript_content_unavailable"}, status=409
-        )
     try:
-        inline_content = payload.get("modelContent")
-        if (
-            not isinstance(inline_content, str)
-            or len(inline_content.encode("utf-8")) != byte_length
-        ):
-            raise ValueError("transcript inline content is invalid")
-        content, end_offset = _transcript_utf8_range(inline_content, int(offset_raw))
+        if payload.get("fullOutputPath") is not None or payload.get("outputStartByte") is not None:
+            content, end_offset = read_output_range(candidates[0], int(offset_raw), byte_length)
+        else:
+            inline_content = payload.get("modelContent")
+            if (not isinstance(inline_content, str)
+                    or len(inline_content.encode("utf-8")) != byte_length):
+                raise ValueError("transcript inline content is invalid")
+            content, end_offset = _transcript_utf8_range(inline_content, int(offset_raw))
     except ValueError:
         logger.exception(
             "Workspace transcript content range failed", extra={"sessionId": session.id}

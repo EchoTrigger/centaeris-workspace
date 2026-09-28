@@ -11,7 +11,7 @@ use std::path::Path;
 #[cfg(test)]
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 
 static NEXT_EXECUTION_HOST_INSTANCE: AtomicU64 = AtomicU64::new(1);
 use std::thread;
@@ -261,6 +261,8 @@ fn plugin_command_path(activation: &PluginActivationSnapshotV1) -> Result<String
 }
 
 pub struct DockerExecutionHostRunner {
+    pub(crate) transcript_capture: Mutex<crate::transcript_capture::CaptureBuffer>,
+    pub(crate) transcript_publisher: Arc<crate::transcript_capture::CapturePublisher>,
     recovery_activity: ExecutionActivityWitness,
     recovery_snapshot: Mutex<Option<WorkspaceReuseEvidence>>,
     pre_dispatch_loss: AtomicBool,
@@ -576,6 +578,8 @@ impl DockerExecutionHostRunner {
             has_execution_fact,
         )?;
         let runner = Self {
+            transcript_capture: Mutex::new(Default::default()),
+            transcript_publisher: Arc::new(Default::default()),
             recovery_activity: ExecutionActivityWitness::new(
                 NEXT_EXECUTION_HOST_INSTANCE.fetch_add(1, Ordering::Relaxed),
             ),
@@ -1822,11 +1826,11 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
             }
         }
         let output_limit = filesystem_response_limit(&request.operation)?;
-        let body = serde_json::to_vec(&SandboxFileSystemRequest {
+        let sandbox_request = SandboxFileSystemRequest {
             path: request.model_path,
             operation: request.operation,
-        })
-        .map_err(|error| {
+        };
+        let body = serde_json::to_vec(&sandbox_request).map_err(|error| {
             filesystem_unavailable(format!("encode filesystem request failed: {error}"))
         })?;
         let output = self
@@ -1842,6 +1846,16 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
                 filesystem_unavailable(format!("decode filesystem result failed: {error}"))
             })?
             .into_result()?;
+        if !memory_path && !read_only_path {
+            if let Ok(mut buffer) = self.transcript_capture.lock() {
+                buffer.observe_write(
+                    &sandbox_request.operation,
+                    &result,
+                    usize::try_from(self.resources.memory_bytes.min(self.resources.data_tmpfs_bytes))
+                        .unwrap_or(usize::MAX),
+                );
+            }
+        }
         if !read_only_path && !memory_path {
             if let ExecutionFileSystemOutput::ListDirectory(list) = &mut result {
                 let hidden = self
@@ -3886,6 +3900,8 @@ mod tests {
 
     fn test_docker_execution_host_runner() -> DockerExecutionHostRunner {
         DockerExecutionHostRunner {
+            transcript_capture: Mutex::new(Default::default()),
+            transcript_publisher: Arc::new(Default::default()),
             recovery_activity: ExecutionActivityWitness::new(
                 NEXT_EXECUTION_HOST_INSTANCE.fetch_add(1, Ordering::Relaxed),
             ),

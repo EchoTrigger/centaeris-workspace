@@ -364,3 +364,38 @@ of the signed authorization facts, invalidating it when payload, digest,
 signature, key or expected digest changes. Membership, run identity, source access,
 version and storage existence are checked on each input, including after an
 earlier item succeeded. No authorization cache survives into another tool call.
+
+### Hosted transcript text captures
+
+The Docker host observes successful create-only UTF-8 writes without parsing
+Core's private spill-file format. A committed tool result selects the exact
+path and byte range from this Execution's observed buffer. Repeated creation of
+the same path is ambiguous and cannot produce a capture. Recovery into another
+Execution or a process restart does not reconstruct candidates from mutable files.
+
+After the existing fenced event commit, an optional background publisher stores
+an event-owned `TranscriptOutputCapture` and 64 KiB `TranscriptOutputChunk` rows
+in one PostgreSQL transaction. It checks the exact committed event payload and
+the preceding execution-start fact, never overwrites another capture, and locks
+the Session only for final publication. Deletion during chunk I/O causes rollback.
+This follows the existing hosted result-snapshot model; it adds no Core port,
+event schema, object-store dependency, or binary transcript transport.
+
+Candidate retention and the pending publisher each use a byte budget of
+`min(memoryBytes, dataTmpfsBytes)` from the existing execution authorization.
+Accounting includes retained identity/record metadata; these are operational
+archive bounds, not a limit on tool success or total Session history. One
+background writer drains each Execution's bounded queue. Each publication has a
+five-second pool-request deadline and a five-second PostgreSQL transaction
+timeout, with no automatic retries. Candidate allocation, UTF-8 checking and
+copying still have CPU/memory cost on the host; asynchronous database work is
+not zero-cost. The implementation has no disk spool or restart recovery queue.
+
+Missing candidates, conflicting identities, exhausted budgets and storage
+failures leave the historical full text explicitly unavailable. They do not
+change Core's tool result or cause tool replay. Publication can lag the event;
+an early content request may need to be retried. Captures retain the existing
+per-request authorization and do not create public object URLs. Session deletion
+purges chunks transactionally and retains tombstones; trash expiration repairs
+cleanup of already-purged Sessions and expired Agents. No ordinary read performs
+cleanup and no time-based eviction of accessible history is introduced.

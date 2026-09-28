@@ -1169,6 +1169,28 @@ class HostedOperationReceipt(models.Model):
         ]
 
 
+class TranscriptOutputCapture(models.Model):
+    """Hosted, immutable UTF-8 output associated with a committed Core event."""
+
+    event = models.OneToOneField("SessionEvent", primary_key=True, on_delete=models.CASCADE)
+    executionId = models.CharField(max_length=160)
+    sha256 = models.CharField(max_length=71)
+    byteLength = models.PositiveBigIntegerField()
+    chunkSize = models.PositiveIntegerField()
+    createdAt = models.DateTimeField(auto_now_add=True)
+    purgedAt = models.DateTimeField(null=True)
+
+
+class TranscriptOutputChunk(models.Model):
+    capture = models.ForeignKey(TranscriptOutputCapture, on_delete=models.CASCADE, related_name="chunks")
+    index = models.PositiveIntegerField()
+    data = models.BinaryField()
+    sha256 = models.CharField(max_length=71)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["capture", "index"], name="unique_transcript_output_chunk")]
+
+
 class SessionEvent(models.Model):
     eventId = models.CharField(primary_key=True, max_length=160)
     workspace = models.ForeignKey(Workspace, on_delete=models.PROTECT)

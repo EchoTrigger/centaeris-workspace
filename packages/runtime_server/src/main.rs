@@ -5,6 +5,7 @@ mod contract;
 mod deferred_input_resolver;
 mod docker_engine;
 mod docker_execution_host;
+mod transcript_capture;
 mod execution_capacity;
 mod execution_recovery_coordinator;
 mod execution_recovery_policy;
@@ -3248,6 +3249,20 @@ fn execute_agent_run(
                 .lock()
                 .map_err(|_| "session record sequence lock poisoned".to_string())? =
                 committed_sequence;
+            // Capture publication is downstream of the durable Core event and
+            // must never change its successful tool outcome or trigger replay.
+            if let Ok(mut capture) = docker_execution.transcript_capture.lock() {
+                transcript_capture::publish(
+                    job_store.as_ref().clone(),
+                    docker_execution.execution_id().to_string(),
+                    docker_execution.transcript_publisher.clone(),
+                    capture.take(&events),
+                    usize::try_from(
+                        agent_run_start.authorization.resources.memory_bytes
+                            .min(agent_run_start.authorization.resources.data_tmpfs_bytes),
+                    ).unwrap_or(usize::MAX),
+                );
+            }
             if let Some((checkpoint, workspace_snapshot, workspace_generation)) =
                 recovery_checkpoint
             {

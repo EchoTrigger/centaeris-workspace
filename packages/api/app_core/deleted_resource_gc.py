@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from .assets import delete_stored_object_for_gc
 from .assets import tombstone_stored_object
+from .transcript_output import purge_session_outputs
 from .models import (
     Agent,
     Artifact,
@@ -72,6 +73,16 @@ def expire_trash(cutoff, dry_run: bool) -> TrashExpirationReport:
     now = timezone.now()
     Agent.objects.filter(id__in=agent_ids, purgedAt__isnull=True).update(purgedAt=now)
     Session.objects.filter(id__in=session_ids, purgedAt__isnull=True).update(purgedAt=now)
+    # Includes already-purged owners, so an interrupted GC pass is repairable.
+    owners = Session.objects.filter(
+        models.Q(purgedAt__isnull=False) | models.Q(agent__purgedAt__isnull=False),
+        events__transcriptoutputcapture__purgedAt__isnull=True,
+        events__transcriptoutputcapture__isnull=False,
+    ).values_list("id", flat=True).distinct()
+    for session_id in owners.iterator():
+        with transaction.atomic():
+            session = Session.objects.select_for_update().get(id=session_id)
+            purge_session_outputs(session, now)
     UserLibraryObject.objects.filter(id__in=library_ids, purgedAt__isnull=True).update(purgedAt=now)
     for source in sources:
         with transaction.atomic():

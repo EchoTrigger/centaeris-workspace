@@ -63,6 +63,7 @@ class MigrationBaselineTests(TestCase):
                 "0003_agentrun_pre_admission_cancelled.py",
                 "0004_modelquotadomain_providercredential_quotadomain.py",
                 "0005_hosted_operation_receipt.py",
+                "0006_transcript_output_capture.py",
             ],
         )
 
@@ -71,7 +72,7 @@ class MigrationBaselineTests(TestCase):
             REPOSITORY_ROOT / "scripts" / "docker-release-gate.sh"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("0005_hosted_operation_receipt", release_gate)
+        self.assertIn("0006_transcript_output_capture", release_gate)
 
     def test_quota_domain_migration_extends_the_existing_migration_chain(self):
         quota = importlib.import_module(
