@@ -7,6 +7,8 @@ boundaries, and release verification.
 
 - [Architecture](architecture/Architecture.md): component ownership and request
   flow.
+- [Artifact object storage](architecture/ArtifactObjectStorage.md): storage coupling,
+  proposed fixed-content contract and isolated RustFS validation.
 - [Pre-admission cancellation](architecture/PreAdmissionCancellation.md): durable
   cancellation receipts without fabricated Session history.
 - [Generated transcript contract](../packages/api/app_core/generated/README.md):

@@ -2,6 +2,15 @@
 
 Run from the repository root. Any failure blocks release.
 
+Artifact storage characterization is discovered by the API gate through
+`test_artifact_storage_contract.py`; service-free probe guards are discovered
+by the scripts gate through `test_artifact_storage_probe.py`. The real RustFS
+experiment is opt-in: use the pinned image and standalone locked script in
+[Artifact object storage](../architecture/ArtifactObjectStorage.md). It creates
+and removes an isolated project and is not run implicitly by ordinary CI.
+Passing that experiment does not certify production backend integration,
+data migration, backup recovery or performance.
+
 Hosted transcript capture acceptance is included in the API PostgreSQL gate.
 `test_transcript_capture_contract.py` invokes the Rust capture writer against
 the same migrated disposable database, requires its explicit success receipt,
