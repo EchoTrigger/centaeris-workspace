@@ -1,7 +1,7 @@
 # Artifact storage contract and isolated validation
 
-Status: R0/R1 evaluated on 2026-09-29. This is a proposed application storage
-boundary, not a deployed backend. Production code, schema, Core pin, P1 transcript
+Status: Contract and isolated validation completed on 2026-09-29. This is a proposed application storage
+boundary, not a deployed backend. Production code, schema, Core pin, Hosted transcript
 capture and deployment configuration are unchanged.
 
 ## Existing ownership and coupling
@@ -11,14 +11,14 @@ Paths below are relative to `packages/api/`.
 | Path / symbol | Current behavior | Artifact slice consequence |
 | --- | --- | --- |
 | `app_core/artifact_publish.py::publish_artifact` | `default_storage.exists/save/open`, bounded hashing (64 MiB maximum), durable publication identity and transactional eligibility | Keep publication authority in Django; put byte operations behind an explicit resource backend |
-| `artifact_publish.py::_ingest_artifact_library_copy` | Copies the published Artifact into the user's library through local storage | Include this copy in R2; uploading an object alone does not complete publication |
+| `artifact_publish.py::_ingest_artifact_library_copy` | Copies the published Artifact into the user's library through local storage | Include this copy in backend integration; uploading an object alone does not complete publication |
 | `app_core/http/downloads.py::_select_artifact_download` | Resolves published Artifact and rechecks user/Session access | Authorize before opening bytes; bucket prefixes do not confer access |
 | `app_core/http/storage_stream.py` | Bounded lanes, 64 KiB chunks, cancellation closes handles, missing storage currently returns 409 | Preserve streaming and cleanup; existing public download does **not** implement HTTP Range |
 | `app_core/deleted_resource_gc.py` | Ownership/generation/lease checks before deletion; library orphan cleanup also lists directories | Delete recorded resources only after eligibility checks; bucket listing is not a business-fact reconstruction mechanism |
 | `app_core/assets.py::store_immutable_bytes_at_key` | Local path, temporary file, fsync and exclusive hard link | Protects evidence/snapshot writes; Artifact publication does not use this helper. An S3 settings swap cannot reproduce these filesystem operations |
 | `app_core/http/internal.py` | Snapshot local paths and hard links | Outside the Artifact slice |
 | Plugin installation | Filesystem paths and rename/replace | Executable installation remains a filesystem concern |
-| P1 transcript captures/chunks | Fixed event association and bytes in PostgreSQL | No object-store migration or fallback in R0/R1 |
+| Hosted transcript captures/chunks | Fixed event association and bytes in PostgreSQL | No object-store migration or fallback in Contract and isolated validation |
 
 Five characterization tests in `app_core/test_artifact_storage_contract.py` cover
 concurrent immutable-helper writes, conflicting bytes, Django alternate-name
@@ -123,17 +123,17 @@ Vendor compatibility claims do not replace the pinned-image experiment.
 
 ## Decision and next boundary
 
-R0/R1 supports an **Artifact-only R2 implementation proposal**. It does not
+Contract and isolated validation support an **Artifact-only backend implementation proposal**. This does not
 justify replacing global `default_storage`, deploying RustFS or migrating data.
 Keep the local backend and existing records.
 
-R2 covers explicit backend/version metadata and tested forward migration,
+Backend integration covers explicit backend/version metadata and tested forward migration,
 Artifact publication plus the library copy, authorized streaming downloads and
 reference-aware GC. Add failing tests for DB rollback after upload, lost
 publication response, deletion versus late upload, and cleanup versus successful
 publication. Bound memory: do not promote the probe's in-memory byte API into
 production.
 
-R3 remains copy/verify/switch migration and rollback records. R4 covers quotas,
-recovery, backup/restore, upgrades and load. R5 decides whether other resources
+Existing-object migration covers copy/verify/switch migration and rollback records. Operational acceptance covers quotas,
+recovery, backup/restore, upgrades and load. Resource expansion decides whether other resources
 benefit. Each stage retains its own acceptance boundary.

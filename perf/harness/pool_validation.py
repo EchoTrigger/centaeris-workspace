@@ -1,4 +1,4 @@
-"""P6 bounded measurement; only the owned centaeris-perf stack may be changed."""
+"""Bounded connection-pool measurement; only the owned centaeris-perf stack may be changed."""
 import argparse
 import datetime
 import json
@@ -12,7 +12,7 @@ import time
 import control
 
 ROOT = control.ROOT
-PROBE_PREFIX = 'P6_POOL_PROBE '
+PROBE_PREFIX = 'CONNECTION_POOL_PROBE '
 
 
 def write(path, value):
@@ -27,7 +27,7 @@ def pool_compose_command(env_file, args):
 class PoolStack(control.Stack):
     def compose(self, args, slots=None, timeout=120, **kwargs):
         if slots is not None:
-            raise ValueError('P6 fixes worker slots to two')
+            raise ValueError('Pool validation fixes worker slots to two')
         command, env = pool_compose_command(self.env_file, args)
         return control.run(command, env=env, cwd=ROOT, timeout=timeout, **kwargs)
 
@@ -35,7 +35,7 @@ class PoolStack(control.Stack):
         ids = self.compose(['ps', '--all', '-q']).split()
         rows = json.loads(control.run(['docker', 'inspect', *ids])) if ids else []
         if any(row['Config']['Labels'].get('com.docker.compose.project') != control.PROJECT for row in rows):
-            raise RuntimeError('foreign container in P6 stack')
+            raise RuntimeError('foreign container in pool validation stack')
         return {row['Name']: row['Id'] for row in rows}
 
 
@@ -103,7 +103,7 @@ def database_sample(stack):
 def stage(stack, output, size):
     output.mkdir()
     if not stack.quiet():
-        raise RuntimeError('P6 requires an idle isolated stack')
+        raise RuntimeError('Pool validation requires an idle isolated stack')
     before = stack.all_identities()
     set_pool(size)
     stack.compose(['up', '-d', '--no-deps', '--force-recreate', 'api'], timeout=180)
@@ -126,7 +126,7 @@ def stage(stack, output, size):
             with (output / 'samples.jsonl').open('w', encoding='utf-8') as samples:
                 while process.poll() is None:
                     if time.monotonic() >= deadline:
-                        raise RuntimeError('P6 workload exceeded 210 second hard deadline')
+                        raise RuntimeError('Pool validation workload exceeded 210 second hard deadline')
                     sample = {'utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                               'database': database_sample(stack), 'resources': stack.sample()}
                     samples.write(json.dumps(sample) + '\n')
@@ -138,7 +138,7 @@ def stage(stack, output, size):
                             raise RuntimeError('service exited or exceeded memory budget')
                     time.sleep(2)
             if process.returncode:
-                raise RuntimeError('P6 workload failed; see workload evidence')
+                raise RuntimeError('Pool validation workload failed; see workload evidence')
     except Exception as error:
         failure = error
         (output / 'stop').touch()
@@ -214,7 +214,7 @@ def main():
         original = stack.env_file.read_bytes()
         try:
             for size in (8, 0):
-                print(f'P6 stage pool={size}', flush=True)
+                print(f'Pool validation stage pool={size}', flush=True)
                 stage(stack, output / f'pool-{size}', size)
             write(output / 'result.json', {'valid': True, 'stages': [8, 0]})
         except Exception as error:

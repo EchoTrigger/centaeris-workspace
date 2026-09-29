@@ -12,8 +12,8 @@ import {
   createAgentRunPresentationWork,
 } from "../../src/chat/agentRunPresentation.mjs";
 
-const sessionId = "session:p0";
-const agentRunId = "agent-run:p0";
+const sessionId = "session:baseline";
+const agentRunId = "agent-run:baseline";
 
 function event(type, sequence, payload) {
   return {
@@ -23,9 +23,9 @@ function event(type, sequence, payload) {
       eventVersion: 1,
       sequence,
       type,
-      eventId: `event:p0:${sequence}`,
+      eventId: `event:baseline:${sequence}`,
       sessionId,
-      turnId: "turn:p0",
+      turnId: "turn:baseline",
       agentRunId,
       createdAtMs: sequence,
       payload,
@@ -45,11 +45,11 @@ function generateEvents(size) {
 function historyPage(events) {
   return {
     schema: "session.history.page.v1",
-    session: { id: sessionId, workspaceId: "workspace:p0" },
+    session: { id: sessionId, workspaceId: "workspace:baseline" },
     agentRuns: [{
       id: agentRunId,
       status: "running",
-      model: { id: "model:p0", displayName: "P0" },
+      model: { id: "model:baseline", displayName: "baseline" },
       createdAt: "2026-09-13T00:00:00Z",
       startedAt: "2026-09-13T00:00:00Z",
       completedAt: null,
@@ -73,14 +73,14 @@ function liveEntry(revision, text, cursor = `${revision}-0`) {
       agentRunId,
       afterSequence: 0,
       revision,
-      turnId: "turn:p0",
-      messageId: "message:p0",
+      turnId: "turn:baseline",
+      messageId: "message:baseline",
       text,
     },
   };
 }
 
-test("Workspace Web transcript P0 scale and cursor baseline", async () => {
+test("Workspace Web transcript baseline scale and cursor baseline", async () => {
   const samples = [100, 1_000, 10_000].map((size) => {
     const historyWork = createTranscriptProjectionWork();
     const historyStartedAt = performance.now();
@@ -122,7 +122,7 @@ test("Workspace Web transcript P0 scale and cursor baseline", async () => {
   const frames = [];
   const controller = new WorkspaceChatController({
     store,
-    workspaceId: "workspace:p0",
+    workspaceId: "workspace:baseline",
     sessionId,
     agentRunId,
     initialCursor: "1-0",
@@ -152,7 +152,7 @@ test("Workspace Web transcript P0 scale and cursor baseline", async () => {
   cursorObservation.appliedAfterDrain = store.getAgentRunSnapshot(agentRunId).lastSourceSequence;
 
   console.log(JSON.stringify({
-    schema: "transcript.p0.workspace_web.v1",
+    schema: "transcript.baseline.workspace_web.v1",
     samples,
     cursorObservation,
   }));

@@ -150,7 +150,7 @@ material-link failures.
 
 Gates must not read production data, real Plugin content, or developer secrets.
 
-API PostgreSQL pool changes additionally use the bounded P6 controller described
+API PostgreSQL pool changes additionally use the bounded connection-pool controller described
 in `perf/README.md`. It records actual serving-process pool statistics, typed
 request errors, three SSE observers per accepted Run, and exact durable terminal
 accounting. Verify pool 8 followed by explicit 0 with only the API container

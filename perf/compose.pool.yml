@@ -1,4 +1,4 @@
-# P6 only: actual serving-process instrumentation and a fixed resource budget.
+# Connection-pool validation only: actual serving-process instrumentation and a fixed resource budget.
 services:
   api:
     image: centaeris-perf-api-pool:local

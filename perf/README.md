@@ -81,14 +81,14 @@ must remain visible; cancellation must not count as successful draining.
 
 ## Tests
 
-### P6 API connection-pool validation
+### Bounded API connection-pool validation
 
 After the normal isolated setup/build, use the dedicated controller:
 
 ```powershell
 python perf/harness/pool_validation.py build
 python perf/harness/pool_validation.py up
-python perf/harness/pool_validation.py run --experiment-id p6-unique-id
+python perf/harness/pool_validation.py run --experiment-id pool-validation-unique-id
 python perf/harness/pool_validation.py stop
 ```
 
@@ -117,7 +117,7 @@ stopped/replaced, so the restored file alone is not a rollback action.
 
 `Pool.Dockerfile` adds a perf-only ASGI wrapper to the normal API image. It samples
 the existing pool in the actual serving PID every second without creating a pool
-or borrowing a connection. Its `P6_POOL_PROBE` records include numeric pool
+or borrowing a connection. Its `CONNECTION_POOL_PROBE` records include numeric pool
 statistics and typed errors correlated with HTTP 500s, excluding credentials,
 request bodies and exception messages. No metrics endpoint or production API
 code is added. Pool samples, PostgreSQL connection logs, request latency/status,

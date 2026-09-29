@@ -2,7 +2,7 @@
 # requires-python = "==3.12.10"
 # dependencies = ["boto3==1.43.97"]
 # ///
-"""Isolated R1 experiment, not an application storage backend.
+"""Isolated Artifact object-storage experiment, not an application storage backend.
 
 Run: uv run --script scripts/artifact_storage_probe.py --evidence <outside-repo-dir>
 Only this program's fresh Compose project can be started, stopped or removed.

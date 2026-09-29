@@ -14,9 +14,9 @@ import time
 import uuid
 
 
-MARKER = "P6_POOL_PROBE "
-_request_started = contextvars.ContextVar("p6_request_started", default=None)
-_request_id = contextvars.ContextVar("p6_request_id", default=None)
+MARKER = "CONNECTION_POOL_PROBE "
+_request_started = contextvars.ContextVar("pool_probe_request_started", default=None)
+_request_id = contextvars.ContextVar("pool_probe_request_id", default=None)
 
 
 def pool_snapshot(enabled, pools):
@@ -120,7 +120,7 @@ class ProductionApplication:
             # Django translates most view exceptions into 500 responses before
             # returning through ASGI; this signal preserves their actual type.
             got_request_exception.connect(request_exception, weak=False,
-                                          dispatch_uid="perf-p6-pool-probe")
+                                          dispatch_uid="perf-connection-pool-probe")
         return await self.probe(scope, receive, send)
 
 
