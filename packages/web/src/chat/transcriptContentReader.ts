@@ -55,7 +55,7 @@ export class TranscriptContentReader {
   }
 
   async loadAll() {
-    while (this.snapshot.hasMore && !this.snapshot.error) {
+    while (!this.controller.signal.aborted && this.snapshot.hasMore && !this.snapshot.error) {
       await this.loadMore();
     }
   }

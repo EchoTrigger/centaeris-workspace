@@ -3,6 +3,7 @@ import test from "node:test";
 import { TranscriptContentReader } from "../../src/chat/transcriptContentReader.ts";
 import { ApiError } from "../../src/api.ts";
 import { createWorkspaceTranscriptTransport } from "../../src/chat/transcriptTransport.ts";
+import { watchTranscriptLoads } from "../helpers/transcript-reader-watchdog.mjs";
 
 function source(text) {
   const bytes = new TextEncoder().encode(text);
@@ -43,6 +44,43 @@ test("disposing a view rejects late content even when the transport ignores canc
   await pending;
   assert.equal(reader.getSnapshot().content, "");
 });
+
+for (const outcome of ["late page", "abort rejection"]) {
+  test(`disposing during loadAll terminates after ${outcome}`, async () => {
+    const watcher = watchTranscriptLoads(TranscriptContentReader);
+    let resolve;
+    let reject;
+    let signal;
+    let reads = 0;
+    const reader = new TranscriptContentReader((_offset, requestSignal) => {
+      reads++;
+      signal = requestSignal;
+      return new Promise((done, fail) => { resolve = done; reject = fail; });
+    });
+    let notifications = 0;
+    reader.subscribe(() => { notifications++; });
+    try {
+      const pending = reader.loadAll();
+      const before = reader.getSnapshot();
+      reader.dispose();
+      if (outcome === "late page") {
+        resolve({ content: "old view", startOffset: "0", endOffset: "8", hasMore: true });
+      } else {
+        reject(new DOMException("Aborted", "AbortError"));
+      }
+      await pending;
+      assert.equal(signal.aborted, true);
+      assert.equal(reads, 1);
+      assert.equal(reader.getSnapshot(), before);
+      assert.equal(notifications, 1);
+      await reader.loadAll();
+      assert.equal(reads, 1);
+    } finally {
+      reader.dispose();
+      watcher.restore();
+    }
+  });
+}
 
 test("failed continuation can retry without duplicating text", async () => {
   const text = "a".repeat(70000);
