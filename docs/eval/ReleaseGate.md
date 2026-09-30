@@ -410,8 +410,12 @@ display, revocation and platform application registration/status controls.
 
 Delegated usage must reuse private Agent/Session identities, shared browser/app
 operation receipts and digest conflicts, including deleted-resource 410 within
-the granted assistant and 404 for another assistant. Verify history/citation
-payloads, actual authorized download bytes, source ACLs, cancellation requested
+the granted assistant and 404 for another assistant. Exercise identical POST
+URL/payload retries after deleting a message's Session and after deleting the
+parent Agent of an accepted Session creation. Current grants must still be valid;
+an accepted receipt never bypasses revocation, and new operations still require
+active resources. Preserve the original receipt/Run application origin. Verify
+history/citation payloads, actual authorized download bytes, source ACLs, cancellation requested
 without fabricated terminal state, and multipart SessionAssetLink identities.
 Run authorization must retain all Session asset refs and only the current
 message's attachment refs. Global Library and arbitrary existing-file attachment

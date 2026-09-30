@@ -13,7 +13,7 @@ from ninja.responses import codes_4xx
 from pydantic import Field, ValidationError, field_validator
 
 from app_core.assets import captured_input_fields
-from app_core.app_delegations import require_delegated_agent, require_request_delegation
+from app_core.app_delegations import require_delegated_agent, require_delegated_session, require_request_delegation
 from app_core.execution_admission import queued_admission_error
 from app_core.hosted_operations import (
     OPERATION_ID_PATTERN,
@@ -524,7 +524,7 @@ def create_workspace_session(request, workspace_id: str, payload: SessionCreateR
             return Status(404, {"error": "workspace_not_found"})
         workspace = membership.workspace
         grant = require_request_delegation(request, "sessions:create", workspace_id=workspace_id,
-                                            agent_id=payload.agent_id, lock=True)
+                                            agent_id=payload.agent_id, lock=True, require_active=False)
         digest = request_digest(payload)
         try:
             receipt = replay_operation(request.user, workspace_id, "createSession", payload.operation_id, digest,
@@ -533,6 +533,8 @@ def create_workspace_session(request, workspace_id: str, payload: SessionCreateR
             return Status(error.status, {"error": error.code})
         if receipt is not None:
             return Status(201, serialize_operation(receipt))
+        if grant is not None:
+            require_delegated_agent(grant, payload.agent_id)
         agent = Agent.objects.select_for_update().filter(
             id=payload.agent_id,
             workspace=workspace,
@@ -1172,11 +1174,16 @@ def create_session_message(
             grant = require_request_delegation(request, "messages:submit", workspace_id=workspace_id,
                 agent_id=payload.agent_id, session_id=session_id,
                 additional_scopes=(["sessions:create"] if session_id == "new" else [])
-                    + (["attachments:write"] if uploads else []), lock=True)
+                    + (["attachments:write"] if uploads else []), lock=True, require_active=False)
             receipt = replay_operation(request.user, workspace_id, "submitMessage", payload.operation_id, digest,
                                        app_delegation=grant)
             if receipt is not None:
                 return Status(202, serialize_operation(receipt))
+            if grant is not None:
+                if payload.agent_id is not None:
+                    require_delegated_agent(grant, payload.agent_id)
+                if session_id != "new":
+                    require_delegated_session(grant, session_id)
     except ValueError as error:
         return Status(400, {"error": str(error)})
     except HostedOperationError as error:
@@ -1261,11 +1268,16 @@ def create_session_message(
             grant = require_request_delegation(request, "messages:submit", workspace_id=workspace_id,
                 agent_id=payload.agent_id, session_id=session_id,
                 additional_scopes=(["sessions:create"] if session_id == "new" else [])
-                    + (["attachments:write"] if uploads else []), lock=True)
+                    + (["attachments:write"] if uploads else []), lock=True, require_active=False)
             receipt = replay_operation(request.user, workspace_id, "submitMessage", payload.operation_id, digest,
                                        app_delegation=grant)
             if receipt is not None:
                 raise AcceptedOperationReplay(receipt)
+            if grant is not None:
+                if payload.agent_id is not None:
+                    require_delegated_agent(grant, payload.agent_id)
+                if session_id != "new":
+                    require_delegated_session(grant, session_id)
             admission_error = queued_admission_error(workspace.id)
             if admission_error is not None:
                 raise AgentSessionCreationError(*admission_error)

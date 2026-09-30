@@ -53,9 +53,12 @@ def authenticate_delegation(token, scope):
     return require_current_delegation(delegation_id, scope)
 
 
-def require_delegated_agent(grant, agent_id):
-    agent = Agent.objects.filter(id=agent_id, workspace_id=grant.workspace_id, owner_id=grant.user_id,
-                                 definition_id=grant.definition_id, status="active").first()
+def require_delegated_agent(grant, agent_id, *, require_active=True):
+    query = Agent.objects.filter(id=agent_id, workspace_id=grant.workspace_id, owner_id=grant.user_id,
+                                 definition_id=grant.definition_id)
+    if require_active:
+        query = query.filter(status="active")
+    agent = query.first()
     if agent is None:
         raise DelegationRejected("agent_not_found", 404)
     return agent
@@ -73,7 +76,7 @@ def require_delegated_session(grant, session_id, *, require_active=True):
 
 
 def require_request_delegation(request, scope, *, workspace_id=None, agent_id=None, session_id=None,
-                               additional_scopes=(), lock=False):
+                               additional_scopes=(), lock=False, require_active=True):
     grant = getattr(request, "app_delegation", None)
     if grant is None:
         return None
@@ -86,9 +89,9 @@ def require_request_delegation(request, scope, *, workspace_id=None, agent_id=No
     if workspace_id is not None and workspace_id != grant.workspace_id:
         raise DelegationRejected("workspace_not_found", 404)
     if agent_id is not None:
-        require_delegated_agent(grant, agent_id)
+        require_delegated_agent(grant, agent_id, require_active=require_active)
     if session_id is not None and session_id != "new":
-        require_delegated_session(grant, session_id)
+        require_delegated_session(grant, session_id, require_active=require_active)
     request.app_delegation = grant
     return grant
 
@@ -106,7 +109,10 @@ def authorize_delegated_request(request, grant):
             if "sessions:create" not in grant.scopes:
                 raise DelegationRejected("delegation_scope_forbidden")
         else:
-            require_delegated_session(grant, values["session_id"])
+            # Message retries must reach their existing receipt before checking
+            # lifecycle state. Ownership and assistant binding still apply.
+            message_submission = request.method == "POST" and request.resolver_match.url_name == "create_session_message"
+            require_delegated_session(grant, values["session_id"], require_active=not message_submission)
         if "agent_run_id" in values and not AgentRun.objects.filter(id=values["agent_run_id"],
             session_id=values["session_id"], user_id=grant.user_id, workspace_id=grant.workspace_id).exists():
             raise DelegationRejected("agent_run_not_found", 404)
