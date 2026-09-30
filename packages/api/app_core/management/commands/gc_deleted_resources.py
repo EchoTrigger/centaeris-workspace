@@ -9,10 +9,14 @@ from app_core.deleted_resource_gc import (
     expire_trash,
 )
 from app_core.trash_retention import trash_cutoff
+from app_core.workspace_snapshot_gc import (
+    WorkspaceSnapshotGcError,
+    collect_workspace_snapshot_gc,
+)
 
 
 class Command(BaseCommand):
-    help = "Reclaim tombstoned source, library, and artifact resources after retention."
+    help = "Reclaim permanently deleted workspace snapshots and tombstoned resources after retention."
 
     def add_arguments(self, parser):
         parser.add_argument("--older-than-seconds", type=int, default=30 * 24 * 60 * 60)
@@ -54,6 +58,24 @@ class Command(BaseCommand):
         )
         if report.failures:
             raise CommandError(f"GC failed for {len(report.failures)} deleted resources")
+        try:
+            snapshot_report = collect_workspace_snapshot_gc(cutoff, dry_run)
+        except WorkspaceSnapshotGcError as error:
+            raise CommandError(str(error)) from error
+        action = "Would clean" if dry_run else "Cleaned"
+        for key in snapshot_report.planned + snapshot_report.cleaned:
+            self.stdout.write(f"{action} workspace snapshot key {key}")
+        for key in snapshot_report.blocked:
+            self.stdout.write(f"Blocked workspace snapshot key {key}")
+        for failure in snapshot_report.failures:
+            self.stdout.write(f"Failed workspace snapshot key {failure}")
+        self.stdout.write(
+            f"{action} {len(snapshot_report.planned) if dry_run else len(snapshot_report.cleaned)} "
+            f"workspace snapshot keys; blocked {len(snapshot_report.blocked)}; "
+            f"failed {len(snapshot_report.failures)}"
+        )
+        if snapshot_report.failures:
+            raise CommandError(f"Workspace snapshot GC failed for {len(snapshot_report.failures)} keys")
         if options["orphaned_library"]:
             orphan_report = collect_orphaned_library_gc(cutoff, dry_run)
             action = "Would clean" if dry_run else "Cleaned"

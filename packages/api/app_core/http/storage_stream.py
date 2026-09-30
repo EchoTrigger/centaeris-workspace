@@ -3,7 +3,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from queue import Empty, Queue
 from threading import Lock
-from typing import BinaryIO, Callable, TypeVar
+from typing import Awaitable, BinaryIO, Callable, TypeVar
 
 from django.conf import settings
 from django.core.files.storage import default_storage
@@ -155,7 +155,11 @@ class AsyncStorageStream:
             raise cancellation
 
 
-async def open_storage_stream(storage_key: str) -> AsyncStorageStream:
+async def open_storage_stream(
+    storage_key: str,
+    *,
+    authorized_open: Callable[[], Awaitable[BinaryIO]] | None = None,
+) -> AsyncStorageStream:
     lane = _lane_pool.acquire()
 
     def open_handle() -> BinaryIO:
@@ -166,7 +170,12 @@ async def open_storage_stream(storage_key: str) -> AsyncStorageStream:
         except FileNotFoundError as error:
             raise StoredObjectUnavailable("stored_object_not_available") from error
 
-    open_task = asyncio.create_task(lane.run(open_handle))
+    async def selected_open() -> BinaryIO:
+        if authorized_open is not None:
+            return await authorized_open()
+        return await lane.run(open_handle)
+
+    open_task = asyncio.create_task(selected_open())
     cancellation = None
     while not open_task.done():
         try:
@@ -177,7 +186,7 @@ async def open_storage_stream(storage_key: str) -> AsyncStorageStream:
             break
     try:
         handle = open_task.result()
-    except Exception:
+    except BaseException:
         _lane_pool.release(lane)
         if cancellation is not None:
             raise cancellation
@@ -202,11 +211,12 @@ async def stored_file_response(
     *,
     as_attachment: bool = True,
     content_length: int | None = None,
+    authorized_open: Callable[[], Awaitable[BinaryIO]] | None = None,
 ):
     if content_length is not None and content_length < 0:
         raise ValueError("storage stream content length must be non-negative")
     try:
-        stream = await open_storage_stream(storage_key)
+        stream = await open_storage_stream(storage_key, authorized_open=authorized_open)
     except StorageStreamCapacityExhausted:
         return JsonResponse(
             {"error": "storage_stream_capacity_exhausted"},
@@ -215,15 +225,19 @@ async def stored_file_response(
     except StoredObjectUnavailable:
         return JsonResponse({"error": "stored_object_not_available"}, status=409)
 
-    if not as_attachment and content_type.partition(";")[0].strip().lower() in {"text/plain", "text/markdown"} and "charset=" not in content_type.lower():
-        content_type += "; charset=utf-8"
-    response = OwnedAsyncStreamingHttpResponse(
-        stream,
-        content_type=content_type or "application/octet-stream",
-    )
-    disposition = content_disposition_header(as_attachment, filename)
-    if disposition:
-        response["Content-Disposition"] = disposition
-    if content_length is not None:
-        response["Content-Length"] = str(content_length)
-    return response
+    try:
+        if not as_attachment and content_type.partition(";")[0].strip().lower() in {"text/plain", "text/markdown"} and "charset=" not in content_type.lower():
+            content_type += "; charset=utf-8"
+        response = OwnedAsyncStreamingHttpResponse(
+            stream,
+            content_type=content_type or "application/octet-stream",
+        )
+        disposition = content_disposition_header(as_attachment, filename)
+        if disposition:
+            response["Content-Disposition"] = disposition
+        if content_length is not None:
+            response["Content-Length"] = str(content_length)
+        return response
+    except BaseException:
+        await stream.aclose()
+        raise

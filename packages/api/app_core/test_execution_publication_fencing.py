@@ -1,22 +1,29 @@
 """Exercise snapshot publication across real, independently committed lease changes."""
 
 import hashlib
+import io
 import json
+import os
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event, current_thread
 from unittest.mock import patch
 
+from asgiref.sync import async_to_sync
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.db import connection, connections
 from django.test import Client, TransactionTestCase, override_settings
+from django.utils import timezone
 
 from .agent_run_authorization_factory import create_agent_run_authorization
-from .http import internal
+from .http import internal, workspaces
 from .models import AgentRun, ModelConfig, Workspace
 from .testing import create_session
 
@@ -198,6 +205,350 @@ class ExecutionPublicationFencingTests(TransactionTestCase):
         self.run.refresh_from_db()
         self.assertEqual(self.session.workspaceGeneration, 0)
         self.assertEqual(self.run.status, "completed")
+
+    def _purge_session(self):
+        now = timezone.now()
+        type(self.session).objects.filter(id=self.session.id).update(
+            status="deleted", deletedAt=now, purgedAt=now,
+        )
+
+    def test_purged_session_during_upload_cannot_create_final_snapshot(self):
+        stale = self._during_upload(self._purge_session)
+        self._assert_error(stale, "session_workspace_session_unavailable")
+        self.session.refresh_from_db()
+        self.assertEqual(self.session.workspaceGeneration, 0)
+        self.assertEqual(list(self.storage_root.rglob("*.snapshot")), [])
+        self._assert_no_upload_temporaries()
+
+    def test_checkpoint_stage_purged_during_upload_is_rejected_without_final_bytes(self):
+        body, _snapshot = self._body()
+        metadata_size = int.from_bytes(body[:4], "big")
+        metadata = json.loads(body[4:4 + metadata_size])
+        metadata.update(
+            schema="runtime.execution_workspace.stage.v1", checkpointId="checkpoint:purge-race",
+        )
+        encoded = json.dumps(metadata, separators=(",", ":")).encode()
+        stage_body = len(encoded).to_bytes(4, "big") + encoded + body[4 + metadata_size:]
+        original_post = self._post
+
+        def post_stage(_body):
+            return Client().post(
+                "/internal/agent-runs/execution-workspace/stage", data=stage_body,
+                content_type="application/octet-stream",
+                HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN,
+            )
+
+        self._post = post_stage
+        try:
+            stale = self._during_upload(self._purge_session)
+        finally:
+            self._post = original_post
+        self._assert_error(stale, "session_workspace_session_unavailable")
+        self.assertEqual(list(self.storage_root.rglob("*.snapshot")), [])
+        self._assert_no_upload_temporaries()
+
+    def test_purge_and_gc_during_snapshot_payload_reject_publication(self):
+        self._purge_and_gc_during_payload(checkpoint=False)
+
+    def test_purge_and_gc_during_checkpoint_payload_reject_publication(self):
+        self._purge_and_gc_during_payload(checkpoint=True)
+
+    def _purge_and_gc_during_payload(self, *, checkpoint):
+        body, snapshot = self._body(b"A" * (256 * 1024))
+        if checkpoint:
+            metadata_size = int.from_bytes(body[:4], "big")
+            metadata = json.loads(body[4:4 + metadata_size])
+            metadata.update(
+                schema="runtime.execution_workspace.stage.v1",
+                checkpointId="checkpoint:payload-purge-race",
+            )
+            encoded = json.dumps(metadata, separators=(",", ":")).encode()
+            body = len(encoded).to_bytes(4, "big") + encoded + snapshot
+
+        copying, release = Event(), Event()
+        real_read = internal._WorkspaceSnapshotReader.read
+        reads = 0
+
+        def paused_read(reader, size=-1):
+            nonlocal reads
+            reads += 1
+            if reads == 2:
+                copying.set()
+                if not release.wait(10):
+                    raise TimeoutError("In-flight snapshot upload was not released")
+            return real_read(reader, size)
+
+        def upload():
+            try:
+                endpoint = (
+                    "/internal/agent-runs/execution-workspace/stage" if checkpoint
+                    else "/internal/agent-runs/session-workspace/commit"
+                )
+                return Client().post(
+                    endpoint, data=body, content_type="application/octet-stream",
+                    HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN,
+                )
+            finally:
+                connections.close_all()
+
+        with patch.object(internal._WorkspaceSnapshotReader, "read", paused_read):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                pending = executor.submit(upload)
+                try:
+                    self.assertTrue(copying.wait(5))
+                    temporaries = list(self.storage_root.rglob(".centaeris-immutable-*.tmp"))
+                    self.assertEqual(len(temporaries), 1)
+                    self.assertGreater(temporaries[0].stat().st_size, 0)
+                    self._purge_session()
+                    try:
+                        call_command("gc_deleted_resources", older_than_seconds=0, stdout=io.StringIO())
+                    except CommandError as error:
+                        self.assertEqual(os.name, "nt", "POSIX should unlink an open temporary")
+                        self.assertIn("Workspace snapshot GC failed", str(error))
+                    else:
+                        self.assertFalse(temporaries[0].exists())
+                finally:
+                    release.set()
+                rejected = pending.result(timeout=10)
+        self._assert_error(rejected, "session_workspace_session_unavailable")
+        call_command("gc_deleted_resources", older_than_seconds=0, stdout=io.StringIO())
+        self.assertEqual(list(self.storage_root.rglob("*.snapshot")), [])
+        self._assert_no_upload_temporaries()
+
+    def test_existing_snapshot_recheck_racing_purge_and_gc_is_controlled(self):
+        body, _snapshot = self._body()
+        self.assertEqual(self._post(body).status_code, 201)
+        self.session.refresh_from_db()
+        key = self.session.workspaceStorageKey
+        opening, release = Event(), Event()
+        real_open = default_storage.open
+        caller = current_thread()
+
+        def paused_open(storage_key, mode):
+            if storage_key == key and current_thread() is not caller:
+                opening.set()
+                if not release.wait(10):
+                    raise TimeoutError("Existing snapshot read was not released")
+            return real_open(storage_key, mode)
+
+        with patch.object(default_storage, "open", side_effect=paused_open):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                pending = executor.submit(self._thread_post, body)
+                try:
+                    self.assertTrue(opening.wait(5))
+                    self._purge_session()
+                    try:
+                        call_command("gc_deleted_resources", older_than_seconds=0, stdout=io.StringIO())
+                    except CommandError as error:
+                        # Windows can retain the open upload temporary until
+                        # the request exits; that failure remains retryable.
+                        self.assertIn("Workspace snapshot GC failed", str(error))
+                    self.assertFalse(default_storage.exists(key))
+                finally:
+                    release.set()
+                stale = pending.result(timeout=10)
+        self._assert_error(stale, "session_workspace_session_unavailable")
+        call_command("gc_deleted_resources", older_than_seconds=0, stdout=io.StringIO())
+        self._assert_no_upload_temporaries()
+
+    def _download_body(self):
+        body, snapshot = self._body()
+        self.assertEqual(self._post(body).status_code, 201)
+        self.session.refresh_from_db()
+        self.authorization.delete()
+        self.authorization = create_agent_run_authorization(
+            self.run, image_digest="sha256:" + "a" * 64,
+        )
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE runtime.runtime_jobs SET idempotency_key=%s WHERE job_id=%s",
+                [f"{self.job_id}:{self.authorization.digest}", self.job_id],
+            )
+        return {
+            "schema": "runtime.session_workspace.download.v1",
+            "jobId": self.job_id, "leaseOwner": self.owner,
+            "agentRunId": self.run.id, "authorizationDigest": self.authorization.digest,
+        }, snapshot
+
+    def _checkpoint_download_body(self):
+        body, snapshot = self._body()
+        metadata_size = int.from_bytes(body[:4], "big")
+        metadata = json.loads(body[4:4 + metadata_size])
+        checkpoint_id = "checkpoint:download-purge-race"
+        metadata.update(schema="runtime.execution_workspace.stage.v1", checkpointId=checkpoint_id)
+        encoded = json.dumps(metadata, separators=(",", ":")).encode()
+        staged = Client().post(
+            "/internal/agent-runs/execution-workspace/stage",
+            data=len(encoded).to_bytes(4, "big") + encoded + snapshot,
+            content_type="application/octet-stream",
+            HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN,
+        )
+        self.assertEqual(staged.status_code, 201, staged.content)
+        stored_snapshot = {name: staged.json()[name] for name in (
+            "objectRef", "snapshotSha256", "snapshotSizeBytes", "expandedSizeBytes", "fileCount",
+        )}
+        checkpoint = {
+            "schema": "runtime.recovery_checkpoint.v1", "checkpointId": checkpoint_id,
+            "sessionId": self.session.id, "agentRunId": self.run.id,
+            "executionId": "execution:download-purge-race",
+            "authorizationDigest": self.authorization.digest, "sessionSequence": 1,
+            "modelRequestId": "request:download-purge-race",
+            "workspaceSnapshot": stored_snapshot, "createdAtMs": 1,
+        }
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "CREATE TABLE IF NOT EXISTS runtime.checkpoints("
+                "checkpoint_id text PRIMARY KEY, kind text NOT NULL, "
+                "session_id text NOT NULL, turn_id text NOT NULL, status text NOT NULL, "
+                "done_reason text, updated_at_ms bigint NOT NULL, payload_json text NOT NULL)"
+            )
+            cursor.execute(
+                "INSERT INTO runtime.checkpoints("
+                "checkpoint_id,kind,session_id,turn_id,status,done_reason,updated_at_ms,payload_json) "
+                "VALUES(%s,'recovery',%s,%s,'committed',NULL,1,%s)",
+                [checkpoint_id, self.session.id, self.run.turn_id,
+                 json.dumps(checkpoint, separators=(",", ":"))],
+            )
+
+        def delete_checkpoint():
+            with connection.cursor() as cursor:
+                cursor.execute("DELETE FROM runtime.checkpoints WHERE checkpoint_id=%s", [checkpoint_id])
+
+        self.addCleanup(delete_checkpoint)
+        return {
+            "schema": "runtime.execution_workspace.download.v1", "checkpointId": checkpoint_id,
+            "jobId": self.job_id, "leaseOwner": self.owner,
+            "agentRunId": self.run.id, "authorizationDigest": self.authorization.digest,
+        }, snapshot, stored_snapshot["objectRef"]
+
+    def _thread_download(self, body, *, checkpoint=False):
+        try:
+            endpoint = (
+                "/internal/agent-runs/execution-workspace/download" if checkpoint
+                else "/internal/agent-runs/session-workspace/download"
+            )
+            return Client().post(
+                endpoint, data=body,
+                content_type="application/json", HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN,
+            )
+        finally:
+            connections.close_all()
+
+    def test_snapshot_download_opens_before_concurrent_purge_can_finish(self):
+        body, snapshot = self._download_body()
+        self._download_open_purge_race(body, snapshot, self.session.workspaceStorageKey)
+
+    def test_checkpoint_download_opens_before_concurrent_purge_can_finish(self):
+        body, snapshot, key = self._checkpoint_download_body()
+        self._download_open_purge_race(body, snapshot, key, checkpoint=True)
+
+    def _download_open_purge_race(self, body, snapshot, key, *, checkpoint=False):
+        opening, release, purging = Event(), Event(), Event()
+        real_open = default_storage.open
+        response = None
+
+        def paused_open(storage_key, mode):
+            if storage_key == key:
+                opening.set()
+                if not release.wait(10):
+                    raise TimeoutError("Snapshot download open was not released")
+            return real_open(storage_key, mode)
+
+        def purge():
+            try:
+                purging.set()
+                self._purge_session()
+            finally:
+                connections.close_all()
+
+        try:
+            with patch.object(default_storage, "open", side_effect=paused_open):
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    download = executor.submit(self._thread_download, body, checkpoint=checkpoint)
+                    try:
+                        self.assertTrue(opening.wait(5))
+                        deletion = executor.submit(purge)
+                        self.assertTrue(purging.wait(5))
+                        try:
+                            deletion.result(timeout=0.2)
+                            waited_for_open = False
+                        except TimeoutError:
+                            waited_for_open = True
+                    finally:
+                        release.set()
+                    response = download.result(timeout=10)
+                    deletion.result(timeout=10)
+            self.assertTrue(waited_for_open, "Purge passed authorization before the file was opened")
+            self.assertEqual(response.status_code, 200, getattr(response, "content", b""))
+            try:
+                call_command("gc_deleted_resources", older_than_seconds=0, stdout=io.StringIO())
+            except CommandError as error:
+                self.assertIn("Workspace snapshot GC failed", str(error))
+
+            async def consume():
+                return b"".join([chunk async for chunk in response.streaming_content])
+
+            self.assertEqual(async_to_sync(consume)(), snapshot)
+        finally:
+            if response is not None:
+                response.close()
+        call_command("gc_deleted_resources", older_than_seconds=0, stdout=io.StringIO())
+        self.assertFalse(default_storage.exists(key))
+        self._assert_error(
+            self._thread_download(body, checkpoint=checkpoint), "session_workspace_session_unavailable",
+        )
+
+    def test_public_session_delete_and_snapshot_upload_do_not_deadlock(self):
+        deleting, release_delete = Event(), Event()
+        real_owned_session = workspaces._locked_owned_session
+        user = self.run.user
+
+        def paused_owned_session(*args):
+            result = real_owned_session(*args)
+            deleting.set()
+            if not release_delete.wait(10):
+                raise TimeoutError("Session deletion was not released")
+            return result
+
+        def delete():
+            try:
+                client = Client()
+                client.force_login(user)
+                return client.delete(f"/api/sessions/{self.session.id}")
+            finally:
+                connections.close_all()
+
+        with (
+            patch.object(workspaces, "_locked_owned_session", paused_owned_session),
+            patch.object(workspaces, "request_agent_run_cancellation", return_value={"disposition": "requested"}),
+        ):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                deletion = executor.submit(delete)
+                try:
+                    self.assertTrue(deleting.wait(5))
+                    upload = executor.submit(self._thread_post, self._body()[0])
+                    waiting = False
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        with connection.cursor() as cursor:
+                            cursor.execute(
+                                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity "
+                                "WHERE datname=current_database() AND wait_event_type='Lock' "
+                                "AND query LIKE '%%app_core_session%%')"
+                            )
+                            waiting = cursor.fetchone()[0]
+                        if waiting:
+                            break
+                        time.sleep(0.02)
+                    self.assertTrue(waiting, "Upload did not reach the concurrent Session lock")
+                finally:
+                    release_delete.set()
+                deleted = deletion.result(timeout=10)
+                rejected = upload.result(timeout=10)
+        self.assertEqual(deleted.status_code, 200, deleted.content)
+        self._assert_error(rejected, "session_workspace_session_unavailable")
+        self.assertEqual(list(self.storage_root.rglob("*.snapshot")), [])
+        self._assert_no_upload_temporaries()
 
     def test_replay_keeps_one_generation_and_terminal_run_cannot_republish(self):
         body, snapshot = self._body()

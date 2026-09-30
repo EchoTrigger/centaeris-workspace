@@ -3,6 +3,8 @@ import json
 import logging
 import os
 import tempfile
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 
 from asgiref.sync import sync_to_async
 from django.conf import settings
@@ -55,7 +57,7 @@ from app_core.workspace_access import agent_run_membership_is_current
 
 from .json_body import decode_json_object
 from .security import internal_token_auth
-from .storage_stream import stored_file_response
+from .storage_stream import StoredObjectUnavailable, stored_file_response
 
 
 logger = logging.getLogger(__name__)
@@ -284,42 +286,134 @@ class _WorkspaceSnapshotReader:
             raise SessionWorkspaceError("session_workspace_snapshot_invalid", 400)
 
 
-def _store_workspace_snapshot(request, candidate: dict, storage_key: str) -> None:
+@dataclass
+class _WorkspaceSnapshotUpload:
+    descriptor: int
+    temporary_path: str
+    validated: bool = False
+    existing_verified: bool = False
+
+
+@contextmanager
+def _workspace_snapshot_upload(storage_key: str):
+    """Create directory entries while the owning active Session is locked."""
+    if not storage_key:
+        yield None
+        return
+    parent = os.path.dirname(default_storage.path(storage_key))
+    os.makedirs(parent, exist_ok=True)
+    descriptor, temporary_path = tempfile.mkstemp(
+        dir=parent, prefix=".centaeris-immutable-", suffix=".tmp"
+    )
+    upload = _WorkspaceSnapshotUpload(descriptor, temporary_path)
+    try:
+        yield upload
+    finally:
+        if upload.descriptor >= 0:
+            os.close(upload.descriptor)
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            # GC may unlink a purged owner's open temporary on POSIX.
+            pass
+
+
+def _store_workspace_snapshot(
+    request, candidate: dict, storage_key: str, upload: _WorkspaceSnapshotUpload | None,
+    body: dict,
+) -> None:
     if not candidate["snapshotSizeBytes"]:
         _require_workspace_eof(request)
         return
     reader = _WorkspaceSnapshotReader(request, candidate)
     if default_storage.exists(storage_key):
-        _verify_workspace_snapshot(candidate, storage_key)
+        _verify_owned_workspace_snapshot(body, candidate, storage_key)
         while reader.read(64 * 1024):
             pass
         reader.require_complete()
+        upload.validated = True
+        upload.existing_verified = True
         return
 
-    # Match the immutable-file publication used by assets: a shared hash key
-    # must never expose partial input or be removed by another upload's cleanup.
-    # Storage is local; unsupported atomic linking fails without a copy fallback.
+    descriptor = upload.descriptor
+    upload.descriptor = -1
+    with os.fdopen(descriptor, "wb") as temporary:
+        while chunk := reader.read(64 * 1024):
+            temporary.write(chunk)
+        reader.require_complete()
+        temporary.flush()
+        os.fsync(temporary.fileno())
+    upload.validated = True
+
+
+def _link_workspace_snapshot(storage_key: str, upload: _WorkspaceSnapshotUpload | None) -> bool:
+    """Publish only under the final active-Session fence; collisions verify outside it."""
+    if not storage_key:
+        return True
+    if upload is None or not upload.validated:
+        raise RuntimeError("workspace snapshot upload was not validated")
+    if upload.existing_verified:
+        return True
     final_path = default_storage.path(storage_key)
-    parent = os.path.dirname(final_path)
-    os.makedirs(parent, exist_ok=True)
-    descriptor, temporary_path = tempfile.mkstemp(
-        dir=parent, prefix=".centaeris-immutable-", suffix=".tmp"
-    )
     try:
-        with os.fdopen(descriptor, "wb") as temporary:
-            while chunk := reader.read(64 * 1024):
-                temporary.write(chunk)
-            reader.require_complete()
-            temporary.flush()
-            os.fsync(temporary.fileno())
-        try:
-            os.link(temporary_path, final_path)
-        except FileExistsError:
-            _verify_workspace_snapshot(candidate, storage_key)
-        else:
-            _sync_directory(parent)
-    finally:
-        os.unlink(temporary_path)
+        os.link(upload.temporary_path, final_path)
+    except FileExistsError:
+        return False
+    _sync_directory(os.path.dirname(final_path))
+    return True
+
+
+def _publish_workspace_snapshot(
+    body: dict, candidate: dict, storage_key: str, upload: _WorkspaceSnapshotUpload | None,
+    *, advance_session: bool,
+) -> str:
+    def publish():
+        with transaction.atomic():
+            agent_run, session, frozen = _locked_session_workspace_agent_run(body)
+            replay = advance_session and _is_workspace_commit_replay(
+                session, candidate, agent_run, storage_key,
+            )
+            if advance_session and not replay:
+                _require_workspace_baseline(session, frozen)
+            if not _link_workspace_snapshot(storage_key, upload):
+                return None
+            if not advance_session:
+                return "staged"
+            if replay:
+                return "idempotent"
+            session.workspaceGeneration = candidate["generation"]
+            session.workspaceStorageKey = storage_key
+            session.workspaceSnapshotSha256 = candidate["snapshotSha256"]
+            session.workspaceSnapshotSizeBytes = candidate["snapshotSizeBytes"]
+            session.workspaceExpandedSizeBytes = candidate["expandedSizeBytes"]
+            session.workspaceFileCount = candidate["fileCount"]
+            session.workspaceLastAdvancedAgentRun = agent_run
+            session.save(update_fields=[
+                "workspaceGeneration", "workspaceStorageKey", "workspaceSnapshotSha256",
+                "workspaceSnapshotSizeBytes", "workspaceExpandedSizeBytes", "workspaceFileCount",
+                "workspaceLastAdvancedAgentRun", "updatedAt",
+            ])
+            return "committed"
+
+    disposition = publish()
+    if disposition is None:
+        # A concurrent immutable writer won the same key. Full verification
+        # happens without row locks; publication then rechecks all owner facts.
+        _verify_owned_workspace_snapshot(body, candidate, storage_key)
+        upload.existing_verified = True
+        disposition = publish()
+    return disposition
+
+
+def _verify_owned_workspace_snapshot(body: dict, candidate: dict, storage_key: str) -> None:
+    try:
+        _verify_workspace_snapshot(candidate, storage_key)
+    except FileNotFoundError:
+        # Permanent deletion may reclaim an existing key during the unlocked
+        # verification phase. Preserve the owner/lease conflict instead of 500.
+        with transaction.atomic():
+            _locked_session_workspace_agent_run(body)
+        raise SessionWorkspaceError("session_workspace_snapshot_invalid") from None
 
 
 def _verify_workspace_snapshot(candidate: dict, storage_key: str) -> None:
@@ -400,23 +494,25 @@ def _require_workspace_eof(request) -> None:
 
 
 def _locked_session_workspace_agent_run(body: dict) -> tuple[AgentRun, Session, dict]:
+    lease_query = (
+        "SELECT session_id FROM runtime.runtime_jobs "
+        "WHERE job_id=%s AND job_kind='agent_run.lifecycle' AND status='running' "
+        "AND lease_owner=%s AND payload_ref=%s AND idempotency_key=%s "
+        "AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint"
+    )
+    lease_parameters = [
+        body["jobId"], body["leaseOwner"], f"record:agent_run:{body['agentRunId']}",
+        f"agent_run.lifecycle:{body['agentRunId']}:{body['authorizationDigest']}",
+    ]
     with connection.cursor() as cursor:
-        cursor.execute(
-            "SELECT session_id FROM runtime.runtime_jobs "
-            "WHERE job_id=%s AND job_kind='agent_run.lifecycle' AND status='running' "
-            "AND lease_owner=%s AND payload_ref=%s AND idempotency_key=%s "
-            "AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint "
-            "FOR UPDATE",
-            [
-                body["jobId"],
-                body["leaseOwner"],
-                f"record:agent_run:{body['agentRunId']}",
-                f"agent_run.lifecycle:{body['agentRunId']}:{body['authorizationDigest']}",
-            ],
-        )
+        cursor.execute(lease_query, lease_parameters)
         job = cursor.fetchone()
     if job is None:
         raise SessionWorkspaceError("session_workspace_lease_lost")
+    # Session deletion locks the owner before its Runs and requests cancellation.
+    # Acquire that same owner and Run first, then lock and recheck the lease;
+    # a read-only probe is not authority to publish after waiting for the locks.
+    session = Session.objects.select_for_update().filter(id=job[0]).first()
     try:
         agent_run = (
             AgentRun.objects.select_for_update(of=("self",))
@@ -425,14 +521,17 @@ def _locked_session_workspace_agent_run(body: dict) -> tuple[AgentRun, Session, 
         )
     except AgentRun.DoesNotExist:
         raise SessionWorkspaceError("session_workspace_agent_run_not_found") from None
+    with connection.cursor() as cursor:
+        cursor.execute(lease_query + " FOR UPDATE", lease_parameters)
+        locked_job = cursor.fetchone()
+    if locked_job is None or locked_job != job:
+        raise SessionWorkspaceError("session_workspace_lease_lost")
     if not agent_run_membership_is_current(agent_run):
         raise SessionWorkspaceError("session_workspace_agent_run_not_found")
     if job[0] != agent_run.session_id:
         raise SessionWorkspaceError("session_workspace_lease_lost")
-    try:
-        session = Session.objects.select_for_update().get(id=agent_run.session_id)
-    except Session.DoesNotExist:
-        raise SessionWorkspaceError("session_workspace_session_unavailable") from None
+    if session is None:
+        raise SessionWorkspaceError("session_workspace_session_unavailable")
     try:
         authorization = agent_run.authorization
         digest = authorization_digest(authorization.payload)
@@ -564,20 +663,33 @@ async def download_session_workspace(request):
     if isinstance(prepared, JsonResponse):
         return prepared
     frozen, storage_key = prepared
-    response = await stored_file_response(
-        storage_key,
-        "application/vnd.centaeris.workspace-snapshot",
-        f"workspace-{frozen['generation']}.snapshot",
-        as_attachment=False,
-        content_length=frozen["snapshotSizeBytes"],
-    )
+    async def authorized_open():
+        _frozen, handle = await _prepare_session_workspace_download(request, open_file=True)
+        return handle
+
+    try:
+        response = await stored_file_response(
+            storage_key,
+            "application/vnd.centaeris.workspace-snapshot",
+            f"workspace-{frozen['generation']}.snapshot",
+            as_attachment=False,
+            content_length=frozen["snapshotSizeBytes"],
+            authorized_open=authorized_open,
+        )
+    except SessionWorkspaceError as error:
+        return JsonResponse({"error": error.code}, status=error.status)
+    except Exception:
+        logger.exception("Session workspace download preparation failed")
+        return JsonResponse({"error": "session_workspace_download_failed"}, status=500)
     if response.status_code == 200:
         response["X-Content-Sha256"] = frozen["snapshotSha256"]
     return response
 
 
 @sync_to_async(thread_sensitive=True)
-def _prepare_session_workspace_download(request):
+def _prepare_session_workspace_download(request, *, open_file=False):
+    handle = None
+    transferred = False
     try:
         body = _workspace_lease_request(
             decode_json_object(request),
@@ -589,77 +701,72 @@ def _prepare_session_workspace_download(request):
             _require_workspace_baseline(session, frozen)
             if frozen["snapshotSizeBytes"] == 0 or not session.workspaceStorageKey:
                 raise SessionWorkspaceError("session_workspace_snapshot_empty")
+            if open_file:
+                handle = _open_workspace_snapshot_handle(session.workspaceStorageKey)
+        transferred = True
+        return frozen, handle if open_file else session.workspaceStorageKey
     except SessionWorkspaceError as error:
+        if open_file:
+            raise
         return JsonResponse({"error": error.code}, status=error.status)
     except Exception:
+        if open_file:
+            raise
         logger.exception("Session workspace download preparation failed")
         return JsonResponse({"error": "session_workspace_download_failed"}, status=500)
-    return frozen, session.workspaceStorageKey
+    finally:
+        if handle is not None and not transferred:
+            handle.close()
+
+
+def _open_workspace_snapshot_handle(storage_key):
+    try:
+        return default_storage.open(storage_key, "rb")
+    except FileNotFoundError as error:
+        raise StoredObjectUnavailable("stored_object_not_available") from error
 
 
 @_internal_post("/agent-runs/session-workspace/commit")
 def commit_session_workspace(request):
     try:
         body = _workspace_commit_request(request)
-        with transaction.atomic():
-            agent_run, session, frozen = _locked_session_workspace_agent_run(body)
-            max_bytes = agent_run.authorization.payload["resources"]["dataTmpfsBytes"]
-            if (
-                body["snapshotSizeBytes"] > max_bytes
-                or body["expandedSizeBytes"] > max_bytes
-                or not _workspace_tmpfs_fits(agent_run, body["expandedSizeBytes"])
-            ):
-                raise SessionWorkspaceError("session_workspace_commit_invalid", 400)
-            candidate = {
-                "generation": frozen["generation"] + 1,
-                "snapshotSha256": body["snapshotSha256"],
-                "snapshotSizeBytes": body["snapshotSizeBytes"],
-                "expandedSizeBytes": body["expandedSizeBytes"],
-                "fileCount": body["fileCount"],
-            }
-            storage_key = (
-                ""
-                if candidate["snapshotSizeBytes"] == 0
-                else (
-                    f"workspaces/{agent_run.workspace_id}/sessions/{agent_run.session_id}/"
-                    f"snapshots/{candidate['generation']}/"
-                    f"{candidate['snapshotSha256'].removeprefix('sha256:')}.snapshot"
+        with ExitStack() as uploads:
+            with transaction.atomic():
+                agent_run, session, frozen = _locked_session_workspace_agent_run(body)
+                max_bytes = agent_run.authorization.payload["resources"]["dataTmpfsBytes"]
+                if (
+                    body["snapshotSizeBytes"] > max_bytes
+                    or body["expandedSizeBytes"] > max_bytes
+                    or not _workspace_tmpfs_fits(agent_run, body["expandedSizeBytes"])
+                ):
+                    raise SessionWorkspaceError("session_workspace_commit_invalid", 400)
+                candidate = {
+                    "generation": frozen["generation"] + 1,
+                    "snapshotSha256": body["snapshotSha256"],
+                    "snapshotSizeBytes": body["snapshotSizeBytes"],
+                    "expandedSizeBytes": body["expandedSizeBytes"],
+                    "fileCount": body["fileCount"],
+                }
+                storage_key = (
+                    ""
+                    if candidate["snapshotSizeBytes"] == 0
+                    else (
+                        f"workspaces/{agent_run.workspace_id}/sessions/{agent_run.session_id}/"
+                        f"snapshots/{candidate['generation']}/"
+                        f"{candidate['snapshotSha256'].removeprefix('sha256:')}.snapshot"
+                    )
                 )
+                if (
+                    session_workspace_for_session(session) != frozen
+                    and not _is_workspace_commit_replay(session, candidate, agent_run, storage_key)
+                ):
+                    raise SessionWorkspaceError("session_workspace_baseline_conflict")
+                upload = uploads.enter_context(_workspace_snapshot_upload(storage_key))
+
+            _store_workspace_snapshot(request, candidate, storage_key, upload, body)
+            disposition = _publish_workspace_snapshot(
+                body, candidate, storage_key, upload, advance_session=True,
             )
-            if (
-                session_workspace_for_session(session) != frozen
-                and not _is_workspace_commit_replay(session, candidate, agent_run, storage_key)
-            ):
-                raise SessionWorkspaceError("session_workspace_baseline_conflict")
-
-        _store_workspace_snapshot(request, candidate, storage_key)
-
-        with transaction.atomic():
-            agent_run, session, frozen = _locked_session_workspace_agent_run(body)
-            if _is_workspace_commit_replay(session, candidate, agent_run, storage_key):
-                disposition = "idempotent"
-            else:
-                _require_workspace_baseline(session, frozen)
-                session.workspaceGeneration = candidate["generation"]
-                session.workspaceStorageKey = storage_key
-                session.workspaceSnapshotSha256 = candidate["snapshotSha256"]
-                session.workspaceSnapshotSizeBytes = candidate["snapshotSizeBytes"]
-                session.workspaceExpandedSizeBytes = candidate["expandedSizeBytes"]
-                session.workspaceFileCount = candidate["fileCount"]
-                session.workspaceLastAdvancedAgentRun = agent_run
-                session.save(
-                    update_fields=[
-                        "workspaceGeneration",
-                        "workspaceStorageKey",
-                        "workspaceSnapshotSha256",
-                        "workspaceSnapshotSizeBytes",
-                        "workspaceExpandedSizeBytes",
-                        "workspaceFileCount",
-                        "workspaceLastAdvancedAgentRun",
-                        "updatedAt",
-                    ]
-                )
-                disposition = "committed"
     except SessionWorkspaceError as error:
         return JsonResponse({"error": error.code}, status=error.status)
     except Exception:
@@ -685,10 +792,6 @@ def stage_execution_workspace(request):
             "execution_workspace_stage_invalid",
         )
         require_opaque_ref("checkpointId", body["checkpointId"])
-        with transaction.atomic():
-            agent_run, _session, _frozen = _locked_session_workspace_agent_run(body)
-            if not _workspace_tmpfs_fits(agent_run, body["expandedSizeBytes"]):
-                raise SessionWorkspaceError("execution_workspace_stage_invalid", 400)
         candidate = {
             "generation": 1,
             "snapshotSha256": body["snapshotSha256"],
@@ -696,15 +799,24 @@ def stage_execution_workspace(request):
             "expandedSizeBytes": body["expandedSizeBytes"],
             "fileCount": body["fileCount"],
         }
-        storage_key = ""
-        if candidate["snapshotSizeBytes"]:
-            checkpoint_key = hashlib.sha256(body["checkpointId"].encode("utf-8")).hexdigest()
-            storage_key = (
-                f"workspaces/{agent_run.workspace_id}/sessions/{agent_run.session_id}/"
-                f"agent-runs/{agent_run.id}/execution-checkpoints/{checkpoint_key}/"
-                f"{candidate['snapshotSha256'].removeprefix('sha256:')}.snapshot"
+        with ExitStack() as uploads:
+            with transaction.atomic():
+                agent_run, _session, _frozen = _locked_session_workspace_agent_run(body)
+                if not _workspace_tmpfs_fits(agent_run, body["expandedSizeBytes"]):
+                    raise SessionWorkspaceError("execution_workspace_stage_invalid", 400)
+                storage_key = ""
+                if candidate["snapshotSizeBytes"]:
+                    checkpoint_key = hashlib.sha256(body["checkpointId"].encode("utf-8")).hexdigest()
+                    storage_key = (
+                        f"workspaces/{agent_run.workspace_id}/sessions/{agent_run.session_id}/"
+                        f"agent-runs/{agent_run.id}/execution-checkpoints/{checkpoint_key}/"
+                        f"{candidate['snapshotSha256'].removeprefix('sha256:')}.snapshot"
+                    )
+                upload = uploads.enter_context(_workspace_snapshot_upload(storage_key))
+            _store_workspace_snapshot(request, candidate, storage_key, upload, body)
+            _publish_workspace_snapshot(
+                body, candidate, storage_key, upload, advance_session=False,
             )
-        _store_workspace_snapshot(request, candidate, storage_key)
     except SessionWorkspaceError as error:
         return JsonResponse({"error": error.code}, status=error.status)
     except (TypeError, ValueError):
@@ -731,20 +843,35 @@ async def download_execution_workspace(request):
     if isinstance(prepared, JsonResponse):
         return prepared
     body = prepared
-    response = await stored_file_response(
-        body["objectRef"],
-        "application/vnd.centaeris.workspace-snapshot",
-        "execution-workspace.snapshot",
-        as_attachment=False,
-        content_length=body["snapshotSizeBytes"],
-    )
+    async def authorized_open():
+        _body, handle = await _prepare_execution_workspace_download(request, open_file=True)
+        return handle
+
+    try:
+        response = await stored_file_response(
+            body["objectRef"],
+            "application/vnd.centaeris.workspace-snapshot",
+            "execution-workspace.snapshot",
+            as_attachment=False,
+            content_length=body["snapshotSizeBytes"],
+            authorized_open=authorized_open,
+        )
+    except SessionWorkspaceError as error:
+        return JsonResponse({"error": error.code}, status=error.status)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "execution_workspace_download_invalid"}, status=400)
+    except Exception:
+        logger.exception("Execution workspace download preparation failed")
+        return JsonResponse({"error": "execution_workspace_download_failed"}, status=500)
     if response.status_code == 200:
         response["X-Content-Sha256"] = body["snapshotSha256"]
     return response
 
 
 @sync_to_async(thread_sensitive=True)
-def _prepare_execution_workspace_download(request):
+def _prepare_execution_workspace_download(request, *, open_file=False):
+    handle = None
+    transferred = False
     try:
         body = decode_json_object(request)
         if not isinstance(body, dict) or set(body) != EXECUTION_WORKSPACE_DOWNLOAD_FIELDS:
@@ -758,33 +885,45 @@ def _prepare_execution_workspace_download(request):
         with transaction.atomic():
             agent_run, _session, _frozen = _locked_session_workspace_agent_run(body)
             snapshot = _recovery_checkpoint_workspace(body, agent_run)
-        body.update(snapshot)
-        object_ref_prefix = (
-            f"workspaces/{agent_run.workspace_id}/sessions/{agent_run.session_id}/"
-            f"agent-runs/{agent_run.id}/execution-checkpoints/"
-        )
-        object_ref_suffix = body["objectRef"].removeprefix(object_ref_prefix)
-        object_ref_parts = object_ref_suffix.split("/")
-        checkpoint_key = object_ref_parts[0] if len(object_ref_parts) == 2 else ""
-        expected_file = f"{body['snapshotSha256'].removeprefix('sha256:')}.snapshot"
-        if (
-            body["snapshotSizeBytes"] == 0
-            or not body["objectRef"].startswith(object_ref_prefix)
-            or len(checkpoint_key) != 64
-            or any(character not in "0123456789abcdef" for character in checkpoint_key)
-            or len(object_ref_parts) != 2
-            or object_ref_parts[1] != expected_file
-            or not default_storage.exists(body["objectRef"])
-        ):
-            raise SessionWorkspaceError("execution_workspace_download_invalid", 400)
+            body.update(snapshot)
+            object_ref_prefix = (
+                f"workspaces/{agent_run.workspace_id}/sessions/{agent_run.session_id}/"
+                f"agent-runs/{agent_run.id}/execution-checkpoints/"
+            )
+            object_ref_suffix = body["objectRef"].removeprefix(object_ref_prefix)
+            object_ref_parts = object_ref_suffix.split("/")
+            checkpoint_key = object_ref_parts[0] if len(object_ref_parts) == 2 else ""
+            expected_file = f"{body['snapshotSha256'].removeprefix('sha256:')}.snapshot"
+            if (
+                body["snapshotSizeBytes"] == 0
+                or not body["objectRef"].startswith(object_ref_prefix)
+                or len(checkpoint_key) != 64
+                or any(character not in "0123456789abcdef" for character in checkpoint_key)
+                or len(object_ref_parts) != 2
+                or object_ref_parts[1] != expected_file
+                or not default_storage.exists(body["objectRef"])
+            ):
+                raise SessionWorkspaceError("execution_workspace_download_invalid", 400)
+            if open_file:
+                handle = _open_workspace_snapshot_handle(body["objectRef"])
+        transferred = True
+        return (body, handle) if open_file else body
     except SessionWorkspaceError as error:
+        if open_file:
+            raise
         return JsonResponse({"error": error.code}, status=error.status)
     except (TypeError, ValueError):
+        if open_file:
+            raise
         return JsonResponse({"error": "execution_workspace_download_invalid"}, status=400)
     except Exception:
+        if open_file:
+            raise
         logger.exception("Execution workspace download preparation failed")
         return JsonResponse({"error": "execution_workspace_download_failed"}, status=500)
-    return body
+    finally:
+        if handle is not None and not transferred:
+            handle.close()
 
 
 @_internal_post("/artifacts/publish")

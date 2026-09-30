@@ -350,14 +350,53 @@ storage I/O. File-mutation event persistence and Memory coordination remain
 separate responsibilities.
 
 Workspace snapshot uploads use bounded streaming into a request-owned temporary
-file on the storage filesystem. Only fully validated, flushed bytes are linked
-atomically to their content-addressed key, without overwriting an existing file.
-Concurrent identical uploads verify and reuse that file. Failed upload cleanup
-removes only its temporary file, never the shared key: an expired uploader must
-not delete a replacement owner's published snapshot. This uses the same local
-filesystem/atomic-link requirement as immutable evidence storage. A process crash
-can leave an unreferenced temporary or staged object; it does not grant that
-object a committed Session or recovery-checkpoint reference.
+file on the storage filesystem. Directory and temporary-file creation occur
+under the active Session lock; payload copying, manifest/hash validation and
+flush/fsync occur outside the transaction. Final publication locks Session,
+AgentRun and the lifecycle job in that order, then rechecks the current lease,
+signed authorization and active owner. A read-only lease probe locates the
+Session; it does not authorize publication. Session commit also checks its
+baseline or exact replay. Execution checkpoint staging uses the same final
+owner/lease fence without advancing the Session or publishing a Runtime
+checkpoint.
+
+Only fully validated bytes are linked atomically to the content-addressed key,
+without overwriting an existing file. Concurrent identical uploads verify the
+winner outside row locks, then recheck authority before reuse. Failed cleanup
+removes only the request's temporary file, never the shared key: an expired
+uploader must not delete a replacement owner's published snapshot. This uses
+the same local filesystem/atomic-link requirement as immutable evidence storage.
+An interrupted process can leave a temporary or staged object; that alone grants
+no committed Session or recovery-checkpoint reference.
+
+Both snapshot download routes acquire bounded stream capacity, then recheck
+authorization and open the exact local file while holding its Session lock.
+Streaming and closing occur outside the transaction. Purge waits for the open,
+not for the full transfer. On POSIX an already opened descriptor survives unlink;
+on systems that reject unlink of an open file, GC reports a retryable failure.
+Cancellation during opening, unused responses and response-construction failures
+close the handle and release capacity. Later requests against a deleted Session
+remain unavailable; they never select another Session or replacement file.
+
+`gc_deleted_resources` also collects local workspace bytes of Sessions with
+`status=deleted` and a non-null `purgedAt`. Both the purge time and the file mtime
+must precede its cutoff, which defaults to 30 days. It enumerates outside the
+transaction, then rechecks the locked owner before unlinking each exact key.
+Only canonical Session snapshot generations, checkpoint keys of AgentRuns owned
+by that Session, and this uploader's temporary-name format are eligible. It
+rejects symlinks/reparse points and reports unknown Run directories as blocked.
+Active Sessions, restorable trash, unrelated names and directory entries remain.
+This collector neither reads nor changes Runtime checkpoint tables. It reclaims
+purged-owner payloads, not active-owner orphans or all filesystem metadata.
+Dry-run reports keys without deletion; missing keys are idempotent, and other
+failures are reported and make the command fail for retry.
+
+The first deployment enabling this collector must replace every API writer and
+drain requests served by the old upload implementation before starting the new
+GC worker. An old writer can otherwise create a final name after purge. No schema
+migration is required; existing canonical objects of purged Sessions are eligible
+under the same cutoff. Remote object storage needs a separate version-aware
+collector and cannot use this local-file implementation.
 
 Input batch resolvers live for one request. They reuse only a verified snapshot
 of the signed authorization facts, invalidating it when payload, digest,

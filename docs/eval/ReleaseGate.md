@@ -185,6 +185,27 @@ invalid or interrupted input without exposing partial canonical files.
 Staging an execution snapshot alone is not checkpoint publication. These checks
 do not certify custom same-lease step callers or a proxy that retries steps.
 
+Snapshot lifecycle acceptance also covers purge during payload copying and before
+final publication for both Session commits and execution checkpoint stages.
+Late requests must fail without recreating a canonical key, including after GC
+has removed an open upload temporary. Independent PostgreSQL transactions must
+prove public Session deletion and upload do not deadlock, and download opens the
+authorized file before purge can proceed. Consume an already opened response
+after GC and verify complete bytes; a new download must fail. Run these filesystem
+races on Linux as well as any supported test host; an open-file unlink failure
+must be reported and a later pass must succeed after close.
+
+Workspace GC tests must cover all generations of a purged Session, owned
+checkpoint keys and uploader temporaries, while retaining active/restorable and
+cross-owner resources, unknown path shapes and unrelated bytes. Verify both age
+cutoffs, dry-run, exact-key retry after failures, missing storage roots, disappearing
+temporaries and symlink/reparse rejection. Assert managed payload file count and
+bytes reach zero; retained directories and unknown keys are outside that metric.
+Authorized stream tests must also cover exhausted capacity, authorization failure,
+opening cancellation, unused response close and constructor/header failure.
+Before first deployment, drain the old API writers before enabling the collector;
+these source gates do not verify that operator action or a production rollout.
+
 Execution-capacity acceptance uses a fresh isolated database with the current
 initial schema. Across independent API/Runtime/worker replicas, verify initial
 queue limits (128 global, 32 per Workspace) and execution leases (8 global, 4 per

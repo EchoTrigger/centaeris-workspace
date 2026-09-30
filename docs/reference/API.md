@@ -87,6 +87,13 @@ Core-generated image fixtures protect cross-language contracts and limit parity.
 
 ## Trash pagination
 
+Session deletion immediately denies subsequent workspace snapshot and checkpoint
+access. Physical snapshot bytes are reclaimed by `gc_deleted_resources` after
+its retention cutoff; deletion does not perform filesystem enumeration in the
+HTTP request. On local POSIX storage an already opened authorized download can
+finish after the file name is reclaimed. The collector only considers permanently
+purged Sessions, so restorable trash retains its files.
+
 `GET /api/workspaces/{workspaceId}/trash` orders entries by deletion time
 descending, then kind and ID ascending. ID ordering and cursor comparisons use
 PostgreSQL `C` collation, matching the Python merge independently of the database
