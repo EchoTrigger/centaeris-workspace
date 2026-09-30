@@ -30,6 +30,40 @@ The helper consumes `WriteFile.observedFileHash` as its expected current version
 ordinary workspace files do not enforce this observation. The internal protocol
 rename requires coordinated Core and Workspace updates, with no old-field alias.
 
+## Shared Agent definitions
+
+The API owns Workspace-scoped `AgentDefinition` drafts and immutable published
+`AgentDefinitionVersion` records. Workspace owners and admins manage draft name,
+description, instructions and avatar, publish complete versions, and select
+availability `none`, `workspace` or `members`. The default is `none`; only active,
+published, currently available definitions can create instances or new Runs.
+Member grants reference current WorkspaceMembership identities, so leaving and
+rejoining does not restore a previous grant.
+
+Each user retains a private Agent, Sessions and Memory. A nullable, immutable
+Agent definition reference and a unique `(workspace, owner, definition)` binding
+provide one personal instance per definition. First use resolves this instance
+transactionally. Sharing a definition grants administrators no access to another
+user's Agent, Session, Run, files, transcript or Memory. Existing private Agents
+retain null definition references and their current behavior.
+
+Each new managed Run rechecks definition availability and resolves the current
+published version in its acceptance transaction. It stores that version foreign
+key together with the existing `agent_instructions` snapshot. A new publication
+affects subsequent Runs, including those in an existing Session, without changing
+the Session or Agent identity. Accepted Runs and receipt retries retain their
+original version and instructions. Disabling a definition or removing availability
+blocks new acceptance, not execution or historical reads of accepted Runs;
+ordinary ownership and membership checks continue to apply.
+
+Managed Runs use the existing Plugin activation schema with empty `packages`.
+They select no external extensions and cannot inherit the global MCP bearer
+credential inventory through Plugin activation. Private Agents retain Workspace
+Plugin activation. Explicit managed capabilities and credential bindings remain
+future work; this baseline does not change authentication or stream revocation.
+First-party built-in tools and authorized materials remain available. This
+delivery adds backend contracts only; the browser workflow is not implemented.
+
 ## Request flow
 
 1. Django authenticates the user and checks workspace membership and resource

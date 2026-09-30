@@ -37,7 +37,7 @@ class TranscriptCaptureContractTests(TransactionTestCase):
         query = self.commit_output("a" * 70000, spilled=True)
         original = SessionEvent.objects.get(payload__type="tool_result").payload
         previous = [("app_core", "0005_hosted_operation_receipt")]
-        current = [("app_core", "0006_transcript_output_capture")]
+        current = MigrationExecutor(connection).loader.graph.leaf_nodes()
         try:
             MigrationExecutor(connection).migrate(previous)
             self.assertEqual(SessionEvent.objects.get(payload__type="tool_result").payload, original)

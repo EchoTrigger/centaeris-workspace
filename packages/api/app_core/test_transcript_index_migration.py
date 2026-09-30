@@ -49,7 +49,7 @@ class TranscriptToolResultIndexMigrationTests(TestCase):
 
 
 class MigrationBaselineTests(TestCase):
-    def test_schema_history_includes_pre_admission_cancellation(self):
+    def test_schema_history_includes_agent_definitions(self):
         migration_directory = Path(__file__).with_name("migrations")
 
         self.assertEqual(
@@ -64,6 +64,7 @@ class MigrationBaselineTests(TestCase):
                 "0004_modelquotadomain_providercredential_quotadomain.py",
                 "0005_hosted_operation_receipt.py",
                 "0006_transcript_output_capture.py",
+                "0007_agent_definitions.py",
             ],
         )
 
@@ -72,7 +73,16 @@ class MigrationBaselineTests(TestCase):
             REPOSITORY_ROOT / "scripts" / "docker-release-gate.sh"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("0006_transcript_output_capture", release_gate)
+        self.assertIn("0007_agent_definitions", release_gate)
+
+    def test_agent_definitions_extend_the_existing_migration_chain(self):
+        definitions = importlib.import_module(
+            "app_core.migrations.0007_agent_definitions"
+        ).Migration
+        self.assertIn(
+            ("app_core", "0006_transcript_output_capture"),
+            definitions.dependencies,
+        )
 
     def test_quota_domain_migration_extends_the_existing_migration_chain(self):
         quota = importlib.import_module(

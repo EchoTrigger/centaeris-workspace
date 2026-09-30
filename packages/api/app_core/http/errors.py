@@ -13,6 +13,11 @@ from .security import (
 logger = logging.getLogger(__name__)
 
 VALIDATION_ERROR_CODES = {
+    "create_agent_definition": "agent_definition_invalid",
+    "update_agent_definition": "agent_definition_invalid",
+    "publish_agent_definition": "agent_definition_invalid",
+    "set_agent_definition_availability": "agent_definition_invalid",
+    "use_agent_definition": "agent_definition_invalid",
     "change_password": "account_password_request_invalid",
     "request_password_reset": "account_password_reset_request_invalid",
     "confirm_password_reset": "account_password_reset_request_invalid",
@@ -47,6 +52,9 @@ VALIDATION_ERROR_CODES = {
 # method on that path. Keep the HTTP-method disambiguation explicit so validation
 # errors retain the public protocol code owned by the selected operation.
 VALIDATION_ERROR_CODE_OVERRIDES = {
+    ("POST", "list_agent_definitions"): "agent_definition_invalid",
+    ("PATCH", "get_agent_definition"): "agent_definition_invalid",
+    ("POST", "list_agent_definition_versions"): "agent_definition_invalid",
     ("POST", "list_agents"): "agent_invalid",
     ("POST", "list_sources"): "invalid_source",
     ("POST", "list_credentials"): "credential_invalid",
@@ -61,6 +69,11 @@ VALIDATION_ERROR_CODE_OVERRIDES = {
 }
 
 MALFORMED_JSON_ERROR_CODES = {
+    "create_agent_definition": "agent_definition_invalid",
+    "update_agent_definition": "agent_definition_invalid",
+    "publish_agent_definition": "agent_definition_invalid",
+    "set_agent_definition_availability": "agent_definition_invalid",
+    "use_agent_definition": "agent_definition_invalid",
     "change_password": "account_password_request_invalid",
     "request_password_reset": "account_password_reset_request_invalid",
     "confirm_password_reset": "account_password_reset_request_invalid",

@@ -155,7 +155,7 @@ material-link failures.
    an explicit manual run.
 3. Populate a private `.env`, then run `docker compose config --quiet`.
 4. On fresh Postgres, migrate from zero through
-   `0005_hosted_operation_receipt` and confirm the Workspace app starts
+   `0007_agent_definitions` and confirm the Workspace app starts
    from the current migration leaf. Existing credentials must retain their encrypted
    values and remain unconfigured until assigned an explicit quota domain.
 5. Build Runtime, API, worker, web, and execution images from root Compose
@@ -164,6 +164,38 @@ material-link failures.
    `centaeris-workspace_*` named volumes.
 
 Gates must not read production data, real Plugin content, or developer secrets.
+
+Shared Agent definition acceptance covers administrator-only draft management,
+immutable publication, default-denied and Workspace/member availability, and
+foreign-member rejection. Member grants bind current membership identities;
+leaving and rejoining must not restore a previous grant. Administrators must
+remain unable to read another user's private Agent, Sessions, Runs, files,
+transcripts or Memory through definition management.
+
+Independent PostgreSQL transactions must prove concurrent first use creates one
+private instance per Workspace/owner/definition, and publication or scope changes
+race atomically with new Run acceptance. Rejected admission must roll back Run
+and receipt creation. New Runs in the same Session capture the latest published
+version and instructions without changing Session or Agent IDs. Old Runs and
+accepted receipt retries retain their original version and instructions after
+publication, disablement or scope removal; new unavailable Runs are rejected.
+Cover tail rewrites, immutable instance binding, cross-Workspace version/member
+rejection and attempts to edit managed configuration.
+
+Managed Run authorization must freeze empty external Plugin activation, even
+when Workspace Plugins and global MCP bearer credentials are configured. Verify
+private Agent activation remains unchanged and existing Runtime startup/resource
+validation accepts the empty activation without loading external contributions.
+This is a zero-extension baseline; explicit capabilities/credential bindings,
+authentication changes, stream revocation and browser workflows are not covered.
+
+Forward migration from `0006_transcript_output_capture` to
+`0007_agent_definitions` must preserve existing Agent, Session and Run identities,
+ownership, instruction snapshots and encrypted credentials. Existing Agent
+definition and Run version references remain null, with no fabricated definitions
+or versions. Fresh-schema, SQLite migration/drift and PostgreSQL constraints must
+also pass. The fresh-Docker gate checks the new leaf only on a disposable host;
+source tests do not certify that deployment acceptance has run.
 
 API PostgreSQL pool changes additionally use the bounded connection-pool controller described
 in `perf/README.md`. It records actual serving-process pool statistics, typed

@@ -287,9 +287,11 @@ class HostedOperationMigrationTests(TransactionTestCase):
             model = apps.get_model("app_core", "ModelConfig").objects.create(displayName="Old")
             run = apps.get_model("app_core", "AgentRun").objects.create(workspace=workspace, session=session,
                 user=user, modelConfig=model, membership_ref=membership.id, prompt="original prompt")
-            MigrationExecutor(connection).migrate([target])
-            self.assertEqual(AgentRun.objects.get(id=run.id).prompt, "original prompt")
-            self.assertEqual(Session.objects.get(id=session.id).owner_id, user.id)
-            self.assertFalse(HostedOperationReceipt.objects.exists())
+            target_executor = MigrationExecutor(connection)
+            target_executor.migrate([target])
+            target_apps = target_executor.loader.project_state([target]).apps
+            self.assertEqual(target_apps.get_model("app_core", "AgentRun").objects.get(id=run.id).prompt, "original prompt")
+            self.assertEqual(target_apps.get_model("app_core", "Session").objects.get(id=session.id).owner_id, user.id)
+            self.assertFalse(target_apps.get_model("app_core", "HostedOperationReceipt").objects.exists())
         finally:
             MigrationExecutor(connection).migrate(latest)

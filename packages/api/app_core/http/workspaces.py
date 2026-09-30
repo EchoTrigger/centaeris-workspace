@@ -46,6 +46,7 @@ from app_core.plugin_catalog import (
     plugin_activation_for_workspace,
 )
 from app_core.agent_run_authorization_factory import create_agent_run_authorization
+from app_core.agent_definitions import AgentDefinitionUnavailable, published_version_for_agent
 from app_core.agent_run_stream import encode_stream_cursor
 from app_core.runtime_client import (
     TranscriptRuntimeError,
@@ -1155,7 +1156,8 @@ def create_session_message(
     try:
         digest = request_digest(payload, session_id=session_id, uploads=uploads)
         with transaction.atomic():
-            if locked_workspace_membership_for(request.user, workspace_id) is None:
+            membership = locked_workspace_membership_for(request.user, workspace_id)
+            if membership is None:
                 return Status(404, {"error": "session_not_found"})
             receipt = replay_operation(request.user, workspace_id, "submitMessage", payload.operation_id, digest)
             if receipt is not None:
@@ -1218,6 +1220,12 @@ def create_session_message(
             return Status(404, {"error": "session_not_found"})
         if requested_session.agent.status == "deleted":
             return Status(410, {"error": "agent_deleted"})
+    try:
+        published_version_for_agent(
+            requested_agent if session_id == "new" else requested_session.agent, membership,
+        )
+    except AgentDefinitionUnavailable as error:
+        return Status(403, {"error": str(error)})
     try:
         execution_profile = request_execution_profile()
     except RuntimeError:
@@ -1311,6 +1319,7 @@ def create_session_message(
                 )
                 if linked_attachment_refs != set(attachment_refs):
                     return Status(403, {"error": "attachment_not_accessible"})
+            definition_version = published_version_for_agent(session.agent, membership)
             agent_run = AgentRun.objects.create(
                 workspace=workspace,
                 session=session,
@@ -1318,7 +1327,8 @@ def create_session_message(
                 modelConfig=model,
                 thinkingMode=thinking_mode,
                 prompt=prompt,
-                agent_instructions=session.agent.instructions,
+                agent_instructions=(definition_version.instructions if definition_version else session.agent.instructions),
+                definition_version=definition_version,
                 tailPolicy=("rewriteLastUser" if payload.tail_action else "append"),
                 rewriteTargetMessageId=(payload.tail_action.target_message_id if payload.tail_action else ""),
                 rewriteExpectedTailMessageId=(payload.tail_action.expected_tail_message_id if payload.tail_action else ""),
@@ -1337,6 +1347,9 @@ def create_session_message(
     except AcceptedOperationReplay as replay:
         _delete_stored_upload_batch(stored)
         return Status(202, serialize_operation(replay.receipt))
+    except AgentDefinitionUnavailable as database_error:
+        _delete_stored_upload_batch(stored)
+        return Status(403, {"error": str(database_error)})
     except (AgentSessionCreationError, HostedOperationError) as database_error:
         try:
             _delete_stored_upload_batch(stored)

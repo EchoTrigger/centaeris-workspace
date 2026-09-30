@@ -23,17 +23,41 @@ def serialize_workspace(workspace: Workspace, role: str) -> dict:
 
 
 def serialize_agent(agent: Agent) -> dict:
+    version = agent.definition.published_version if agent.definition_id else None
     return {
         "id": agent.id,
         "workspaceId": agent.workspace_id,
-        "name": agent.name,
-        "description": agent.description,
-        "instructions": agent.instructions,
-        "avatarKind": agent.avatar_kind,
+        "definitionId": agent.definition_id,
+        "definitionVersionId": version.id if version else None,
+        "name": version.name if version else agent.name,
+        "description": version.description if version else agent.description,
+        "instructions": version.instructions if version else agent.instructions,
+        "avatarKind": version.avatar_kind if version else agent.avatar_kind,
         "status": agent.status,
         "deletedAt": agent.deletedAt.isoformat() if agent.deletedAt else None,
         "createdAt": agent.createdAt.isoformat(),
         "updatedAt": agent.updatedAt.isoformat(),
+    }
+
+
+def serialize_agent_definition(definition) -> dict:
+    return {
+        "id": definition.id, "workspaceId": definition.workspace_id,
+        "name": definition.name, "description": definition.description,
+        "instructions": definition.instructions, "avatarKind": definition.avatar_kind,
+        "status": definition.status, "availabilityScope": definition.availability_scope,
+        "membershipIds": sorted(item.membership_id for item in definition.member_grants.all()),
+        "publishedVersionId": definition.published_version_id,
+        "createdAt": definition.created_at.isoformat(), "updatedAt": definition.updated_at.isoformat(),
+    }
+
+
+def serialize_agent_definition_version(version) -> dict:
+    return {
+        "id": version.id, "definitionId": version.definition_id, "version": version.version,
+        "name": version.name, "description": version.description,
+        "instructions": version.instructions, "avatarKind": version.avatar_kind,
+        "publishedAt": version.published_at.isoformat(),
     }
 
 

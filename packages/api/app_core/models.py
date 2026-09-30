@@ -84,6 +84,14 @@ def new_agent_id() -> str:
     return f"agent_{secrets.token_urlsafe(12)}"
 
 
+def new_agent_definition_id() -> str:
+    return new_id("agent_definition")
+
+
+def new_agent_definition_version_id() -> str:
+    return new_id("agent_definition_version")
+
+
 def new_agent_run_id() -> str:
     return new_id("agent_run")
 
@@ -707,6 +715,106 @@ class CredentialAuditEvent(models.Model):
         return super().save(*args, **kwargs)
 
 
+class AgentDefinition(models.Model):
+    id = models.CharField(primary_key=True, max_length=64, default=new_agent_definition_id)
+    workspace = models.ForeignKey(Workspace, on_delete=models.PROTECT, related_name="agent_definitions")
+    name = models.CharField(max_length=255)
+    description = models.CharField(max_length=128, blank=True, default="")
+    instructions = models.TextField(blank=True, default="")
+    avatar_kind = models.CharField(max_length=16, default="centaeris")
+    status = models.CharField(max_length=16, default="active")
+    availability_scope = models.CharField(max_length=16, default="none")
+    published_version = models.ForeignKey(
+        "AgentDefinitionVersion", on_delete=models.PROTECT, related_name="+", null=True, blank=True,
+    )
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=models.Q(status__in=("active", "disabled")), name="agent_definition_status_valid"),
+            models.CheckConstraint(condition=models.Q(availability_scope__in=("none", "workspace", "members")), name="agent_definition_scope_valid"),
+            models.CheckConstraint(condition=models.Q(avatar_kind__in=("centaeris", "banana")), name="agent_definition_avatar_valid"),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.name = normalize_agent_name(self.name)
+        self.description = normalize_agent_description(self.description)
+        self.instructions = normalize_agent_instructions(self.instructions)
+        require_enum("AgentDefinition.avatar_kind", self.avatar_kind, {"centaeris", "banana"})
+        require_enum("AgentDefinition.status", self.status, {"active", "disabled"})
+        require_enum("AgentDefinition.availability_scope", self.availability_scope, {"none", "workspace", "members"})
+        if self.published_version_id and self.published_version.definition_id != self.id:
+            raise ValueError("AgentDefinition published version binding mismatch")
+        if not self._state.adding:
+            if type(self).objects.values_list("workspace_id", flat=True).get(pk=self.pk) != self.workspace_id:
+                raise ValueError("AgentDefinition workspace is immutable")
+        return super().save(*args, **kwargs)
+
+
+class ImmutableDefinitionVersionQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise ValueError("AgentDefinitionVersion is immutable")
+
+    def delete(self):
+        raise ValueError("AgentDefinitionVersion is immutable")
+
+    def bulk_create(self, objs, batch_size=None, ignore_conflicts=False, update_conflicts=False,
+                    update_fields=None, unique_fields=None):
+        if update_conflicts:
+            raise ValueError("AgentDefinitionVersion is immutable")
+        return super().bulk_create(objs, batch_size=batch_size, ignore_conflicts=ignore_conflicts,
+                                   update_conflicts=False, update_fields=update_fields, unique_fields=unique_fields)
+
+
+class AgentDefinitionVersion(models.Model):
+    objects = ImmutableDefinitionVersionQuerySet.as_manager()
+    id = models.CharField(primary_key=True, max_length=64, default=new_agent_definition_version_id)
+    definition = models.ForeignKey(AgentDefinition, on_delete=models.PROTECT, related_name="versions")
+    version = models.PositiveIntegerField()
+    name = models.CharField(max_length=255)
+    description = models.CharField(max_length=128, blank=True, default="")
+    instructions = models.TextField(blank=True, default="")
+    avatar_kind = models.CharField(max_length=16, default="centaeris")
+    published_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+")
+    published_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["definition", "version"], name="agent_definition_version_unique"),
+            models.CheckConstraint(condition=models.Q(version__gt=0), name="agent_definition_version_positive"),
+            models.CheckConstraint(condition=models.Q(avatar_kind__in=("centaeris", "banana")), name="agent_definition_version_avatar"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValueError("AgentDefinitionVersion is immutable")
+        self.name = normalize_agent_name(self.name)
+        self.description = normalize_agent_description(self.description)
+        self.instructions = normalize_agent_instructions(self.instructions)
+        require_enum("AgentDefinitionVersion.avatar_kind", self.avatar_kind, {"centaeris", "banana"})
+        if self.version <= 0:
+            raise ValueError("AgentDefinitionVersion version must be positive")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValueError("AgentDefinitionVersion is immutable")
+
+
+class AgentDefinitionMember(models.Model):
+    definition = models.ForeignKey(AgentDefinition, on_delete=models.PROTECT, related_name="member_grants")
+    membership = models.ForeignKey(WorkspaceMembership, on_delete=models.CASCADE, related_name="agent_definition_grants")
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["definition", "membership"], name="agent_definition_member_unique")]
+
+    def save(self, *args, **kwargs):
+        if self.definition.workspace_id != self.membership.workspace_id:
+            raise ValueError("AgentDefinitionMember workspace binding mismatch")
+        return super().save(*args, **kwargs)
+
+
 class Agent(models.Model):
     objects = ResourceQuerySet.as_manager()
     id = models.CharField(primary_key=True, max_length=64, default=new_agent_id)
@@ -719,6 +827,9 @@ class Agent(models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
         related_name="agents",
+    )
+    definition = models.ForeignKey(
+        AgentDefinition, on_delete=models.PROTECT, related_name="instances", null=True, blank=True,
     )
     name = models.CharField(max_length=255)
     description = models.CharField(max_length=128, blank=True, default="")
@@ -739,6 +850,7 @@ class Agent(models.Model):
 
     class Meta:
         constraints = [
+            models.UniqueConstraint(fields=["workspace", "owner", "definition"], name="agent_definition_owner_unique"),
             models.CheckConstraint(
                 condition=models.Q(avatar_kind__in=("centaeris", "banana")),
                 name="agent_avatar_kind_valid",
@@ -786,9 +898,20 @@ class Agent(models.Model):
             stored_scope = type(self).objects.values_list(
                 "workspace_id",
                 "owner_id",
+                "definition_id",
             ).get(pk=self.pk)
-            if stored_scope != (self.workspace_id, self.owner_id):
+            if stored_scope != (self.workspace_id, self.owner_id, self.definition_id):
                 raise ValueError("Agent ownership is immutable")
+            if self.definition_id:
+                stored_config = type(self).objects.values_list("name", "description", "instructions", "avatar_kind").get(pk=self.pk)
+                if stored_config != (self.name, self.description, self.instructions, self.avatar_kind):
+                    raise ValueError("Agent managed configuration is immutable")
+        elif self.definition_id:
+            version = self.definition.published_version
+            if self.definition.workspace_id != self.workspace_id or version is None:
+                raise ValueError("Agent definition workspace or publication binding mismatch")
+            if (self.name, self.description, self.instructions, self.avatar_kind) != (version.name, version.description, version.instructions, version.avatar_kind):
+                raise ValueError("Agent managed configuration must match its published definition")
         return super().save(*args, **kwargs)
 
 
@@ -1075,6 +1198,9 @@ class AgentRun(models.Model):
     thinkingMode = models.CharField(max_length=64, blank=True, default="")
     prompt = models.TextField()
     agent_instructions = models.TextField(blank=True, default="")
+    definition_version = models.ForeignKey(
+        AgentDefinitionVersion, on_delete=models.PROTECT, related_name="agent_runs", null=True, blank=True,
+    )
     tailPolicy = models.CharField(max_length=32, default="append")
     rewriteTargetMessageId = models.CharField(max_length=160, blank=True, default="")
     rewriteExpectedTailMessageId = models.CharField(max_length=160, blank=True, default="")
@@ -1102,6 +1228,17 @@ class AgentRun(models.Model):
 
     def save(self, *args, **kwargs):
         self.agent_instructions = normalize_agent_instructions(self.agent_instructions)
+        if self._state.adding:
+            definition_id = self.session.agent.definition_id
+            if self.definition_version_id:
+                if self.definition_version.definition_id != definition_id or self.agent_instructions != self.definition_version.instructions:
+                    raise ValueError("AgentRun definition version binding mismatch")
+            elif definition_id:
+                raise ValueError("Managed AgentRun requires a published definition version")
+        else:
+            stored_snapshot = type(self).objects.values_list("definition_version_id", "agent_instructions").get(pk=self.pk)
+            if stored_snapshot != (self.definition_version_id, self.agent_instructions):
+                raise ValueError("AgentRun configuration snapshot is immutable")
         if self.thinkingMode:
             validate_thinking_mode(self.thinkingMode)
         require_enum(

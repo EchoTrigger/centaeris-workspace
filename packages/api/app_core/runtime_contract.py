@@ -7,7 +7,7 @@ from django.conf import settings
 
 from .agent_identity import validate_agent_id
 from .models import validate_thinking_mode
-from .plugin_catalog import plugin_activation_for_workspace, validate_plugin_activation
+from .plugin_catalog import PLUGIN_ACTIVATION_SCHEMA, activation_digest, plugin_activation_for_workspace, validate_plugin_activation
 
 
 AGENT_RUN_AUTHORIZATION_SCHEMA = "workspace.agent_run_authorization.v1"
@@ -103,7 +103,10 @@ def build_agent_run_authorization_payload(
         "messageAssetRefs": normalized_message_asset_refs,
         "imageCapability": "workspace_general_v1",
         "imageDigest": image_digest,
-        "pluginActivation": plugin_activation_for_workspace(agent_run.workspace),
+        "pluginActivation": (
+            {"schema": PLUGIN_ACTIVATION_SCHEMA, "digest": activation_digest([]), "packages": []}
+            if agent_run.definition_version_id else plugin_activation_for_workspace(agent_run.workspace)
+        ),
         "resources": {
             "memoryBytes": settings.SANDBOX_MEMORY_BYTES,
             "cpuMilli": settings.SANDBOX_CPU_MILLI,

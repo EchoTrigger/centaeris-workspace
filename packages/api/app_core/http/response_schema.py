@@ -216,6 +216,8 @@ class WorkspaceSkillDetailEnvelope(StrictSchema):
 class AgentResponse(StrictSchema):
     id: str
     workspace_id: str = Field(alias="workspaceId")
+    definition_id: str | None = Field(alias="definitionId")
+    definition_version_id: str | None = Field(alias="definitionVersionId")
     name: str
     description: str
     instructions: str
@@ -232,6 +234,52 @@ class AgentEnvelope(StrictSchema):
 
 class AgentsEnvelope(StrictSchema):
     agents: list[AgentResponse]
+
+
+class AgentDefinitionResponse(StrictSchema):
+    id: str
+    workspace_id: str = Field(alias="workspaceId")
+    name: str
+    description: str
+    instructions: str
+    avatar_kind: Literal["centaeris", "banana"] = Field(alias="avatarKind")
+    status: Literal["active", "disabled"]
+    availability_scope: Literal["none", "workspace", "members"] = Field(alias="availabilityScope")
+    membership_ids: list[str] = Field(alias="membershipIds")
+    published_version_id: str | None = Field(alias="publishedVersionId")
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
+
+
+class AgentDefinitionVersionResponse(StrictSchema):
+    id: str
+    definition_id: str = Field(alias="definitionId")
+    version: int
+    name: str
+    description: str
+    instructions: str
+    avatar_kind: Literal["centaeris", "banana"] = Field(alias="avatarKind")
+    published_at: str = Field(alias="publishedAt")
+
+
+class AgentDefinitionEnvelope(StrictSchema):
+    definition: AgentDefinitionResponse
+
+
+class AgentDefinitionsEnvelope(StrictSchema):
+    definitions: list[AgentDefinitionResponse]
+
+
+class AgentDefinitionVersionEnvelope(StrictSchema):
+    version: AgentDefinitionVersionResponse
+
+
+class AgentDefinitionVersionsEnvelope(StrictSchema):
+    versions: list[AgentDefinitionVersionResponse]
+
+
+class AvailableAgentDefinitionsEnvelope(StrictSchema):
+    definitions: list[AgentDefinitionVersionResponse]
 
 
 class ContextMcpToolResponse(StrictSchema):

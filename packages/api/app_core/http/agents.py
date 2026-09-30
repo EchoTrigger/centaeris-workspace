@@ -97,7 +97,7 @@ def list_agents(request, workspace_id: str):
         workspace_id=workspace_id,
         owner=request.user,
         status="active",
-    ).order_by("createdAt", "id")
+    ).select_related("definition__published_version").order_by("createdAt", "id")
     return {"agents": [serialize_agent(agent) for agent in agents]}
 
 
@@ -218,6 +218,8 @@ def update_agent(request, agent_id: str, payload: UpdateAgentRequest):
             return Status(404, {"error": "agent_not_found"})
         if agent.status == "deleted":
             return Status(410, {"error": "agent_deleted"})
+        if agent.definition_id is not None:
+            return Status(409, {"error": "agent_configuration_managed"})
         if all(getattr(agent, field) == getattr(payload, field) for field in fields):
             return Status(409, {"error": "agent_unchanged"})
         update_fields = []

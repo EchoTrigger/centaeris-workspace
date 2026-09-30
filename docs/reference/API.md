@@ -363,6 +363,58 @@ collisions up to three total attempts; explicit IDs and other integrity errors
 fail. Possession of an ID does not grant access: ownership and workspace
 membership checks still apply.
 
+## Shared Agent definitions
+
+Workspace owners and admins manage definitions under
+`/api/workspaces/{workspaceId}/agent-definitions`:
+
+| Method and suffix | Behavior |
+| --- | --- |
+| `GET` / `POST` collection | List definitions / create a draft |
+| `GET` / `PATCH` `/{definitionId}` | Read / update draft configuration or active/disabled status |
+| `GET` / `POST` `/{definitionId}/versions` | List immutable versions / publish the current draft |
+| `PUT` `/{definitionId}/availability` | Replace availability using `{scope, membershipIds}` |
+
+Draft configuration uses exact public fields `name`, `description`, `instructions`
+and `avatarKind`. Status is `active` or `disabled`. Availability scope is `none`
+(the default), `workspace` or `members`; member grants refer to current
+WorkspaceMembership identities. Foreign Workspace members and unknown scopes
+are rejected. A new membership after rejoining does not inherit an old grant.
+Published versions freeze all four configuration fields, their version number,
+publisher and publication time. Publication requires a strictly empty JSON object
+`{}`; published content cannot be edited.
+
+Members use `GET /api/workspaces/{workspaceId}/available-agent-definitions` to
+discover only active, published definitions available to them, with published
+configuration rather than draft content. `POST` to
+`/api/workspaces/{workspaceId}/available-agent-definitions/{definitionId}/instance`
+also requires strictly `{}`. It returns `{agent}` with 201 for a new private
+instance or 200 for the existing instance. Concurrent first use creates one Agent
+per Workspace, owner and definition. Definition management conveys no permission
+to read other users' private instances or conversation data.
+
+Agent responses add nullable `definitionId` and `definitionVersionId`. Managed
+configuration is displayed from the current published version; attempts to PATCH
+definition-sourced configuration return 409 `agent_configuration_managed`.
+Private Agents retain their own editable configuration and null definition fields.
+Clients reuse the existing Session and message endpoints with the returned
+`agentId`; no `definitionId` message argument is added.
+
+New managed Runs, including continued Sessions and tail rewrites, recheck scope
+and active status and capture the current published version plus the existing
+instructions snapshot in the acceptance transaction. Unavailable definitions
+return 403 `agent_definition_not_available`. Existing Session and Agent IDs stay
+unchanged. Old Runs, historical reads and accepted operation receipt retries keep
+their version and snapshot, subject to existing ownership and membership checks.
+Stopping availability does not cancel or reinterpret accepted Runs.
+
+Managed Run authorization retains the existing Plugin activation schema with
+`packages: []`, excluding external Plugin Skills, CLI contributions, MCP servers
+and Hooks and their global bearer credential inheritance. Existing private Agent
+Plugin behavior is unchanged. Explicit managed capabilities and credential
+bindings, authentication changes, stream revocation and browser UI are outside
+this delivery.
+
 ## Execution recovery scheduling
 
 The internal `runtime.agent_run.step.result.v1` response requires `retryAtMs`

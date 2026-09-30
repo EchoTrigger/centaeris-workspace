@@ -4,6 +4,7 @@ from ninja import NinjaAPI
 
 from app_core.http.auth import router as auth_router
 from app_core.http.agents import router as agents_router
+from app_core.http.agent_definitions import router as agent_definitions_router
 from app_core.http.artifacts import router as artifacts_router
 from app_core.http.citations import router as citations_router
 from app_core.http.downloads import router as downloads_router
@@ -37,6 +38,7 @@ install_error_handlers(api)
 api.add_router("", health_router)
 api.add_router("/api", auth_router)
 api.add_router("/api", agents_router)
+api.add_router("/api", agent_definitions_router)
 api.add_router("/api", jobs_router)
 api.add_router("/api", workspaces_router)
 api.add_router("/api", workspace_members_router)
