@@ -26,6 +26,21 @@ unchanged. The ignored Rust Django-contract entry point is deliberately executed
 by the API test; it must not be counted as covered merely by ordinary cargo tests.
 These tests do not constitute a production-load or fresh-Docker deployment gate.
 
+Fresh-Docker capture acceptance is an additional opt-in check on the owned
+`centaeris-perf` stack: follow the hosted transcript capture instructions in
+[the performance harness](../../perf/README.md). The bounded workload completes
+one real AgentRun, replaces and removes its spill file, reads the archived UTF-8
+text through the authenticated API, replaces only idle API/Runtime services, and
+requires byte-for-byte equality afterwards. Its external manifest and report
+record image identities, exact Run identities, request outcomes and content
+digests without credentials or full text. This is retention acceptance for a
+successfully published capture, not a guarantee that asynchronous capture always
+publishes before a process fails, nor a production capacity or deployment check.
+Browser acceptance additionally uses a production Web build and the
+[conversation checklist](FrontendManualAcceptance.md). Web contract tests validate
+Core-generated block samples, including optional `presentation` facts, while
+continuing to reject unknown fields.
+
 Sandbox-loss recovery requires an isolated-stack behavioral gate before release:
 verify a pre-dispatch loss resumes from the advanced checkpoint with a new tool
 call ID; the original failed call remains exactly once. Verify the recovery

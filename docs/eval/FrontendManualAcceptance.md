@@ -12,6 +12,12 @@ Record the tested commit, browser/version, viewport, account role, and result.
   the bottom; confirm following resumes only after returning to latest.
 - Expand tool groups before and after completion, including a large output and a
   failed tool; confirm stable ordering, final status, and bounded detail reads.
+- Open a completed captured-text Session produced by the isolated capture workload.
+  Confirm current Core blocks with `presentation` facts render, then expand the
+  large tool output and deliberately load its continuation page. UTF-8 characters
+  must remain intact and the complete text must match the original output after
+  the spill file was overwritten and removed. Reload after API/Runtime replacement
+  and repeat. Missing or unpublished captures must remain explicitly unavailable.
 - Switch routes or Sessions while history, stream, attachment, and preview
   requests are in flight; confirm late responses cannot overwrite the new view.
 - Check the context panel, status placement, Markdown/code rendering, citations,

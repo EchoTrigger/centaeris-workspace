@@ -81,6 +81,40 @@ must remain visible; cancellation must not count as successful draining.
 
 ## Tests
 
+### Hosted transcript capture acceptance
+
+After the normal isolated build and startup, run one bounded synthetic capture
+workload. Choose a new evidence directory outside the repository:
+
+```powershell
+python perf/harness/transcript_capture_validation.py --evidence D:/Projects/centaeris-storage-evidence/transcript-capture-unique-id
+python perf/harness/control.py stop
+```
+
+The stack must be idle and pass the existing ownership, health and TLS preflight.
+The workload generates 110,000 bytes of UTF-8 stdout, overwrites its spill file
+with equal-length different bytes, then removes it. All three tools and the real
+AgentRun must succeed; the SSE terminal and durable database state must agree.
+The script reads the formatted historical result in pages of at most 64 KiB
+(at most eight pages), checks the original text, then replaces only API/Runtime
+services while idle and requires exactly the same archived bytes. It preserves
+test data and never cancels a Run to obtain a passing result.
+
+A child process has a 360-second deadline. Ordinary HTTP/SSE operations reuse the
+bounded workload client; content requests have a ten-second deadline. Only the
+explicit projection-not-ready response and capture-unavailable response permit
+bounded readiness waits (20 and 15 seconds respectively). Other errors or invalid
+content fail immediately. The external manifest and report retain source/image
+identities, exact accepted/completed IDs, tool-result metadata, request statuses
+and timings, byte/page counts and SHA-256; credentials and full output stay out
+of those files. Existing evidence directories cannot be reused.
+
+This check proves retention of a published capture after source mutation and
+service replacement. It does not certify full-text delivery before publication,
+production deployment, throughput, or recovery of uncaptured old results. Validate
+the production Web build separately using the conversation checklist in
+`docs/eval/FrontendManualAcceptance.md`, including deliberate multi-page expansion.
+
 ### Bounded API connection-pool validation
 
 After the normal isolated setup/build, use the dedicated controller:

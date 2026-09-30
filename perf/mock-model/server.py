@@ -23,6 +23,7 @@ usage 形状为标准 OpenAI Responses 结构，字段路径以 B1 冒烟实测�
 import json
 import os
 import ssl
+import shlex
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -33,6 +34,17 @@ TLS_PEM = "/opt/mock/tls.pem"
 FINAL_TEXT = "Perf run complete. The deterministic mock has nothing further to add."
 WAITING_MARKER = "restart-matrix parent waiting"
 WAITING_CHILD_MARKER = "Restart matrix durable wait child"
+
+
+def capture_command(rounds):
+    scripts = [
+        "import sys; sys.stdout.buffer.write(('归档😀\\n'*10000).encode('utf-8'))",
+        "from pathlib import Path; files=list(Path('.agent-tool-results').rglob('*.log')); "
+        "[p.write_bytes(b'B'*p.stat().st_size) for p in files]; print('capture-mutated:'+str(len(files)))",
+        "from pathlib import Path; files=list(Path('.agent-tool-results').rglob('*.log')); "
+        "[p.unlink() for p in files]; print('capture-deleted:'+str(len(files)))",
+    ]
+    return "python3 -c " + shlex.quote(scripts[rounds]) if rounds < len(scripts) else None
 
 
 def sse(event_type: str, data: dict) -> bytes:
@@ -296,7 +308,13 @@ class Handler(BaseHTTPRequestHandler):
         waiting_parent = waiting_role == "parent"
         waiting_child = waiting_role == "child"
         waiting_phase, waiting_ref = self.waiting_phase(request) if waiting_parent else (None, None)
-        if waiting_child:
+        if model.endswith("transcript-capture"):
+            command = capture_command(tool_rounds)
+            if command is None:
+                items, usage = self.emit_final(response_id, "perf-instant")
+            else:
+                items, usage = self.emit_named_function_call("bash", {"command": command})
+        elif waiting_child:
             items, usage = self.emit_final(response_id, "perf-waitchild")
         elif model.endswith("restart30") and tool_rounds == 0:
             time.sleep(float(os.environ.get("MOCK_RESTART_DELAY", "30")))
