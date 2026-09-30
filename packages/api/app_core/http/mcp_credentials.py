@@ -169,6 +169,8 @@ def delete_mcp_bearer_credential(request, credential_id: str):
             )
         except McpBearerCredential.DoesNotExist:
             return Status(404, {"error": "mcp_bearer_credential_not_found"})
+        if credential.assistant_approvals.exists():
+            return Status(409, {"error": "mcp_bearer_credential_in_use"})
         _record_audit(credential, "deleted", request.user)
         credential.delete()
     return Status(204, None)
@@ -274,6 +276,8 @@ def _authorization_allows_plugin(authorization, plugin_name: str) -> bool:
             authorization.signature,
         )
         agent_run = authorization.agent_run
+        if agent_run.session.agent.definition_id is not None or agent_run.definition_version_id is not None:
+            return False
         if (
             authorization_digest(payload) != authorization.digest
             or payload["id"] != authorization.id

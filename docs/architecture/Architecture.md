@@ -34,7 +34,7 @@ rename requires coordinated Core and Workspace updates, with no old-field alias.
 
 The API owns Workspace-scoped `AgentDefinition` drafts and immutable published
 `AgentDefinitionVersion` records. Workspace owners and admins manage draft name,
-description, instructions and avatar, publish complete versions, and select
+description, instructions, avatar and `pluginNames`, publish complete versions, and select
 availability `none`, `workspace` or `members`. The default is `none`; only active,
 published, currently available definitions can create instances or new Runs.
 Member grants reference current WorkspaceMembership identities, so leaving and
@@ -53,16 +53,57 @@ key together with the existing `agent_instructions` snapshot. A new publication
 affects subsequent Runs, including those in an existing Session, without changing
 the Session or Agent identity. Accepted Runs and receipt retries retain their
 original version and instructions. Disabling a definition or removing availability
-blocks new acceptance, not execution or historical reads of accepted Runs;
-ordinary ownership and membership checks continue to apply.
+blocks new acceptance and subsequent managed MCP dispatch. It does not cancel an
+accepted Run or reinterpret its history; ordinary ownership and membership checks
+continue to apply.
 
-Managed Runs use the existing Plugin activation schema with empty `packages`.
-They select no external extensions and cannot inherit the global MCP bearer
-credential inventory through Plugin activation. Private Agents retain Workspace
-Plugin activation. Explicit managed capabilities and credential bindings remain
-future work; this baseline does not change authentication or stream revocation.
-First-party built-in tools and authorized materials remain available. This
-delivery adds backend contracts only; the browser workflow is not implemented.
+Draft `pluginNames` select complete packages from Workspace-enabled Plugins. A
+published version freezes the exact `pluginActivation`, including Skills, CLI,
+MCP and Hook contributions and their digests. New Runs require that frozen
+activation to remain available in the Workspace. Runtime uses it for actual
+Skill sources, plugin mounts, CLI paths, tools and Hooks, not just tool visibility.
+An empty selection remains valid; first-party built-in tools and authorized
+materials remain available. Neither publication nor migration grants access to
+global MCP credentials.
+
+`McpBearerCredential` remains the encrypted credential store.
+`AgentConnectorCredentialApproval` references an existing record and source
+version; it does not copy the secret. The source record's `created_by` identifies
+its custodian in the current data model. An approving superuser must also be that
+creator. Each approval fixes Workspace, definition, plugin, server, declaration
+resource path and resource digest. The file digest also binds the declared
+endpoint URL. `AgentConnectorBinding` selects an approval for that exact scope.
+Workspace administrators see only scoped approved references and cannot enumerate
+or bind arbitrary global secrets. Different definitions may bind different
+credentials for the same plugin. Missing, revoked or mismatched bindings never
+fall back to another definition or the global store.
+
+Source rotation invalidates approvals of the old source version and cached
+connections. Using the new version requires a new explicit approval and binding.
+Approval revocation is permanent. Approval foreign keys protect source records
+from deletion; the management API returns a controlled 409 for a protected source,
+including one referenced by a revoked approval. A shared service account gives
+approved users the configured business capability; it does not assert their
+individual downstream ACLs.
+
+Every external MCP provider, including bearer HTTP, unauthenticated HTTP and
+stdio, has a Runtime guard. Before each call the API checks current membership
+identity, Run/Session/Agent state and ownership, managed definition availability,
+Workspace plugin enablement, frozen resource identity, current approval, binding
+and source version. The guard fixes a binding fingerprint on first authorization;
+lazy connect checks it again before receiving a token, and cached dispatch checks
+it on every call. Changed authority, fingerprints or API failures reject the call
+without executing or reconnecting the inner provider. Ordinary configuration
+stays frozen while security revocation remains current. This boundary covers MCP
+dispatch; it does not add periodic SSE revocation or cancel all accepted execution.
+
+The private credential path requires persistent `Agent.definition_id = null` and
+`AgentRun.definition_version_id = null`. A managed Agent missing its version is
+rejected. The old bearer resolver is restricted to that private state; the new
+adapter always uses strict connector authorization. Models and external tool
+arguments cannot choose secret references. Public responses expose neither tokens
+nor authorization signatures. The management contracts support a scoped approval
+picker and binding controls; a new real-secret management UI is not implemented.
 
 ## Request flow
 

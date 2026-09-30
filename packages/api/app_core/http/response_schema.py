@@ -242,6 +242,7 @@ class AgentDefinitionResponse(StrictSchema):
     name: str
     description: str
     instructions: str
+    plugin_names: list[str] = Field(alias="pluginNames")
     avatar_kind: Literal["centaeris", "banana"] = Field(alias="avatarKind")
     status: Literal["active", "disabled"]
     availability_scope: Literal["none", "workspace", "members"] = Field(alias="availabilityScope")
@@ -258,6 +259,7 @@ class AgentDefinitionVersionResponse(StrictSchema):
     name: str
     description: str
     instructions: str
+    plugin_names: list[str] = Field(alias="pluginNames")
     avatar_kind: Literal["centaeris", "banana"] = Field(alias="avatarKind")
     published_at: str = Field(alias="publishedAt")
 

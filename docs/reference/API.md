@@ -375,13 +375,17 @@ Workspace owners and admins manage definitions under
 | `GET` / `POST` `/{definitionId}/versions` | List immutable versions / publish the current draft |
 | `PUT` `/{definitionId}/availability` | Replace availability using `{scope, membershipIds}` |
 
-Draft configuration uses exact public fields `name`, `description`, `instructions`
-and `avatarKind`. Status is `active` or `disabled`. Availability scope is `none`
+Draft configuration uses exact public fields `name`, `description`, `instructions`,
+`avatarKind` and `pluginNames`. `pluginNames` defaults to `[]`, rejects duplicate
+or unknown identities, and selects complete Workspace-enabled packages; it does
+not select individual Skills or tools. Responses return sorted names. Status is
+`active` or `disabled`. Availability scope is `none`
 (the default), `workspace` or `members`; member grants refer to current
 WorkspaceMembership identities. Foreign Workspace members and unknown scopes
 are rejected. A new membership after rejoining does not inherit an old grant.
-Published versions freeze all four configuration fields, their version number,
-publisher and publication time. Publication requires a strictly empty JSON object
+Published versions freeze configuration plus the complete `pluginActivation`,
+their version number, publisher and publication time. Public version responses
+show the selected `pluginNames`. Publication requires a strictly empty JSON object
 `{}`; published content cannot be edited.
 
 Members use `GET /api/workspaces/{workspaceId}/available-agent-definitions` to
@@ -408,12 +412,74 @@ unchanged. Old Runs, historical reads and accepted operation receipt retries kee
 their version and snapshot, subject to existing ownership and membership checks.
 Stopping availability does not cancel or reinterpret accepted Runs.
 
-Managed Run authorization retains the existing Plugin activation schema with
-`packages: []`, excluding external Plugin Skills, CLI contributions, MCP servers
-and Hooks and their global bearer credential inheritance. Existing private Agent
-Plugin behavior is unchanged. Explicit managed capabilities and credential
-bindings, authentication changes, stream revocation and browser UI are outside
+Managed Run authorization freezes the selected version's exact Plugin activation,
+covering Skills, CLI contributions, MCP servers and Hooks. Run acceptance requires
+that selection to remain Workspace-enabled and match the available package
+digests. Empty selection remains supported. Credential authority is a current
+scoped binding, independent of the immutable configuration snapshot.
+
+### Scoped connector approvals and bindings
+
+Browser routes below use `/api`. Workspace routes require the owner/admin role;
+approval creation and revocation require a superuser who owns the source approval.
+Creation additionally requires that user to be the credential record's creator
+(`created_by`), the current custodian. These controls reference existing encrypted
+credentials; they do not create, import or rotate secrets.
+
+| Method and route | Required body and controlled response |
+| --- | --- |
+| `POST /admin/mcp-bearer-credentials/{credentialId}/assistant-approvals` | `{workspaceId, definitionId, serverId}`; 201 `{approval}` for the source plugin, current source version and frozen resource |
+| `DELETE /admin/mcp-assistant-credential-approvals/{approvalId}` | Permanently revoke the caller's approval; 204 |
+| `GET /workspaces/{workspaceId}/agent-definitions/{definitionId}/credential-approvals` | `{approvals}` containing only unrevoked approvals of the current source version for this exact definition |
+| `GET /workspaces/{workspaceId}/agent-definitions/{definitionId}/connector-bindings` | `{bindings}` for this exact definition |
+| `PUT /workspaces/{workspaceId}/agent-definitions/{definitionId}/connector-bindings/{pluginName}/{serverId}` | `{approvalId}`; `{binding}` after exact scope, resource and current source-version checks |
+| `DELETE /workspaces/{workspaceId}/agent-definitions/{definitionId}/connector-bindings/{pluginName}/{serverId}` | Remove this binding; 204 |
+
+Approval responses have exactly `id`, `pluginName`, `serverId`, `resourcePath`,
+`resourceDigest`, `displayName` and `approvedAt`. Binding responses have exactly
+`id`, `pluginName`, `serverId` and `approvalId`. They contain no token, secret
+reference, encrypted secret or authorization signature. There is no Workspace
+administrator route for global secret enumeration or arbitrary secret binding.
+Unknown fields fail; inaccessible scope returns 404, and invalid approval scope
+returns `mcp_credential_approval_scope_invalid`. These interfaces support a scoped
+approval picker and binding controls; a new real-secret management UI is outside
 this delivery.
+
+An approval fixes Workspace, definition, plugin, server, declaration resource path
+and digest, plus credential identity and version. The declaration file digest
+binds its endpoint URL. Different assistants may use different credentials for
+the same plugin. Rotation makes old approvals and cached fingerprints unusable;
+the custodian must explicitly approve the new version before rebinding. Approval
+references protect their source record, including after revocation: deleting a
+protected source through credential management returns 409
+`mcp_bearer_credential_in_use`. Existing global
+credentials and migrated records receive no automatic assistant authorization.
+A shared service account authorizes the configured business capability; these
+routes do not assert each user's downstream personal ACL.
+
+`POST /internal/mcp-connectors/authorize` requires `X-Internal-Token` and exactly
+`schema: "runtime.mcp_connector.authorization.v1"`, `agentRunId`,
+`authorizationRef`, `authorizationDigest`, `pluginName`, `serverId`,
+`resourcePath`, `resourceDigest`, `operation` and `bindingDigest`. Operation is
+`connect` or `dispatch`; `bindingDigest` is required and nullable. Runtime obtains
+server/resource identity from frozen package declarations, never model arguments;
+the request has no `secretRef` or caller-selected credential reference.
+
+The strict no-store response requires exactly
+`schema: "runtime.mcp_connector.authorized.v1"`, `scope: "private" | "managed"`,
+`bindingDigest` and nullable `token`. Dispatch always returns null token; connect
+may release a bearer token only to the authenticated adapter. All MCP transports
+check current membership identity, ownership and lifecycle, managed definition
+availability, Workspace plugin enablement, frozen resource, approval, binding and
+source version on every call. Runtime fixes the first fingerprint, checks it
+again on lazy connect, and compares it on cached calls. Revocation, mismatch or API
+failure prevents provider execution without fallback or automatic reconnect.
+
+Private credential resolution requires persistent null Agent definition and null
+Run definition version. Missing managed version data never selects that path.
+The old `/internal/mcp-bearer-credentials/resolve` endpoint remains private-only;
+the new adapter uses connector authorization. Authentication changes and periodic
+SSE revocation remain outside this delivery.
 
 ## Execution recovery scheduling
 

@@ -9,9 +9,11 @@ use centaeris_core::extension::{
     load_mcp_servers_file, McpServerDeclarationV1, McpToolDeclarationV1, McpTransportV1,
     PluginActivationSnapshotV1,
 };
-use centaeris_core::tool::layer::DynamicToolProvider;
+use centaeris_core::tool::layer::{
+    DynamicToolProvider, DynamicToolProviderRequest, DynamicToolProviderResponse,
+};
 use centaeris_core::tool::limits::ToolContractBudget;
-use centaeris_core::tool::DynamicToolContract;
+use centaeris_core::tool::{DynamicToolContract, ToolErrorInfo};
 use centaeris_mcp::{
     bounded_io_transport, connect_mcp_server_transport, connect_streamable_http_mcp_server,
     lazy_mcp_server_binding, valid_bearer_token, McpConnectError, McpServerConnector,
@@ -27,8 +29,99 @@ pub(crate) struct McpBindings {
 }
 
 pub(crate) struct PreparedMcpServers {
-    servers: Vec<(String, McpServerDeclarationV1)>,
+    servers: Vec<(McpConnectorIdentity, McpServerDeclarationV1)>,
     credential_resolver: Arc<McpCredentialResolver>,
+}
+
+#[derive(Clone)]
+struct McpConnectorIdentity {
+    plugin_name: String,
+    server_id: String,
+    resource_path: String,
+    resource_digest: String,
+}
+
+struct McpDispatchAuthorization {
+    identity: McpConnectorIdentity,
+    resolver: Arc<McpCredentialResolver>,
+    binding_digest: tokio::sync::Mutex<Option<String>>,
+}
+
+impl McpDispatchAuthorization {
+    async fn check(
+        &self,
+        operation: &'static str,
+    ) -> Result<McpCredentialResolvedResponse, String> {
+        let mut binding_digest = self.binding_digest.lock().await;
+        let authorized = self
+            .resolver
+            .authorize(&self.identity, operation, binding_digest.as_deref())
+            .await?;
+        if binding_digest
+            .as_ref()
+            .is_some_and(|digest| digest != &authorized.binding_digest)
+        {
+            return Err("MCP connector binding changed".to_string());
+        }
+        if binding_digest.is_none() {
+            *binding_digest = Some(authorized.binding_digest.clone());
+        }
+        Ok(authorized)
+    }
+
+    async fn connect_token(
+        &self,
+        server: &McpServerDeclarationV1,
+    ) -> Result<Option<String>, String> {
+        let token = self.check("connect").await?.token;
+        let requires_token = matches!(
+            &server.transport,
+            McpTransportV1::StreamableHttp {
+                bearer_credential_ref: Some(_),
+                ..
+            }
+        );
+        if requires_token != token.is_some() {
+            return Err("MCP connector credential mismatch".to_string());
+        }
+        Ok(token)
+    }
+}
+
+struct AuthorizedMcpProvider {
+    inner: Arc<dyn DynamicToolProvider + Send + Sync>,
+    authorization: Arc<McpDispatchAuthorization>,
+}
+
+impl DynamicToolProvider for AuthorizedMcpProvider {
+    fn provider_id(&self) -> &str {
+        self.inner.provider_id()
+    }
+
+    fn execute<'a>(
+        &'a self,
+        req: DynamicToolProviderRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<DynamicToolProviderResponse, String>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            self.authorization.check("dispatch").await?;
+            self.inner.execute(req).await
+        })
+    }
+
+    fn execute_with_error_info<'a>(
+        &'a self,
+        req: DynamicToolProviderRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<DynamicToolProviderResponse, ToolErrorInfo>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            self.authorization
+                .check("dispatch")
+                .await
+                .map_err(ToolErrorInfo::from_unstructured_error)?;
+            self.inner.execute_with_error_info(req).await
+        })
+    }
 }
 
 pub(crate) struct McpStartupMetrics {
@@ -179,14 +272,20 @@ impl McpCredentialResolver {
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(3))
+                .timeout(Duration::from_secs(10))
                 .build()
                 .map_err(|error| format!("build MCP credential client failed: {error}"))?,
         })
     }
 
-    async fn resolve(&self, plugin_name: &str, credential_ref: &str) -> Result<String, String> {
+    async fn authorize(
+        &self,
+        identity: &McpConnectorIdentity,
+        operation: &'static str,
+        binding_digest: Option<&str>,
+    ) -> Result<McpCredentialResolvedResponse, String> {
         let url = format!(
-            "{}/internal/mcp-bearer-credentials/resolve",
+            "{}/internal/mcp-connectors/authorize",
             self.api_internal_url.trim_end_matches('/')
         );
         let response = self
@@ -195,33 +294,52 @@ impl McpCredentialResolver {
             .header("Content-Type", "application/json")
             .header("X-Internal-Token", self.internal_api_token.as_str())
             .json(&McpCredentialResolveRequest {
-                schema: "runtime.mcp_bearer_credential.resolve.v1",
+                schema: "runtime.mcp_connector.authorization.v1",
                 agent_run_id: self.agent_run_id.as_str(),
                 authorization_ref: self.authorization_ref.as_str(),
                 authorization_digest: self.authorization_digest.as_str(),
-                plugin_name,
-                credential_ref,
+                plugin_name: &identity.plugin_name,
+                server_id: &identity.server_id,
+                resource_path: &identity.resource_path,
+                resource_digest: &identity.resource_digest,
+                operation,
+                binding_digest,
             })
             .send()
             .await
-            .map_err(|_| "resolve MCP bearer credential request failed".to_string())?;
+            .map_err(|_| "authorize MCP connector request failed".to_string())?;
         if !response.status().is_success() {
             return Err(format!(
-                "resolve MCP bearer credential returned {}",
+                "authorize MCP connector returned {}",
                 response.status().as_u16()
             ));
         }
         let resolved = response
             .json::<McpCredentialResolvedResponse>()
             .await
-            .map_err(|_| "decode MCP bearer credential response failed".to_string())?;
-        if resolved.schema != "runtime.mcp_bearer_credential.resolved.v1"
-            || !valid_bearer_token(resolved.token.as_str())
+            .map_err(|_| "decode MCP connector authorization response failed".to_string())?;
+        if resolved.schema != "runtime.mcp_connector.authorized.v1"
+            || !matches!(resolved.scope.as_str(), "private" | "managed")
+            || !valid_binding_digest(&resolved.binding_digest)
+            || resolved
+                .token
+                .as_ref()
+                .is_some_and(|token| !valid_bearer_token(token))
+            || (operation == "dispatch" && resolved.token.is_some())
         {
-            return Err("MCP bearer credential response invalid".to_string());
+            return Err("MCP connector authorization response invalid".to_string());
         }
-        Ok(resolved.token)
+        Ok(resolved)
     }
+}
+
+fn valid_binding_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 struct DockerMcpTransport {
@@ -279,7 +397,7 @@ impl Drop for DockerMcpTransport {
 struct WorkspaceMcpConnector {
     plugin_name: String,
     server: McpServerDeclarationV1,
-    credential_resolver: Arc<McpCredentialResolver>,
+    authorization: Arc<McpDispatchAuthorization>,
     docker: Arc<DockerExecutionHostRunner>,
 }
 
@@ -295,21 +413,11 @@ impl McpServerConnector for WorkspaceMcpConnector {
     > {
         Box::pin(async move {
             let credential_started = Instant::now();
-            let bearer_token = match &self.server.transport {
-                McpTransportV1::StreamableHttp {
-                    bearer_credential_ref,
-                    ..
-                } => match bearer_credential_ref.as_deref() {
-                    Some(credential_ref) => Some(
-                        self.credential_resolver
-                            .resolve(self.plugin_name.as_str(), credential_ref)
-                            .await
-                            .map_err(McpConnectError::Unavailable)?,
-                    ),
-                    None => None,
-                },
-                McpTransportV1::Stdio { .. } => None,
-            };
+            let bearer_token = self
+                .authorization
+                .connect_token(&self.server)
+                .await
+                .map_err(McpConnectError::Unavailable)?;
             let credential_resolve_ms = credential_started.elapsed().as_millis();
             let discovery_started = Instant::now();
             let provider = match &self.server.transport {
@@ -364,14 +472,27 @@ struct McpCredentialResolveRequest<'a> {
     authorization_ref: &'a str,
     authorization_digest: &'a str,
     plugin_name: &'a str,
-    credential_ref: &'a str,
+    server_id: &'a str,
+    resource_path: &'a str,
+    resource_digest: &'a str,
+    operation: &'a str,
+    binding_digest: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct McpCredentialResolvedResponse {
     schema: String,
-    token: String,
+    scope: String,
+    binding_digest: String,
+    #[serde(deserialize_with = "required_nullable_token")]
+    token: Option<String>,
+}
+
+fn required_nullable_token<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer)
 }
 
 pub(crate) async fn prepare_http_mcp_servers(
@@ -401,12 +522,17 @@ fn prepare_mcp_servers_at(
                     .as_path(),
             )?;
             declaration_budget.add(&declaration)?;
-            servers.extend(
-                declaration
-                    .servers
-                    .into_iter()
-                    .map(|server| (package.name.clone(), server)),
-            );
+            servers.extend(declaration.servers.into_iter().map(|server| {
+                (
+                    McpConnectorIdentity {
+                        plugin_name: package.name.clone(),
+                        server_id: server.id.clone(),
+                        resource_path: resource.path.clone(),
+                        resource_digest: resource.digest.clone(),
+                    },
+                    server,
+                )
+            }));
         }
     }
 
@@ -424,14 +550,20 @@ pub(crate) async fn connect_mcp_servers(
     let mut contracts = Vec::new();
     let mut providers: Vec<Arc<dyn DynamicToolProvider + Send + Sync>> = Vec::new();
     let mut provider_ids = HashSet::new();
-    for (plugin_name, server) in prepared.servers {
+    for (identity, server) in prepared.servers {
+        let plugin_name = identity.plugin_name.clone();
+        let authorization = Arc::new(McpDispatchAuthorization {
+            identity,
+            resolver: prepared.credential_resolver.clone(),
+            binding_digest: tokio::sync::Mutex::new(None),
+        });
         let binding = lazy_mcp_server_binding(
             plugin_name.as_str(),
             &server,
             Arc::new(WorkspaceMcpConnector {
                 plugin_name: plugin_name.clone(),
                 server: server.clone(),
-                credential_resolver: prepared.credential_resolver.clone(),
+                authorization: authorization.clone(),
                 docker: docker.clone(),
             }),
         )?;
@@ -442,7 +574,10 @@ pub(crate) async fn connect_mcp_servers(
             ));
         }
         contracts.extend(binding.contracts);
-        providers.push(binding.provider);
+        providers.push(Arc::new(AuthorizedMcpProvider {
+            inner: binding.provider,
+            authorization,
+        }));
     }
     Ok((
         McpBindings {
@@ -468,6 +603,615 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_identity() -> McpConnectorIdentity {
+        McpConnectorIdentity {
+            plugin_name: "banana".into(),
+            server_id: "banana-source".into(),
+            resource_path: "mcp/banana.json".into(),
+            resource_digest: format!("sha256:{}", "c".repeat(64)),
+        }
+    }
+
+    fn authorized_reply(digest: char, token: Option<&str>) -> serde_json::Value {
+        json!({"schema":"runtime.mcp_connector.authorized.v1", "scope":"managed",
+            "bindingDigest": format!("sha256:{}", digest.to_string().repeat(64)), "token":token})
+    }
+
+    fn fake_request() -> DynamicToolProviderRequest {
+        DynamicToolProviderRequest {
+            tool_call_id: "call".into(),
+            tool_name: "banana_search".into(),
+            args_json: json!({"secretRef":"model-selected-secret", "serverId":"other-server"})
+                .to_string(),
+            cancellation_probe: None,
+            contract: centaeris_core::tool::ToolContract {
+                name: "banana_search".into(),
+                category: "mcp".into(),
+                summary: "Synthetic fixture".into(),
+                input_schema: json!({"type":"object"}),
+                concurrency_safe: true,
+                turn_behavior: centaeris_core::tool::ToolTurnBehavior::ContinueTurn,
+                provider_id: Some("mcp:banana:banana-source".into()),
+                schema_hash: None,
+                scopes: vec![],
+                dynamic: true,
+            },
+        }
+    }
+
+    struct FakeProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl DynamicToolProvider for FakeProvider {
+        fn provider_id(&self) -> &str {
+            "mcp:banana:banana-source"
+        }
+        fn execute<'a>(
+            &'a self,
+            _req: DynamicToolProviderRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<DynamicToolProviderResponse, String>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(DynamicToolProviderResponse {
+                    content: "ok".into(),
+                    details: json!({}),
+                    is_error: false,
+                    facts: vec![],
+                    transition_reason: None,
+                })
+            })
+        }
+        fn execute_with_error_info<'a>(
+            &'a self,
+            _req: DynamicToolProviderRequest,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<DynamicToolProviderResponse, ToolErrorInfo>> + Send + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(ToolErrorInfo::new(
+                    centaeris_core::tool::ToolFailureKind::PermissionDenied,
+                    "downstream permission",
+                    "downstream permission",
+                )
+                .with_diagnostic("fake-diagnostic"))
+            })
+        }
+    }
+
+    struct FakeConnector {
+        authorization: Arc<McpDispatchAuthorization>,
+        server: McpServerDeclarationV1,
+        provider: Arc<FakeProvider>,
+        connects: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl McpServerConnector for FakeConnector {
+        fn connect<'a>(
+            &'a self,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            Arc<dyn DynamicToolProvider + Send + Sync>,
+                            McpConnectError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                self.authorization
+                    .connect_token(&self.server)
+                    .await
+                    .map_err(McpConnectError::Unavailable)?;
+                self.connects
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(self.provider.clone() as Arc<dyn DynamicToolProvider + Send + Sync>)
+            })
+        }
+    }
+
+    struct GuardFixture {
+        provider: AuthorizedMcpProvider,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        connects: Arc<std::sync::atomic::AtomicUsize>,
+        requests: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        task: tokio::task::JoinHandle<()>,
+        resource_digest: String,
+    }
+    impl Drop for GuardFixture {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn guard_fixture(
+        replies: Vec<(axum::http::StatusCode, serde_json::Value)>,
+        transport: Option<McpTransportV1>,
+    ) -> GuardFixture {
+        let (url, requests, task) = fake_authorization_api(replies).await;
+        let (root, activation) = banana_package();
+        let resource_digest = activation.packages[0].mcp_servers[0].digest.clone();
+        let mut resolver = McpCredentialResolver::new(
+            url,
+            "internal-secret".into(),
+            "run".into(),
+            "authorization".into(),
+            format!("sha256:{}", "b".repeat(64)),
+        )
+        .unwrap();
+        resolver.client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let mut prepared = prepare_mcp_servers_at(activation, resolver, &root).unwrap();
+        let (identity, mut server) = prepared.servers.pop().unwrap();
+        if let Some(transport) = transport {
+            server.transport = transport;
+        }
+        let authorization = Arc::new(McpDispatchAuthorization {
+            identity,
+            resolver: prepared.credential_resolver,
+            binding_digest: tokio::sync::Mutex::new(None),
+        });
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let connects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let inner = lazy_mcp_server_binding(
+            "banana",
+            &server,
+            Arc::new(FakeConnector {
+                authorization: authorization.clone(),
+                server: server.clone(),
+                provider: Arc::new(FakeProvider {
+                    calls: calls.clone(),
+                }),
+                connects: connects.clone(),
+            }),
+        )
+        .unwrap()
+        .provider;
+        fs::remove_dir_all(root).unwrap();
+        GuardFixture {
+            provider: AuthorizedMcpProvider {
+                inner,
+                authorization,
+            },
+            calls,
+            connects,
+            requests,
+            task,
+            resource_digest,
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "launched by Django LiveServerTestCase with a synthetic test database"]
+    async fn python_connector_interoperability() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let fixture: serde_json::Value = serde_json::from_str(
+            &std::env::var("ASSISTANT_CONNECTOR_FIXTURE").expect("Django fixture required"),
+        )
+        .unwrap();
+        let field = |name: &str| fixture[name].as_str().unwrap().to_owned();
+        let database = fixture["database"].clone();
+        assert!(database["NAME"].as_str().unwrap().starts_with("test_"));
+        let mut resolver = McpCredentialResolver::new(
+            field("liveServerUrl"),
+            "test-internal-token".into(),
+            field("agentRunId"),
+            field("authorizationRef"),
+            field("authorizationDigest"),
+        )
+        .unwrap();
+        resolver.client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let authorization = Arc::new(McpDispatchAuthorization {
+            identity: McpConnectorIdentity {
+                plugin_name: "banana".into(),
+                server_id: "ledger".into(),
+                resource_path: field("resourcePath"),
+                resource_digest: field("resourceDigest"),
+            },
+            resolver: Arc::new(resolver),
+            binding_digest: tokio::sync::Mutex::new(None),
+        });
+        let tools = vec![McpToolDeclarationV1 {
+            source_name: "search".into(),
+            name: "banana_search".into(),
+            description: "Synthetic ledger search.".into(),
+            input_schema: json!({"type": "object"}),
+            concurrency_safe: true,
+            scopes: vec!["banana:read".into()],
+        }];
+        let server = McpServerDeclarationV1 {
+            id: "ledger".into(),
+            model_contract_digest: mcp_model_contract_digest("ledger", &tools).unwrap(),
+            transport: McpTransportV1::StreamableHttp {
+                url: "https://business.invalid/mcp".into(),
+                bearer_credential_ref: Some("business-token".into()),
+            },
+            lifecycle: McpLifecycleV1::Auto,
+            startup_timeout_ms: 10_000,
+            tool_timeout_ms: 60_000,
+            tools,
+        };
+        struct InteropProvider(Arc<AtomicUsize>);
+        impl DynamicToolProvider for InteropProvider {
+            fn provider_id(&self) -> &str {
+                "mcp:banana:ledger"
+            }
+            fn execute<'a>(
+                &'a self,
+                request: DynamicToolProviderRequest,
+            ) -> Pin<
+                Box<dyn Future<Output = Result<DynamicToolProviderResponse, String>> + Send + 'a>,
+            > {
+                Box::pin(async move {
+                    FakeProvider {
+                        calls: self.0.clone(),
+                    }
+                    .execute(request)
+                    .await
+                })
+            }
+        }
+        struct InteropConnector {
+            authorization: Arc<McpDispatchAuthorization>,
+            server: McpServerDeclarationV1,
+            calls: Arc<AtomicUsize>,
+            connects: Arc<AtomicUsize>,
+        }
+        impl McpServerConnector for InteropConnector {
+            fn connect<'a>(
+                &'a self,
+            ) -> Pin<
+                Box<
+                    dyn Future<
+                            Output = Result<
+                                Arc<dyn DynamicToolProvider + Send + Sync>,
+                                McpConnectError,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async move {
+                    let token = self
+                        .authorization
+                        .connect_token(&self.server)
+                        .await
+                        .map_err(McpConnectError::Unavailable)?;
+                    assert_eq!(token.as_deref(), Some("fixture-account-one"));
+                    self.connects.fetch_add(1, SeqCst);
+                    Ok(Arc::new(InteropProvider(self.calls.clone()))
+                        as Arc<dyn DynamicToolProvider + Send + Sync>)
+                })
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let connects = Arc::new(AtomicUsize::new(0));
+        let inner = lazy_mcp_server_binding(
+            "banana",
+            &server,
+            Arc::new(InteropConnector {
+                authorization: authorization.clone(),
+                server: server.clone(),
+                calls: calls.clone(),
+                connects: connects.clone(),
+            }),
+        )
+        .unwrap()
+        .provider;
+        let provider = AuthorizedMcpProvider {
+            inner,
+            authorization: authorization.clone(),
+        };
+        let request = || {
+            let mut request = fake_request();
+            request.contract.provider_id = Some("mcp:banana:ledger".into());
+            request
+        };
+        assert!(provider.execute(request()).await.is_ok());
+        assert!(provider.execute(request()).await.is_ok());
+        assert_eq!(calls.load(SeqCst), 2);
+        assert_eq!(connects.load(SeqCst), 1);
+        let approval_id = field("approvalId");
+        tokio::task::spawn_blocking(move || {
+            let mut config = postgres::Config::new();
+            config.dbname(database["NAME"].as_str().unwrap())
+                .user(database["USER"].as_str().unwrap())
+                .password(database["PASSWORD"].as_str().unwrap())
+                .host(database["HOST"].as_str().unwrap())
+                .port(database["PORT"].as_str().unwrap().parse().unwrap());
+            let mut client = config.connect(postgres::NoTls).unwrap();
+            let actual: String = client.query_one("SELECT current_database()", &[]).unwrap().get(0);
+            assert_eq!(actual, database["NAME"].as_str().unwrap());
+            assert!(actual.starts_with("test_"));
+            assert_eq!(client.execute(
+                "UPDATE app_core_agentconnectorcredentialapproval SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL",
+                &[&approval_id],
+            ).unwrap(), 1);
+        }).await.unwrap();
+        assert!(provider.execute(request()).await.is_err());
+        assert!(authorization.connect_token(&server).await.is_err());
+        assert_eq!(calls.load(SeqCst), 2);
+        assert_eq!(connects.load(SeqCst), 1);
+        println!("assistant_connector_interoperability: cached_calls=2 revoked_calls=0");
+    }
+
+    #[tokio::test]
+    async fn connector_cached_calls_recheck_and_reject_revocation() {
+        use axum::http::StatusCode;
+        use std::sync::atomic::Ordering::SeqCst;
+        let fixture = guard_fixture(
+            vec![
+                (StatusCode::OK, authorized_reply('a', None)),
+                (StatusCode::OK, authorized_reply('a', Some("test-secret"))),
+                (StatusCode::OK, authorized_reply('a', None)),
+                (
+                    StatusCode::FORBIDDEN,
+                    json!({"error":"revoked test-secret internal-secret"}),
+                ),
+            ],
+            None,
+        )
+        .await;
+        assert!(fixture.provider.execute(fake_request()).await.is_ok());
+        assert!(fixture.provider.execute(fake_request()).await.is_ok());
+        let error = fixture.provider.execute(fake_request()).await.unwrap_err();
+        assert!(!error.contains("test-secret") && !error.contains("internal-secret"));
+        assert_eq!(fixture.calls.load(SeqCst), 2);
+        assert_eq!(fixture.connects.load(SeqCst), 1);
+        let requests = fixture.requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|body| body["operation"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["dispatch", "connect", "dispatch", "dispatch"]
+        );
+        for body in requests.iter() {
+            assert_eq!(body["pluginName"], "banana");
+            assert_eq!(body["serverId"], "banana-source");
+            assert_eq!(body["resourcePath"], "mcp/banana.json");
+            assert_eq!(body["resourceDigest"], fixture.resource_digest);
+            assert!(body.get("secretRef").is_none() && body.get("credentialRef").is_none());
+        }
+        assert!(requests[0]["bindingDigest"].is_null());
+        assert_eq!(
+            requests[1]["bindingDigest"],
+            format!("sha256:{}", "a".repeat(64))
+        );
+    }
+
+    #[tokio::test]
+    async fn connector_cached_binding_change_does_not_call_or_reconnect() {
+        use axum::http::StatusCode;
+        let fixture = guard_fixture(
+            vec![
+                (StatusCode::OK, authorized_reply('a', None)),
+                (StatusCode::OK, authorized_reply('a', Some("test-secret"))),
+                (StatusCode::OK, authorized_reply('b', None)),
+            ],
+            None,
+        )
+        .await;
+        assert!(fixture.provider.execute(fake_request()).await.is_ok());
+        assert!(fixture
+            .provider
+            .execute(fake_request())
+            .await
+            .unwrap_err()
+            .contains("binding changed"));
+        assert_eq!(fixture.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture.connects.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn connector_connect_rejects_binding_changed_after_dispatch() {
+        use axum::http::StatusCode;
+        let fixture = guard_fixture(
+            vec![
+                (StatusCode::OK, authorized_reply('a', None)),
+                (StatusCode::OK, authorized_reply('b', Some("test-secret"))),
+            ],
+            None,
+        )
+        .await;
+        assert!(fixture.provider.execute(fake_request()).await.is_err());
+        assert_eq!(fixture.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            fixture.connects.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn connector_without_bearer_and_stdio_still_check_each_dispatch() {
+        use axum::http::StatusCode;
+        for transport in [
+            McpTransportV1::StreamableHttp {
+                url: "https://banana.invalid/mcp".into(),
+                bearer_credential_ref: None,
+            },
+            McpTransportV1::Stdio {
+                program: "banana".into(),
+                args: vec![],
+            },
+        ] {
+            let fixture = guard_fixture(
+                vec![
+                    (StatusCode::OK, authorized_reply('a', None)),
+                    (StatusCode::OK, authorized_reply('a', None)),
+                    (StatusCode::FORBIDDEN, json!({"error":"revoked"})),
+                ],
+                Some(transport),
+            )
+            .await;
+            assert!(fixture.provider.execute(fake_request()).await.is_ok());
+            assert!(fixture.provider.execute(fake_request()).await.is_err());
+            assert_eq!(fixture.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(
+                fixture.connects.load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+            assert_eq!(fixture.requests.lock().unwrap().len(), 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn connector_invalid_authorization_never_calls_provider() {
+        let mut invalid = Vec::new();
+        for key in ["schema", "scope", "bindingDigest", "token"] {
+            let mut reply = authorized_reply('a', None);
+            reply.as_object_mut().unwrap().remove(key);
+            invalid.push(reply);
+        }
+        for (key, value) in [
+            ("extra", json!(true)),
+            ("schema", json!("unknown")),
+            ("scope", json!("unknown")),
+            ("bindingDigest", json!("sha256:invalid")),
+            ("token", json!("unexpected-secret")),
+        ] {
+            let mut reply = authorized_reply('a', None);
+            reply[key] = value;
+            invalid.push(reply);
+        }
+        for reply in invalid {
+            let fixture = guard_fixture(vec![(axum::http::StatusCode::OK, reply)], None).await;
+            assert!(fixture.provider.execute(fake_request()).await.is_err());
+            assert_eq!(fixture.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+            assert_eq!(
+                fixture.connects.load(std::sync::atomic::Ordering::SeqCst),
+                0
+            );
+            assert_eq!(fixture.requests.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn connector_api_failure_rejects_cached_provider_without_fallback() {
+        use axum::http::StatusCode;
+        let fixture = guard_fixture(
+            vec![
+                (StatusCode::OK, authorized_reply('a', None)),
+                (StatusCode::OK, authorized_reply('a', Some("test-secret"))),
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({"error":"internal-secret test-secret"}),
+                ),
+            ],
+            None,
+        )
+        .await;
+        assert!(fixture.provider.execute(fake_request()).await.is_ok());
+        let error = fixture
+            .provider
+            .execute_with_error_info(fake_request())
+            .await
+            .unwrap_err();
+        let visible = format!("{} {}", error.model_message, error.user_message);
+        assert!(!visible.contains("internal-secret") && !visible.contains("test-secret"));
+        assert_eq!(fixture.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture.connects.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn connector_preserves_structured_provider_error() {
+        let mut fixture = guard_fixture(
+            vec![(axum::http::StatusCode::OK, authorized_reply('a', None))],
+            None,
+        )
+        .await;
+        fixture.provider.inner = Arc::new(FakeProvider {
+            calls: fixture.calls.clone(),
+        });
+        let error = fixture
+            .provider
+            .execute_with_error_info(fake_request())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            centaeris_core::tool::ToolFailureKind::PermissionDenied
+        );
+        assert_eq!(error.diagnostic_id.as_deref(), Some("fake-diagnostic"));
+        assert_eq!(error.model_message, "downstream permission");
+        assert_eq!(fixture.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    async fn fake_authorization_api(
+        replies: Vec<(axum::http::StatusCode, serde_json::Value)>,
+    ) -> (
+        String,
+        Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let replies = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
+            replies,
+        )));
+        let app = axum::Router::new().route(
+            "/internal/mcp-connectors/authorize",
+            axum::routing::post(move |body: axum::body::Bytes| {
+                let recorded = recorded.clone();
+                let replies = replies.clone();
+                async move {
+                    recorded
+                        .lock()
+                        .unwrap()
+                        .push(serde_json::from_slice(&body).unwrap());
+                    let (status, reply) = replies.lock().unwrap().pop_front().unwrap();
+                    (
+                        status,
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        reply.to_string(),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (url, requests, task)
+    }
+
+    #[tokio::test]
+    async fn connector_uses_current_authorization_api() {
+        let (url, requests, task) = fake_authorization_api(vec![(
+            axum::http::StatusCode::OK,
+            json!({"schema":"runtime.mcp_connector.authorized.v1", "scope":"managed",
+                "bindingDigest":format!("sha256:{}", "a".repeat(64)), "token":"test-secret"}),
+        )])
+        .await;
+        let mut resolver = McpCredentialResolver::new(
+            url,
+            "internal-secret".into(),
+            "run".into(),
+            "authorization".into(),
+            format!("sha256:{}", "b".repeat(64)),
+        )
+        .unwrap();
+        resolver.client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let result = resolver.authorize(&test_identity(), "connect", None).await;
+        assert!(
+            result.is_ok(),
+            "connector must use current authorization API: {:?}",
+            result.err()
+        );
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        task.abort();
+    }
 
     fn banana_package() -> (PathBuf, PluginActivationSnapshotV1) {
         use centaeris_core::extension::build_plugin_activation_snapshot;
@@ -553,21 +1297,29 @@ mod tests {
 
         assert_eq!(
             serde_json::to_value(McpCredentialResolveRequest {
-                schema: "runtime.mcp_bearer_credential.resolve.v1",
+                schema: "runtime.mcp_connector.authorization.v1",
                 agent_run_id: "agent-run",
                 authorization_ref: "authorization",
                 authorization_digest: "sha256:banana",
                 plugin_name: "banana",
-                credential_ref: "banana",
+                server_id: "banana-source",
+                resource_path: "mcp/banana.json",
+                resource_digest: "sha256:resource",
+                operation: "connect",
+                binding_digest: None,
             })
             .expect("serialize resolver request"),
             json!({
-                "schema": "runtime.mcp_bearer_credential.resolve.v1",
+                "schema": "runtime.mcp_connector.authorization.v1",
                 "agentRunId": "agent-run",
                 "authorizationRef": "authorization",
                 "authorizationDigest": "sha256:banana",
                 "pluginName": "banana",
-                "credentialRef": "banana",
+                "serverId": "banana-source",
+                "resourcePath": "mcp/banana.json",
+                "resourceDigest": "sha256:resource",
+                "operation": "connect",
+                "bindingDigest": null,
             })
         );
         assert!(
@@ -659,9 +1411,9 @@ mod tests {
         )
         .expect("static preparation");
         assert_eq!(prepared.servers.len(), 1);
-        let (plugin_name, server) = &prepared.servers[0];
+        let (identity, server) = &prepared.servers[0];
         let contracts = server
-            .dynamic_tool_contracts(plugin_name.as_str())
+            .dynamic_tool_contracts(identity.plugin_name.as_str())
             .expect("static contract");
         assert_eq!(contracts[0].provider_id, "mcp:banana:banana-source");
     }

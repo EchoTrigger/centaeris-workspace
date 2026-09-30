@@ -3,6 +3,7 @@
 from django.db.models import Q
 
 from .models import AgentDefinition
+from .plugin_catalog import require_current_plugin_activation
 
 
 class AgentDefinitionUnavailable(Exception):
@@ -27,4 +28,8 @@ def published_version_for_agent(agent, membership):
     definition = available_agent_definitions(membership).filter(id=agent.definition_id).first()
     if definition is None:
         raise AgentDefinitionUnavailable("agent_definition_not_available")
+    try:
+        require_current_plugin_activation(agent.workspace, definition.published_version.plugin_activation)
+    except ValueError as error:
+        raise AgentDefinitionUnavailable("agent_definition_capability_unavailable") from error
     return definition.published_version

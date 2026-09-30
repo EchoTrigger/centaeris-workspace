@@ -92,6 +92,19 @@ def new_agent_definition_version_id() -> str:
     return new_id("agent_definition_version")
 
 
+def new_agent_connector_approval_id() -> str:
+    return new_id("connector_approval")
+
+
+def new_agent_connector_binding_id() -> str:
+    return new_id("connector_binding")
+
+
+def empty_plugin_activation() -> dict:
+    from .plugin_catalog import PLUGIN_ACTIVATION_SCHEMA, activation_digest
+    return {"schema": PLUGIN_ACTIVATION_SCHEMA, "digest": activation_digest([]), "packages": []}
+
+
 def new_agent_run_id() -> str:
     return new_id("agent_run")
 
@@ -722,6 +735,7 @@ class AgentDefinition(models.Model):
     description = models.CharField(max_length=128, blank=True, default="")
     instructions = models.TextField(blank=True, default="")
     avatar_kind = models.CharField(max_length=16, default="centaeris")
+    plugin_names = models.JSONField(default=list)
     status = models.CharField(max_length=16, default="active")
     availability_scope = models.CharField(max_length=16, default="none")
     published_version = models.ForeignKey(
@@ -739,6 +753,8 @@ class AgentDefinition(models.Model):
         ]
 
     def save(self, *args, **kwargs):
+        from .plugin_catalog import validate_plugin_names
+        validate_plugin_names(self.plugin_names)
         self.name = normalize_agent_name(self.name)
         self.description = normalize_agent_description(self.description)
         self.instructions = normalize_agent_instructions(self.instructions)
@@ -777,6 +793,7 @@ class AgentDefinitionVersion(models.Model):
     description = models.CharField(max_length=128, blank=True, default="")
     instructions = models.TextField(blank=True, default="")
     avatar_kind = models.CharField(max_length=16, default="centaeris")
+    plugin_activation = models.JSONField(default=empty_plugin_activation)
     published_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+")
     published_at = models.DateTimeField(auto_now_add=True)
 
@@ -788,6 +805,8 @@ class AgentDefinitionVersion(models.Model):
         ]
 
     def save(self, *args, **kwargs):
+        from .plugin_catalog import validate_plugin_activation
+        validate_plugin_activation(self.plugin_activation)
         if not self._state.adding:
             raise ValueError("AgentDefinitionVersion is immutable")
         self.name = normalize_agent_name(self.name)
@@ -954,6 +973,74 @@ class McpBearerCredential(models.Model):
         validate_display_name(self.display_name)
         if not self.encrypted_secret or self.version <= 0:
             raise ValueError("MCP bearer credential secret and version are required")
+        return super().save(*args, **kwargs)
+
+
+class AgentConnectorCredentialApproval(models.Model):
+    """A custodian grants one assistant a reference into the encrypted credential store."""
+    id = models.CharField(primary_key=True, max_length=64, default=new_agent_connector_approval_id)
+    workspace = models.ForeignKey(Workspace, on_delete=models.PROTECT, related_name="connector_approvals")
+    definition = models.ForeignKey(AgentDefinition, on_delete=models.PROTECT, related_name="connector_approvals")
+    plugin_name = models.CharField(max_length=64)
+    server_id = models.CharField(max_length=64)
+    resource_path = models.CharField(max_length=255)
+    resource_digest = models.CharField(max_length=71)
+    credential = models.ForeignKey(McpBearerCredential, on_delete=models.PROTECT, related_name="assistant_approvals")
+    credential_version = models.PositiveIntegerField()
+    approved_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+")
+    approved_at = models.DateTimeField(auto_now_add=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.CheckConstraint(condition=models.Q(credential_version__gt=0), name="connector_approval_version_positive")]
+
+    def save(self, *args, **kwargs):
+        from .runtime_contract import require_sha256
+        from .plugin_catalog import _require_resource_path
+        validate_lower_kebab("connector plugin", self.plugin_name)
+        validate_lower_kebab("connector server", self.server_id)
+        _require_resource_path(self.resource_path)
+        require_sha256("connector resource digest", self.resource_digest)
+        if self.workspace_id != self.definition.workspace_id or self.plugin_name != self.credential.plugin_name:
+            raise ValueError("Connector approval scope mismatch")
+        if self._state.adding:
+            if self.approved_by_id != self.credential.created_by_id or not self.approved_by.is_superuser:
+                raise ValueError("Connector approval requires the credential custodian")
+            if self.credential_version != self.credential.version:
+                raise ValueError("Connector approval credential version mismatch")
+        else:
+            immutable = ("workspace_id", "definition_id", "plugin_name", "server_id", "resource_path",
+                         "resource_digest", "credential_id", "credential_version", "approved_by_id")
+            stored = type(self).objects.values(*immutable, "revoked_at").get(pk=self.pk)
+            if any(stored[field] != getattr(self, field) for field in immutable):
+                raise ValueError("Connector approval is immutable")
+            if stored["revoked_at"] is not None and self.revoked_at != stored["revoked_at"]:
+                raise ValueError("Connector approval revocation is permanent")
+        return super().save(*args, **kwargs)
+
+
+class AgentConnectorBinding(models.Model):
+    id = models.CharField(primary_key=True, max_length=64, default=new_agent_connector_binding_id)
+    workspace = models.ForeignKey(Workspace, on_delete=models.PROTECT, related_name="connector_bindings")
+    definition = models.ForeignKey(AgentDefinition, on_delete=models.PROTECT, related_name="connector_bindings")
+    plugin_name = models.CharField(max_length=64)
+    server_id = models.CharField(max_length=64)
+    approval = models.ForeignKey(AgentConnectorCredentialApproval, on_delete=models.PROTECT, related_name="bindings")
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["workspace", "definition", "plugin_name", "server_id"], name="agent_connector_binding_unique")]
+
+    def save(self, *args, **kwargs):
+        expected = (self.workspace_id, self.definition_id, self.plugin_name, self.server_id)
+        approved = (self.approval.workspace_id, self.approval.definition_id, self.approval.plugin_name, self.approval.server_id)
+        if expected != approved or self.definition.workspace_id != self.workspace_id or self.approval.revoked_at is not None:
+            raise ValueError("Connector binding approval scope mismatch")
+        if not self._state.adding:
+            stored = type(self).objects.values_list("workspace_id", "definition_id", "plugin_name", "server_id").get(pk=self.pk)
+            if stored != expected:
+                raise ValueError("Connector binding scope is immutable")
         return super().save(*args, **kwargs)
 
 

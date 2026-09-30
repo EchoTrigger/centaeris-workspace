@@ -45,6 +45,7 @@ def serialize_agent_definition(definition) -> dict:
         "id": definition.id, "workspaceId": definition.workspace_id,
         "name": definition.name, "description": definition.description,
         "instructions": definition.instructions, "avatarKind": definition.avatar_kind,
+        "pluginNames": definition.plugin_names,
         "status": definition.status, "availabilityScope": definition.availability_scope,
         "membershipIds": sorted(item.membership_id for item in definition.member_grants.all()),
         "publishedVersionId": definition.published_version_id,
@@ -57,6 +58,7 @@ def serialize_agent_definition_version(version) -> dict:
         "id": version.id, "definitionId": version.definition_id, "version": version.version,
         "name": version.name, "description": version.description,
         "instructions": version.instructions, "avatarKind": version.avatar_kind,
+        "pluginNames": [package["name"] for package in version.plugin_activation["packages"]],
         "publishedAt": version.published_at.isoformat(),
     }
 

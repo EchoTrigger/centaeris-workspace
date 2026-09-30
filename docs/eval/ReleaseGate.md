@@ -155,7 +155,7 @@ material-link failures.
    an explicit manual run.
 3. Populate a private `.env`, then run `docker compose config --quiet`.
 4. On fresh Postgres, migrate from zero through
-   `0007_agent_definitions` and confirm the Workspace app starts
+   `0008_assistant_connector_authority` and confirm the Workspace app starts
    from the current migration leaf. Existing credentials must retain their encrypted
    values and remain unconfigured until assigned an explicit quota domain.
 5. Build Runtime, API, worker, web, and execution images from root Compose
@@ -182,18 +182,73 @@ publication, disablement or scope removal; new unavailable Runs are rejected.
 Cover tail rewrites, immutable instance binding, cross-Workspace version/member
 rejection and attempts to edit managed configuration.
 
-Managed Run authorization must freeze empty external Plugin activation, even
-when Workspace Plugins and global MCP bearer credentials are configured. Verify
-private Agent activation remains unchanged and existing Runtime startup/resource
-validation accepts the empty activation without loading external contributions.
-This is a zero-extension baseline; explicit capabilities/credential bindings,
-authentication changes, stream revocation and browser workflows are not covered.
+Managed definitions select complete Workspace-enabled plugins through draft
+`pluginNames`; publication freezes exact `pluginActivation` including Skills, CLI,
+MCP and Hooks. Verify unknown/disabled selection rejection, immutable publication,
+old Run snapshot stability, changed package rejection, and empty selection without
+loading external contributions. Private Agent activation remains supported.
+
+Connector acceptance must prove different definitions can bind different existing
+encrypted credentials for the same plugin. Custodian approvals require the
+credential creator's superuser identity and fix Workspace, definition, plugin,
+server, resource path/digest and source version. Verify Workspace administrators
+see only exact-scope approvals and cannot enumerate global secrets or bind an
+arbitrary secret reference. Missing, revoked and cross-scope bindings never inherit
+global or another assistant's credentials. Source rotation requires a new explicit
+approval; protected source deletion returns a controlled 409.
+
+On every MCP dispatch, including bearer HTTP, unauthenticated HTTP and stdio,
+verify current membership identity, owner/lifecycle, definition availability,
+Workspace plugin enablement, frozen declaration resource, approval, binding and
+source version. A cached provider must reject revocation, changed fingerprints,
+invalid/missing response fields and API failure without executing or reconnecting.
+Connect must reject a fingerprint changed after its dispatch check. Preserve the
+inner provider's structured errors. Synthetic model arguments must not select
+server/resource identities or secrets. Private compatibility must require durable
+null Agent definition and null Run version; missing managed version data fails.
+The old credential resolver must reject managed Agents.
+
+Focused synthetic evidence is retained locally in
+`test-results/assistant-connectors-api-red.log`,
+`test-results/assistant-connectors-api-green.log`,
+`test-results/assistant-connectors-rust-red.log` and
+`test-results/assistant-connectors-rust-green.log`. The Runtime red case proves
+the old resolver misses the new authorization endpoint; the targeted `mcp::tests::`
+suite passes 12 tests. Require the final API receipt to pass connector, definition,
+migration and model tests, then run the normal local release gate; a focused
+receipt is not a substitute for that gate. Evidence uses synthetic fixtures only:
+it does not certify real credential creation/import/rotation, external connector
+calls, deployment, a new credential UI, or periodic SSE revocation.
+
+`test_assistant_connector_runtime.py` starts the real Django authorization endpoint
+and explicitly executes the Rust `python_connector_interoperability` entry point.
+It requires one executed Rust test and its success receipt: two calls reuse one
+synthetic downstream provider; after exact test-approval revocation, neither the
+cached provider nor a new connect may execute. The ignored Rust marker prevents
+standalone execution without its owned test database; ordinary Rust discovery
+alone does not cover it. The API gate must execute it without a skip. Its local
+receipt is `test-results/assistant-connectors-interoperability.log`.
+
+Core's focused `query_loop` is also run against the unchanged exact public pin,
+with a separate build target. The local receipt records 29 passing tests in
+`test-results/assistant-connectors-query-loop.log`; this does not certify a Core
+release or packaged Desktop acceptance.
+
+The final original local `scripts/ci.py` receipt is
+`test-results/assistant-connectors-ci-final.log`: exit 0, 651 API tests discovered
+and executed with no skips or expected failures, the explicit connector
+interoperability receipt, and 120 passing Web tests. The initial LiveServer
+serialized-rollback fixture failure and transient public-pin fetch reset are
+retained separately; neither was bypassed in the final gate. This remains local
+source acceptance, not fresh-Docker or production deployment acceptance.
 
 Forward migration from `0006_transcript_output_capture` to
-`0007_agent_definitions` must preserve existing Agent, Session and Run identities,
+`0007_agent_definitions`, then `0008_assistant_connector_authority`, must preserve existing Agent, Session and Run identities,
 ownership, instruction snapshots and encrypted credentials. Existing Agent
 definition and Run version references remain null, with no fabricated definitions
-or versions. Fresh-schema, SQLite migration/drift and PostgreSQL constraints must
+or versions. Existing definitions receive empty plugin selection/activation;
+approval and binding tables receive no automatic grants or copied secrets.
+Fresh-schema, SQLite migration/drift and PostgreSQL constraints must
 also pass. The fresh-Docker gate checks the new leaf only on a disposable host;
 source tests do not certify that deployment acceptance has run.
 

@@ -7,6 +7,7 @@ from pydantic import Field, model_validator
 
 from app_core.agent_definitions import available_agent_definitions
 from app_core.models import Agent, AgentDefinition, AgentDefinitionMember, AgentDefinitionVersion, WorkspaceMembership
+from app_core.plugin_catalog import selected_plugin_activation, validate_plugin_names
 from app_core.workspace_access import WORKSPACE_ADMIN_ROLES, locked_workspace_membership_for, workspace_membership_for
 
 from .agents import CreateAgentRequest, UpdateAgentRequest
@@ -23,11 +24,25 @@ router = Router(tags=["agent definitions"], by_alias=True)
 
 
 class CreateAgentDefinitionRequest(CreateAgentRequest):
-    pass
+    plugin_names: list[str] = Field(default_factory=list, alias="pluginNames")
+
+    @model_validator(mode="after")
+    def validate_plugins(self):
+        validate_plugin_names(sorted(self.plugin_names))
+        self.plugin_names.sort()
+        return self
 
 
 class UpdateAgentDefinitionRequest(UpdateAgentRequest):
     status: Literal["active", "disabled"] | None = None
+    plugin_names: list[str] | None = Field(default=None, alias="pluginNames")
+
+    @model_validator(mode="after")
+    def validate_plugins(self):
+        if self.plugin_names is not None:
+            validate_plugin_names(sorted(self.plugin_names))
+            self.plugin_names.sort()
+        return self
 
 
 class EmptyDefinitionRequest(StrictSchema):
@@ -75,6 +90,10 @@ def create_agent_definition(request, workspace_id: str, payload: CreateAgentDefi
         membership = locked_workspace_membership_for(request.user, workspace_id, allowed_roles=WORKSPACE_ADMIN_ROLES)
         if membership is None:
             return Status(404, {"error": "workspace_not_found"})
+        try:
+            selected_plugin_activation(membership.workspace, payload.plugin_names)
+        except ValueError:
+            return Status(400, {"error": "agent_definition_plugin_not_enabled"})
         definition = AgentDefinition.objects.create(workspace=membership.workspace, created_by=request.user,
                                                      **payload.model_dump(by_alias=False))
     return Status(201, {"definition": serialize_agent_definition(definition)})
@@ -101,6 +120,11 @@ def update_agent_definition(request, workspace_id: str, definition_id: str, payl
         definition = _admin_definition(request.user, workspace_id, definition_id, lock=True)
         if definition is None:
             return Status(404, {"error": "agent_definition_not_found"})
+        if "plugin_names" in fields:
+            try:
+                selected_plugin_activation(definition.workspace, payload.plugin_names)
+            except ValueError:
+                return Status(400, {"error": "agent_definition_plugin_not_enabled"})
         for field in fields:
             setattr(definition, field, getattr(payload, field))
         definition.save(update_fields=[*fields, "updated_at"])
@@ -125,11 +149,16 @@ def publish_agent_definition(request, workspace_id: str, definition_id: str, pay
         definition = _admin_definition(request.user, workspace_id, definition_id, lock=True)
         if definition is None:
             return Status(404, {"error": "agent_definition_not_found"})
+        try:
+            activation = selected_plugin_activation(definition.workspace, definition.plugin_names)
+        except ValueError:
+            return Status(409, {"error": "agent_definition_capability_unavailable"})
         latest = definition.versions.aggregate(latest=Max("version"))["latest"] or 0
         version = AgentDefinitionVersion.objects.create(
             definition=definition, version=latest + 1, published_by=request.user,
             name=definition.name, description=definition.description,
             instructions=definition.instructions, avatar_kind=definition.avatar_kind,
+            plugin_activation=activation,
         )
         definition.published_version = version
         definition.save(update_fields=["published_version", "updated_at"])

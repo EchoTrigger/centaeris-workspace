@@ -5,6 +5,7 @@ from ninja import NinjaAPI
 from app_core.http.auth import router as auth_router
 from app_core.http.agents import router as agents_router
 from app_core.http.agent_definitions import router as agent_definitions_router
+from app_core.http.assistant_connectors import router as assistant_connectors_router, internal_router as internal_assistant_connectors_router
 from app_core.http.artifacts import router as artifacts_router
 from app_core.http.citations import router as citations_router
 from app_core.http.downloads import router as downloads_router
@@ -39,6 +40,7 @@ api.add_router("", health_router)
 api.add_router("/api", auth_router)
 api.add_router("/api", agents_router)
 api.add_router("/api", agent_definitions_router)
+api.add_router("/api", assistant_connectors_router)
 api.add_router("/api", jobs_router)
 api.add_router("/api", workspaces_router)
 api.add_router("/api", workspace_members_router)
@@ -56,3 +58,4 @@ api.add_router("/api", trash_router)
 api.add_router("/internal", internal_router)
 api.add_router("/internal", internal_model_router)
 api.add_router("/internal", internal_mcp_credentials_router)
+api.add_router("/internal", internal_assistant_connectors_router)

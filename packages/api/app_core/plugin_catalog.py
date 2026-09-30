@@ -110,11 +110,11 @@ def load_plugin_interfaces(catalog: dict, root: Path | None = None) -> dict[str,
     return interfaces
 
 
-def load_plugin_bearer_credential_refs(package: dict) -> list[str]:
+def _verified_mcp_documents(package: dict) -> list[tuple[dict, dict]]:
     """Read management-only credential identities, not executable tool contracts."""
     root = Path(settings.PLUGIN_CATALOG_ROOT).resolve(strict=True)
     package_root = root / package["name"]
-    refs = set()
+    documents = []
     remaining_bytes = MAX_PLUGIN_METADATA_BYTES
     for resource in package["mcpServers"]:
         _require_resource_path(resource["path"])
@@ -152,8 +152,30 @@ def load_plugin_bearer_credential_refs(package: dict) -> list[str]:
             ):
                 raise ValueError("MCP credential transport fields mismatch")
             if "bearerCredentialRef" in transport:
-                refs.add(validate_lower_kebab("MCP bearer credential ref", transport["bearerCredentialRef"]))
-    return sorted(refs)
+                validate_lower_kebab("MCP bearer credential ref", transport["bearerCredentialRef"])
+        documents.append((resource, payload))
+    return documents
+
+
+def load_plugin_bearer_credential_refs(package: dict) -> list[str]:
+    return sorted({server["transport"]["bearerCredentialRef"]
+        for _, document in _verified_mcp_documents(package) for server in document["servers"]
+        if "bearerCredentialRef" in server["transport"]})
+
+
+def load_plugin_connector_resources(package: dict) -> list[dict]:
+    """Management identities from integrity-checked declarations; Core owns tool semantics."""
+    resources = []
+    identities = set()
+    for resource, document in _verified_mcp_documents(package):
+        for server in document["servers"]:
+            server_id = validate_lower_kebab("MCP server identity", server["id"])
+            if server_id in identities:
+                raise ValueError("duplicate connector server identity")
+            identities.add(server_id)
+            resources.append({"serverId": server_id, "resourcePath": resource["path"],
+                "resourceDigest": resource["digest"], "credentialRef": server["transport"].get("bearerCredentialRef")})
+    return resources
 
 
 def plugin_activation_for_workspace(workspace) -> dict:
@@ -175,6 +197,33 @@ def plugin_activation_for_workspace(workspace) -> dict:
     }
     validate_plugin_activation(activation)
     return activation
+
+
+def validate_plugin_names(names: list[str]) -> None:
+    if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
+        raise ValueError("plugin names must be a list of identities")
+    for name in names:
+        validate_lower_kebab("plugin name", name)
+    if names != sorted(set(names)):
+        raise ValueError("plugin names must be sorted and unique")
+
+
+def selected_plugin_activation(workspace, names: list[str]) -> dict:
+    validate_plugin_names(names)
+    if not names:
+        return {"schema": PLUGIN_ACTIVATION_SCHEMA, "digest": activation_digest([]), "packages": []}
+    available = plugin_activation_for_workspace(workspace)
+    packages = [package for package in available["packages"] if package["name"] in names]
+    if len(packages) != len(names):
+        raise ValueError("agent_definition_plugin_not_enabled")
+    return {"schema": PLUGIN_ACTIVATION_SCHEMA, "digest": activation_digest(packages), "packages": packages}
+
+
+def require_current_plugin_activation(workspace, activation: dict) -> None:
+    validate_plugin_activation(activation)
+    names = [package["name"] for package in activation["packages"]]
+    if selected_plugin_activation(workspace, names) != activation:
+        raise ValueError("agent_definition_plugin_snapshot_unavailable")
 
 
 def activation_digest(packages: list[dict]) -> str:

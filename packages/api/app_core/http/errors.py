@@ -13,6 +13,8 @@ from .security import (
 logger = logging.getLogger(__name__)
 
 VALIDATION_ERROR_CODES = {
+    "approve_assistant_credential": "mcp_connector_request_invalid",
+    "bind_assistant_connector": "mcp_connector_request_invalid",
     "create_agent_definition": "agent_definition_invalid",
     "update_agent_definition": "agent_definition_invalid",
     "publish_agent_definition": "agent_definition_invalid",
@@ -69,6 +71,8 @@ VALIDATION_ERROR_CODE_OVERRIDES = {
 }
 
 MALFORMED_JSON_ERROR_CODES = {
+    "approve_assistant_credential": "mcp_connector_request_invalid",
+    "bind_assistant_connector": "mcp_connector_request_invalid",
     "create_agent_definition": "agent_definition_invalid",
     "update_agent_definition": "agent_definition_invalid",
     "publish_agent_definition": "agent_definition_invalid",

@@ -150,7 +150,7 @@ class AgentDefinitionTests(DefinitionFixture, TestCase):
 
     def test_strict_camel_case_schema_rejects_unknown_configuration_and_scope_shapes(self):
         definition = self.create_definition()
-        for payload in ({"name": "Test", "avatar_kind": "banana"}, {"name": "Test", "pluginNames": []},
+        for payload in ({"name": "Test", "avatar_kind": "banana"}, {"name": "Test", "skillIds": []},
                         {"name": "Test", "credentialRef": "global"}, {"name": "Test", "nameExtra": "unknown"}):
             self.assertEqual(self.send("post", self.base + "/agent-definitions", payload).status_code, 400)
         for payload in ({"scope": "all"}, {"scope": "workspace", "membershipIds": [self.membership.id]},
