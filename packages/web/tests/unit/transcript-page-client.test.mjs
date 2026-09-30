@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 
 import {
   createTranscriptViewStore,
@@ -15,6 +16,29 @@ import { readSse } from "../../src/chat/sessionStreamProtocol.ts";
 const sessionId = "session_1";
 const projectionVersion = "transcript.projection.v1";
 const projectionGeneration = "generation-1";
+
+test("Web accepts current Core-generated blocks including optional presentation facts", () => {
+  const samples = JSON.parse(readFileSync(new URL(
+    "../../../api/app_core/generated/transcript_block.samples.json", import.meta.url), "utf8"));
+  assert.ok(samples.some((sample) => sample.presentation !== null && sample.presentation !== undefined));
+  for (const sample of samples) {
+    const result = validateTranscriptPage(page({ blocks: [sample] }), { sessionId });
+    assert.deepEqual(result.blocks[0], sample);
+  }
+});
+
+test("presentation facts retain strict keys and reject invalid durations", () => {
+  const sample = block("tool:presented", 1, 1, "tool", "result");
+  const facts = { agentRunId: "run:1", sourceType: "tool_result", observedAtMs: 1000,
+    displayTarget: "result.txt", durationMs: 12, operation: { kind: "read", status: "ok" } };
+  assert.doesNotThrow(() => validateTranscriptPage(page({ blocks: [{ ...sample, presentation: null }] }), { sessionId }));
+  assert.doesNotThrow(() => validateTranscriptPage(page({ blocks: [{ ...sample, presentation: facts }] }), { sessionId }));
+  for (const presentation of [{ ...facts, extra: true }, { ...facts, durationMs: -1 },
+    { ...facts, observedAtMs: "1000" }, { ...facts, displayTarget: 42 }]) {
+    assert.throws(() => validateTranscriptPage(page({ blocks: [{ ...sample, presentation }] }), { sessionId }));
+  }
+  assert.throws(() => validateTranscriptPage(page({ blocks: [{ ...sample, presentation: facts, extra: true }] }), { sessionId }));
+});
 
 function terminalResponse() {
   return new Response(`id: cursor:11\ndata: ${JSON.stringify({

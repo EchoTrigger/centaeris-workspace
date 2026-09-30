@@ -42,6 +42,14 @@ type TranscriptBlockBody = Readonly<Record<string, unknown> & { kind: string }>;
 export type TranscriptBlock = Readonly<{
   blockId: string;
   blockRevision: string;
+  presentation?: Readonly<{
+    agentRunId: string | null;
+    sourceType: string;
+    observedAtMs: number;
+    displayTarget: string | null;
+    durationMs: number | null;
+    operation: unknown;
+  }> | null;
   orderKey: Readonly<{ sourceSequence: string; ordinal: number }>;
   body: TranscriptBlockBody;
 }>;
@@ -197,8 +205,26 @@ function validStatus(value: unknown) {
   return ["queued", "running", "completed", "failed", "interrupted"].includes(String(value));
 }
 
+function validPresentation(value: unknown) {
+  if (value === null) return true;
+  if (!isRecord(value) || !exactKeys(value, [
+    "agentRunId", "sourceType", "observedAtMs", "displayTarget", "durationMs", "operation",
+  ])) return false;
+  return (value.agentRunId === null || typeof value.agentRunId === "string")
+    && typeof value.sourceType === "string" && Number.isSafeInteger(value.observedAtMs)
+    && (value.displayTarget === null || typeof value.displayTarget === "string")
+    && (value.durationMs === null || (Number.isSafeInteger(value.durationMs) && Number(value.durationMs) >= 0))
+    && value.operation !== undefined;
+}
+
 function validBlock(value: unknown): value is TranscriptBlock {
-  if (!isRecord(value) || !exactKeys(value, ["blockId", "blockRevision", "orderKey", "body"])) return false;
+  if (!isRecord(value)) return false;
+  const fields = ["blockId", "blockRevision", "orderKey", "body"];
+  if (Object.hasOwn(value, "presentation")) {
+    fields.push("presentation");
+    if (!validPresentation(value.presentation)) return false;
+  }
+  if (!exactKeys(value, fields)) return false;
   if (!identifier(value.blockId) || !decimal(value.blockRevision) || !isRecord(value.orderKey)
     || !exactKeys(value.orderKey, ["sourceSequence", "ordinal"])
     || !decimal(value.orderKey.sourceSequence)
