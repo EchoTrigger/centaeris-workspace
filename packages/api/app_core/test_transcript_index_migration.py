@@ -66,6 +66,7 @@ class MigrationBaselineTests(TestCase):
                 "0006_transcript_output_capture.py",
                 "0007_agent_definitions.py",
                 "0008_assistant_connector_authority.py",
+                "0009_user_app_delegations.py",
             ],
         )
 
@@ -74,7 +75,7 @@ class MigrationBaselineTests(TestCase):
             REPOSITORY_ROOT / "scripts" / "docker-release-gate.sh"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("0008_assistant_connector_authority", release_gate)
+        self.assertIn("0009_user_app_delegations", release_gate)
 
     def test_agent_definitions_extend_the_existing_migration_chain(self):
         definitions = importlib.import_module(

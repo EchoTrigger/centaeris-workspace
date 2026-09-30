@@ -27,7 +27,7 @@ from .response_schema import (
     SessionTrashEnvelope,
 )
 from .schema import StrictSchema
-from .security import session_auth
+from .security import session_auth, usage_auth
 from .serialization import serialize_agent, serialize_session
 from .trash_pagination import read_trash_cursor, trash_page
 
@@ -87,7 +87,7 @@ class UpdateAgentRequest(StrictSchema):
 
 @router.get(
     "/workspaces/{workspace_id}/agents",
-    auth=session_auth,
+    auth=usage_auth("assistant:use"),
     response={200: AgentsEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def list_agents(request, workspace_id: str):
@@ -98,6 +98,8 @@ def list_agents(request, workspace_id: str):
         owner=request.user,
         status="active",
     ).select_related("definition__published_version").order_by("createdAt", "id")
+    if request.app_delegation is not None:
+        agents = agents.filter(definition_id=request.app_delegation.definition_id)
     return {"agents": [serialize_agent(agent) for agent in agents]}
 
 
@@ -124,7 +126,7 @@ def create_agent(request, workspace_id: str, payload: CreateAgentRequest):
 
 @router.get(
     "/agents/{agent_id}",
-    auth=session_auth,
+    auth=usage_auth("assistant:use"),
     response={200: AgentEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def get_agent(request, agent_id: str):

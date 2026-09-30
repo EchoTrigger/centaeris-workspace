@@ -6,13 +6,13 @@ from app_core.session_event import citation_snapshot
 from app_core.workspace_access import workspace_membership_for
 
 from .response_schema import CitationEnvelope, CitationSnapshotResponse, TranscriptCitationsResponse, COMMON_ERROR_RESPONSES
-from .security import session_auth
+from .security import usage_auth
 
 
 router = Router(tags=["citations"], by_alias=True)
 
 
-@router.get("/sessions/{session_id}/agent-runs/{agent_run_id}/citations", auth=session_auth,
+@router.get("/sessions/{session_id}/agent-runs/{agent_run_id}/citations", auth=usage_auth("sessions:read"),
             response={200: CitationSnapshotResponse} | COMMON_ERROR_RESPONSES)
 def run_citations(request, response: HttpResponse, session_id: str, agent_run_id: str):
     response["Cache-Control"] = "no-store"
@@ -24,7 +24,7 @@ def run_citations(request, response: HttpResponse, session_id: str, agent_run_id
     return citation_snapshot(run)
 
 
-@router.get("/sessions/{session_id}/transcript/citations", auth=session_auth,
+@router.get("/sessions/{session_id}/transcript/citations", auth=usage_auth("sessions:read"),
             response={200: TranscriptCitationsResponse} | COMMON_ERROR_RESPONSES)
 def transcript_citations(request, response: HttpResponse, session_id: str):
     from .workspaces import _authorized_transcript_session, _canonical_waterline
@@ -58,7 +58,7 @@ def transcript_citations(request, response: HttpResponse, session_id: str):
 
 @router.get(
     "/citations/{citation_id}",
-    auth=session_auth,
+    auth=usage_auth("sessions:read"),
     response={200: CitationEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def citation_detail(request, citation_id: str):

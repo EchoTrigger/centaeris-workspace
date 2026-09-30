@@ -155,7 +155,7 @@ material-link failures.
    an explicit manual run.
 3. Populate a private `.env`, then run `docker compose config --quiet`.
 4. On fresh Postgres, migrate from zero through
-   `0008_assistant_connector_authority` and confirm the Workspace app starts
+   `0009_user_app_delegations` and confirm the Workspace app starts
    from the current migration leaf. Existing credentials must retain their encrypted
    values and remain unconfigured until assigned an explicit quota domain.
 5. Build Runtime, API, worker, web, and execution images from root Compose
@@ -241,7 +241,8 @@ suite passes 12 tests. Require the final API receipt to pass connector, definiti
 migration and model tests, then run the normal local release gate; a focused
 receipt is not a substitute for that gate. Evidence uses synthetic fixtures only:
 it does not certify real credential creation/import/rotation, external connector
-calls, deployment, a new credential UI, or periodic SSE revocation.
+calls, deployment, or a new credential UI. Delegated stream revocation has its
+own acceptance tests below.
 
 `test_assistant_connector_runtime.py` starts the real Django authorization endpoint
 and explicitly executes the Rust `python_connector_interoperability` entry point.
@@ -266,11 +267,14 @@ retained separately; neither was bypassed in the final gate. This remains local
 source acceptance, not fresh-Docker or production deployment acceptance.
 
 Forward migration from `0006_transcript_output_capture` to
-`0007_agent_definitions`, then `0008_assistant_connector_authority`, must preserve existing Agent, Session and Run identities,
+`0007_agent_definitions`, then `0008_assistant_connector_authority` and
+`0009_user_app_delegations`, must preserve existing Agent, Session and Run identities,
 ownership, instruction snapshots and encrypted credentials. Existing Agent
 definition and Run version references remain null, with no fabricated definitions
 or versions. Existing definitions receive empty plugin selection/activation;
 approval and binding tables receive no automatic grants or copied secrets.
+Existing Run and hosted receipt application/grant origins remain null; migration
+must not fabricate applications or user grants.
 Fresh-schema, SQLite migration/drift and PostgreSQL constraints must
 also pass. The fresh-Docker gate checks the new leaf only on a disposable host;
 source tests do not certify that deployment acceptance has run.
@@ -392,6 +396,48 @@ The local gate also checks document streaming beyond 1000 PDF pages/image
 frames, UTF-8 locations, bounded incremental output, and API manifest validation.
 These are synthetic/native-parser checks; they do not replace user acceptance
 with real Office documents or real OCR model measurements.
+
+## User-app delegation acceptance
+
+Use synthetic applications, tokens and isolated PostgreSQL/storage fixtures.
+Browser consent must require explicit unique operation scopes, enforce active
+application and available definition selection, return a token only once with
+no-store, persist only its digest, and support permanent revocation. Cover exact
+issuer/audience, expiry, replaced membership identities, inactive users and
+definitions, mixed cookie/bearer rejection, unchanged browser CSRF and denied
+management access. The minimal Settings UI must exercise consent, one-time token
+display, revocation and platform application registration/status controls.
+
+Delegated usage must reuse private Agent/Session identities, shared browser/app
+operation receipts and digest conflicts, including deleted-resource 410 within
+the granted assistant and 404 for another assistant. Verify history/citation
+payloads, actual authorized download bytes, source ACLs, cancellation requested
+without fabricated terminal state, and multipart SessionAssetLink identities.
+Run authorization must retain all Session asset refs and only the current
+message's attachment refs. Global Library and arbitrary existing-file attachment
+management remain inaccessible to applications.
+
+Use explicit barriers for revocation before acceptance, acceptance before
+revocation, browser/app concurrent operation replay and revocation between upload
+storage and linking. Verify no losing writes or lifecycle dispatch. Accepted Runs
+must retain immutable user/application/grant origin; withdrawn, expired or
+app-revoked grants must reject subsequent connector dispatch even with an old
+configuration snapshot.
+
+The real HTTP Session stream test opens an idle stream, commits revocation through
+the browser API, and requires stream closure and producer cancellation within
+fifteen seconds. Deterministic stream unit tests also cover authority-check
+failure/timeouts, blocked I/O and item-before-authority ordering. Keep the original
+live snapshot/revision and committed-cursor contracts. This evidence does not
+promise withdrawal of already dispatched external effects.
+
+Forward migration from `0008_assistant_connector_authority` preserves existing
+ownership, Session/Run/receipt identities, instructions, digests and encrypted
+credentials, leaves old application/grant origins null and creates no grants.
+Run the fresh migration/drift gate and normal local release gate as well as focused
+tests. Local red/green receipts are under `test-results/app-delegation-*.log`;
+focused results alone do not establish full release-gate acceptance. These tests
+do not issue real persistent credentials or certify a production deployment.
 
 ## Authorization consolidation acceptance (2026-09-15)
 

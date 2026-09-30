@@ -6,6 +6,7 @@ from ninja import Router, Status
 from pydantic import Field, model_validator
 
 from app_core.agent_definitions import available_agent_definitions
+from app_core.app_delegations import require_request_delegation
 from app_core.models import Agent, AgentDefinition, AgentDefinitionMember, AgentDefinitionVersion, WorkspaceMembership
 from app_core.plugin_catalog import selected_plugin_activation, validate_plugin_names
 from app_core.workspace_access import WORKSPACE_ADMIN_ROLES, locked_workspace_membership_for, workspace_membership_for
@@ -16,7 +17,7 @@ from .response_schema import (
     AgentDefinitionVersionsEnvelope, AgentEnvelope, AvailableAgentDefinitionsEnvelope, COMMON_ERROR_RESPONSES,
 )
 from .schema import StrictSchema
-from .security import session_auth
+from .security import session_auth, usage_auth
 from .serialization import serialize_agent, serialize_agent_definition, serialize_agent_definition_version
 
 
@@ -185,7 +186,7 @@ def set_agent_definition_availability(request, workspace_id: str, definition_id:
     return {"definition": serialize_agent_definition(definition)}
 
 
-@router.get("/workspaces/{workspace_id}/available-agent-definitions", auth=session_auth,
+@router.get("/workspaces/{workspace_id}/available-agent-definitions", auth=usage_auth("assistant:use"),
             response={200: AvailableAgentDefinitionsEnvelope} | COMMON_ERROR_RESPONSES)
 def list_available_agent_definitions(request, workspace_id: str):
     membership = workspace_membership_for(request.user, workspace_id)
@@ -193,17 +194,21 @@ def list_available_agent_definitions(request, workspace_id: str):
         return Status(404, {"error": "workspace_not_found"})
     if request.GET:
         return Status(400, {"error": "agent_definition_invalid"})
+    definitions = available_agent_definitions(membership)
+    if request.app_delegation is not None:
+        definitions = definitions.filter(id=request.app_delegation.definition_id)
     return {"definitions": [serialize_agent_definition_version(item.published_version) for item in
-                            available_agent_definitions(membership).order_by("created_at", "id")]}
+                            definitions.order_by("created_at", "id")]}
 
 
-@router.post("/workspaces/{workspace_id}/available-agent-definitions/{definition_id}/instance", auth=session_auth,
+@router.post("/workspaces/{workspace_id}/available-agent-definitions/{definition_id}/instance", auth=usage_auth("assistant:use"),
              response={200: AgentEnvelope, 201: AgentEnvelope} | COMMON_ERROR_RESPONSES)
 def use_agent_definition(request, workspace_id: str, definition_id: str, payload: EmptyDefinitionRequest):
     with transaction.atomic():
         membership = locked_workspace_membership_for(request.user, workspace_id)
         if membership is None:
             return Status(404, {"error": "workspace_not_found"})
+        require_request_delegation(request, "assistant:use", workspace_id=workspace_id, lock=True)
         definition = available_agent_definitions(membership).filter(id=definition_id).first()
         if definition is None:
             return Status(404, {"error": "agent_definition_not_available"})

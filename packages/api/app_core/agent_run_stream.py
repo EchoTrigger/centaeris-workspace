@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Awaitable, Callable
 
 import redis
 import redis.asyncio as async_redis
@@ -39,6 +40,8 @@ CURSOR_PAYLOAD = re.compile(r"^[A-Za-z0-9_-]+$")
 POSTGRES_BATCH_SIZE = 100
 POSTGRES_RECONCILE_SECONDS = 5.0
 REDIS_RETRY_SECONDS = 1.0
+AUTHORITY_RECHECK_SECONDS = 5.0
+AUTHORITY_CHECK_TIMEOUT_SECONDS = 5.0
 
 logger = logging.getLogger(__name__)
 
@@ -441,7 +444,87 @@ def _new_tail_state(source_sequence: int) -> dict:
     }
 
 
-async def stream_agent_run_session_items_async(agent_run: AgentRun, source_sequence: int):
+def _consume_stream_task_result(task: asyncio.Task) -> None:
+    try:
+        task.result()
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
+async def _stream_authority_is_current(check: Callable[[], Awaitable[bool]]) -> bool:
+    task = None
+    try:
+        task = asyncio.create_task(check())
+        done, _ = await asyncio.wait({task}, timeout=AUTHORITY_CHECK_TIMEOUT_SECONDS)
+        if not done:
+            return False
+        return task.result() is True
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        logger.warning(
+            "Session stream authority check failed",
+            extra={"exceptionType": type(error).__name__},
+        )
+        return False
+    finally:
+        # Do not let a failed or blocked authority service delay transport closure.
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            task.add_done_callback(_consume_stream_task_result)
+
+
+async def stream_agent_run_session_items_async(
+    agent_run: AgentRun,
+    source_sequence: int,
+    *,
+    authority_check: Callable[[], Awaitable[bool]] | None = None,
+):
+    source = _stream_agent_run_session_items_async(agent_run, source_sequence)
+    if authority_check is None:
+        try:
+            async for item in source:
+                yield item
+        finally:
+            await source.aclose()
+        return
+
+    next_item = None
+    try:
+        if not await _stream_authority_is_current(authority_check):
+            return
+        while True:
+            if next_item is None:
+                next_item = asyncio.create_task(anext(source))
+            done, _ = await asyncio.wait({next_item}, timeout=AUTHORITY_RECHECK_SECONDS)
+            if not done:
+                if not await _stream_authority_is_current(authority_check):
+                    return
+                continue
+            try:
+                item = next_item.result()
+            except StopAsyncIteration:
+                return
+            next_item = None
+            # Recheck after loading each item, including terminal historical
+            # backlog and busy live overlays, immediately before exposing it.
+            if not await _stream_authority_is_current(authority_check):
+                return
+            yield item
+    finally:
+        if next_item is not None and not next_item.done():
+            # Cancellation unwinds the producer even if Redis/PostgreSQL is
+            # blocked. Its completion must not hold the response open.
+            next_item.cancel()
+            next_item.add_done_callback(_consume_stream_task_result)
+        else:
+            if next_item is not None:
+                _consume_stream_task_result(next_item)
+            await source.aclose()
+
+
+async def _stream_agent_run_session_items_async(agent_run: AgentRun, source_sequence: int):
     state = _new_tail_state(source_sequence)
     if agent_run.status in {"completed", "failed", "cancelled"}:
         async for item in _drain_postgres(agent_run, state):

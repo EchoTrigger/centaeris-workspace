@@ -15,6 +15,7 @@ from .agent_identity import (
     validate_agent_id,
 )
 from .credentials import validate_display_name, validate_lower_kebab
+from .app_delegation_contract import AUDIENCE, ISSUER, validate_scopes
 
 
 DEFAULT_MODEL_CONTEXT_TOKENS = 200_000
@@ -98,6 +99,14 @@ def new_agent_connector_approval_id() -> str:
 
 def new_agent_connector_binding_id() -> str:
     return new_id("connector_binding")
+
+
+def new_business_app_id() -> str:
+    return new_id("business_app")
+
+
+def new_app_delegation_id() -> str:
+    return new_id("app_delegation")
 
 
 def empty_plugin_activation() -> dict:
@@ -728,6 +737,66 @@ class CredentialAuditEvent(models.Model):
         return super().save(*args, **kwargs)
 
 
+class BusinessApplication(models.Model):
+    id = models.CharField(primary_key=True, max_length=64, default=new_business_app_id)
+    name = models.CharField(max_length=160)
+    status = models.CharField(max_length=16, default="pending")
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="registered_business_apps")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.CheckConstraint(condition=models.Q(status__in=("pending", "active", "revoked")),
+                                              name="business_app_status_valid")]
+
+    def save(self, *args, **kwargs):
+        validate_display_name(self.name)
+        require_enum("BusinessApplication.status", self.status, {"pending", "active", "revoked"})
+        if not self._state.adding:
+            stored = type(self).objects.values_list("status", flat=True).get(pk=self.pk)
+            if (stored == "revoked" and self.status != stored) or (stored == "active" and self.status == "pending"):
+                raise ValueError("business_app_revoked")
+        return super().save(*args, **kwargs)
+
+
+class UserAppDelegation(models.Model):
+    id = models.CharField(primary_key=True, max_length=64, default=new_app_delegation_id)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="app_delegations")
+    app = models.ForeignKey(BusinessApplication, on_delete=models.PROTECT, related_name="delegations")
+    workspace = models.ForeignKey(Workspace, on_delete=models.PROTECT, related_name="app_delegations")
+    definition = models.ForeignKey("AgentDefinition", on_delete=models.PROTECT, related_name="app_delegations")
+    membership_ref = models.CharField(max_length=64, editable=False)
+    issuer = models.CharField(max_length=100, default=ISSUER, editable=False)
+    audience = models.CharField(max_length=100, default=AUDIENCE, editable=False)
+    scopes = models.JSONField()
+    token_digest = models.CharField(max_length=71, unique=True, editable=False)
+    expires_at = models.DateTimeField()
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.CheckConstraint(condition=~models.Q(membership_ref=""), name="app_delegation_membership_required")]
+
+    def save(self, *args, **kwargs):
+        self.scopes = validate_scopes(self.scopes)
+        require_sha256("UserAppDelegation.token_digest", self.token_digest)
+        if self.issuer != ISSUER or self.audience != AUDIENCE or self.definition.workspace_id != self.workspace_id:
+            raise ValueError("UserAppDelegation authority binding mismatch")
+        fields = ("user_id", "app_id", "workspace_id", "definition_id", "membership_ref", "issuer", "audience",
+                  "scopes", "token_digest", "expires_at")
+        if self._state.adding:
+            if not WorkspaceMembership.objects.filter(id=self.membership_ref, workspace_id=self.workspace_id,
+                user_id=self.user_id, workspace__status="active", role__in=WORKSPACE_ROLES).exists():
+                raise ValueError("UserAppDelegation requires current membership")
+        else:
+            stored = type(self).objects.values(*fields, "revoked_at").get(pk=self.pk)
+            if any(stored[field] != getattr(self, field) for field in fields):
+                raise ValueError("UserAppDelegation authority is immutable")
+            if stored["revoked_at"] is not None and self.revoked_at != stored["revoked_at"]:
+                raise ValueError("UserAppDelegation revocation is permanent")
+        return super().save(*args, **kwargs)
+
+
 class AgentDefinition(models.Model):
     id = models.CharField(primary_key=True, max_length=64, default=new_agent_definition_id)
     workspace = models.ForeignKey(Workspace, on_delete=models.PROTECT, related_name="agent_definitions")
@@ -1281,6 +1350,8 @@ class AgentRun(models.Model):
         Session, on_delete=models.PROTECT, related_name="agent_runs"
     )
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    acting_app = models.ForeignKey(BusinessApplication, on_delete=models.PROTECT, related_name="agent_runs", null=True, blank=True)
+    app_delegation = models.ForeignKey(UserAppDelegation, on_delete=models.PROTECT, related_name="agent_runs", null=True, blank=True)
     modelConfig = models.ForeignKey(ModelConfig, on_delete=models.PROTECT)
     thinkingMode = models.CharField(max_length=64, blank=True, default="")
     prompt = models.TextField()
@@ -1311,10 +1382,23 @@ class AgentRun(models.Model):
                 condition=~models.Q(membership_ref=""),
                 name="agent_run_membership_ref_required",
             ),
+            models.CheckConstraint(condition=(models.Q(acting_app__isnull=True, app_delegation__isnull=True)
+                | models.Q(acting_app__isnull=False, app_delegation__isnull=False)), name="agent_run_app_origin_valid"),
         ]
 
     def save(self, *args, **kwargs):
         self.agent_instructions = normalize_agent_instructions(self.agent_instructions)
+        if (self.acting_app_id is None) != (self.app_delegation_id is None):
+            raise ValueError("AgentRun application origin is incomplete")
+        if self.app_delegation_id:
+            delegation = self.app_delegation
+            if (delegation.app_id != self.acting_app_id or delegation.user_id != self.user_id
+                    or delegation.workspace_id != self.workspace_id
+                    or delegation.definition_id != self.session.agent.definition_id):
+                raise ValueError("AgentRun application origin binding mismatch")
+        if not self._state.adding:
+            if type(self).objects.values_list("acting_app_id", "app_delegation_id").get(pk=self.pk) != (self.acting_app_id, self.app_delegation_id):
+                raise ValueError("AgentRun application origin is immutable")
         if self._state.adding:
             definition_id = self.session.agent.definition_id
             if self.definition_version_id:
@@ -1365,6 +1449,9 @@ class AgentRun(models.Model):
 
 class HostedOperationReceipt(models.Model):
     """Minimal accepted command identity, retained even when its resources disappear."""
+
+    acting_app = models.ForeignKey(BusinessApplication, on_delete=models.PROTECT, related_name="operation_receipts", null=True, blank=True)
+    app_delegation = models.ForeignKey(UserAppDelegation, on_delete=models.PROTECT, related_name="operation_receipts", null=True, blank=True)
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
     workspace = models.ForeignKey(Workspace, on_delete=models.PROTECT)

@@ -20,6 +20,7 @@ from app_core.assets import (
     tombstone_superseded_derived_resources,
     tombstone_stored_object,
 )
+from app_core.app_delegations import DelegationRejected, require_request_delegation
 from app_core.models import (
     Artifact,
     DerivedResource,
@@ -31,7 +32,7 @@ from app_core.models import (
     new_library_object_id,
 )
 from app_core.trash_retention import trash_cutoff, trash_is_restorable
-from app_core.workspace_access import workspace_membership_for
+from app_core.workspace_access import locked_workspace_membership_for, workspace_membership_for
 
 from .response_schema import (
     COMMON_ERROR_RESPONSES,
@@ -44,7 +45,7 @@ from .response_schema import (
     SessionUploadEnvelope,
 )
 from .schema import StrictSchema
-from .security import session_auth
+from .security import session_auth, usage_auth
 from .serialization import (
     serialize_artifact,
     serialize_library_object,
@@ -525,7 +526,7 @@ def update_library_note(
 
 @router.post(
     "/sessions/{session_id}/uploads",
-    auth=session_auth,
+    auth=usage_auth("attachments:write"),
     response={201: SessionUploadEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def upload_session_library_objects(request, session_id: str):
@@ -551,6 +552,13 @@ def upload_session_library_objects(request, session_id: str):
         return Status(400, {"error": str(error)})
     try:
         with transaction.atomic():
+            membership = locked_workspace_membership_for(request.user, session.workspace_id)
+            if membership is None:
+                raise DelegationRejected("session_not_found", 404)
+            require_request_delegation(request, "attachments:write", session_id=session_id, lock=True)
+            session = Session.objects.select_for_update().filter(id=session_id, owner=request.user, status="active").first()
+            if session is None:
+                raise DelegationRejected("session_not_found", 404)
             library_objects = _create_uploaded_library_objects(request.user, stored)
             asset_links = []
             for library_object in library_objects:
@@ -585,7 +593,7 @@ def upload_session_library_objects(request, session_id: str):
 
 @router.get(
     "/sessions/{session_id}/assets",
-    auth=session_auth,
+    auth=usage_auth("sessions:read"),
     response={200: SessionAssetsEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def list_session_assets(request, session_id: str):
@@ -642,7 +650,7 @@ def attach_session_asset(
 
 @router.delete(
     "/sessions/{session_id}/assets",
-    auth=session_auth,
+    auth=usage_auth("attachments:write"),
     response={200: DeletedResponse} | COMMON_ERROR_RESPONSES,
 )
 def detach_session_asset(
@@ -653,11 +661,15 @@ def detach_session_asset(
     session = _session_for_assets(request.user, session_id)
     if session is None:
         return Status(404, {"error": "session_not_found"})
-    try:
-        link = session.assetLinks.get(id=payload.asset_link_id.strip())
-    except (ValueError, SessionAssetLink.DoesNotExist):
-        return Status(404, {"error": "asset_link_not_found"})
-    link.delete()
+    with transaction.atomic():
+        if locked_workspace_membership_for(request.user, session.workspace_id) is None:
+            return Status(404, {"error": "session_not_found"})
+        require_request_delegation(request, "attachments:write", session_id=session_id, lock=True)
+        try:
+            link = session.assetLinks.select_for_update().get(id=payload.asset_link_id.strip())
+        except (ValueError, SessionAssetLink.DoesNotExist):
+            return Status(404, {"error": "asset_link_not_found"})
+        link.delete()
     return {"deleted": True}
 
 

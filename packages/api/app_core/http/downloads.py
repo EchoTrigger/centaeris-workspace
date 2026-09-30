@@ -18,7 +18,7 @@ from app_core.workspace_access import (
     workspace_membership_for,
 )
 
-from .security import session_auth
+from .security import usage_auth
 from .storage_stream import stored_file_response
 
 
@@ -77,7 +77,7 @@ def _is_code_preview(filename: str, content_type: str) -> bool:
 
 @router.get(
     "/artifacts/{artifact_id}/download",
-    auth=session_auth,
+    auth=usage_auth("artifacts:read"),
     response=None,
 )
 async def artifact_download(request, artifact_id: str):
@@ -87,7 +87,7 @@ async def artifact_download(request, artifact_id: str):
 
 @router.get(
     "/source-objects/{source_object_id}/download",
-    auth=session_auth,
+    auth=usage_auth("artifacts:read"),
     response=None,
 )
 async def source_object_download(request, source_object_id: str):
@@ -100,7 +100,7 @@ async def source_object_download(request, source_object_id: str):
 
 @router.get(
     "/library/{library_object_id}/download",
-    auth=session_auth,
+    auth=usage_auth("artifacts:read"),
     response=None,
 )
 async def library_download(request, library_object_id: str):
@@ -114,7 +114,7 @@ async def library_download(request, library_object_id: str):
 
 @router.get(
     "/library/{library_object_id}/preview",
-    auth=session_auth,
+    auth=usage_auth("artifacts:read"),
     response=None,
 )
 async def library_preview(request, library_object_id: str):
@@ -128,7 +128,7 @@ async def library_preview(request, library_object_id: str):
 
 @router.get(
     "/citations/{citation_id}/preview",
-    auth=session_auth,
+    auth=usage_auth("artifacts:read"),
     response=None,
 )
 async def citation_preview(request, citation_id: str):

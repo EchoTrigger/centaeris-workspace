@@ -13,6 +13,7 @@ from ninja.responses import codes_4xx
 from pydantic import Field, ValidationError, field_validator
 
 from app_core.assets import captured_input_fields
+from app_core.app_delegations import require_delegated_agent, require_request_delegation
 from app_core.execution_admission import queued_admission_error
 from app_core.hosted_operations import (
     OPERATION_ID_PATTERN,
@@ -101,7 +102,7 @@ from .library import (
     _store_upload_batch,
 )
 from .schema import ErrorResponse, StrictSchema
-from .security import session_auth
+from .security import session_auth, usage_auth
 from .serialization import (
     serialize_model,
     serialize_session,
@@ -456,7 +457,7 @@ def create_session_project(
 
 @router.get(
     "/workspaces/{workspace_id}/sessions",
-    auth=session_auth,
+    auth=usage_auth("sessions:read"),
     response={200: SessionsEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def list_workspace_sessions(request, workspace_id: str):
@@ -482,12 +483,16 @@ def list_workspace_sessions(request, workspace_id: str):
         ).first()
         if agent is None:
             return Status(404, {"error": "agent_not_found"})
+        if request.app_delegation is not None:
+            require_delegated_agent(request.app_delegation, agent_id)
     sessions = list(
         Session.objects.filter(
             workspace=workspace,
             owner=request.user,
             status="active",
             agent__status="active",
+            **({"agent__definition_id": request.app_delegation.definition_id}
+               if request.app_delegation is not None else {}),
             **({"agent_id": agent_id} if agent_id is not None else {}),
         ).order_by("-isPinned", "-updatedAt")
     )
@@ -506,7 +511,7 @@ def list_workspace_sessions(request, workspace_id: str):
 
 @router.post(
     "/workspaces/{workspace_id}/sessions",
-    auth=session_auth,
+    auth=usage_auth("sessions:create"),
     response={201: HostedOperationResponse} | COMMON_ERROR_RESPONSES,
 )
 def create_workspace_session(request, workspace_id: str, payload: SessionCreateRequest):
@@ -518,9 +523,12 @@ def create_workspace_session(request, workspace_id: str, payload: SessionCreateR
         if membership is None:
             return Status(404, {"error": "workspace_not_found"})
         workspace = membership.workspace
+        grant = require_request_delegation(request, "sessions:create", workspace_id=workspace_id,
+                                            agent_id=payload.agent_id, lock=True)
         digest = request_digest(payload)
         try:
-            receipt = replay_operation(request.user, workspace_id, "createSession", payload.operation_id, digest)
+            receipt = replay_operation(request.user, workspace_id, "createSession", payload.operation_id, digest,
+                                       app_delegation=grant)
         except HostedOperationError as error:
             return Status(error.status, {"error": error.code})
         if receipt is not None:
@@ -550,13 +558,14 @@ def create_workspace_session(request, workspace_id: str, payload: SessionCreateR
             agent=agent,
             project=project,
         )
-        receipt = accept_operation(request.user, workspace, "createSession", payload.operation_id, digest, session)
+        receipt = accept_operation(request.user, workspace, "createSession", payload.operation_id, digest, session,
+                                   app_delegation=grant)
     return Status(201, serialize_operation(receipt))
 
 
 @router.get(
     "/workspaces/{workspace_id}/operations/{command}/{operation_id}",
-    auth=session_auth,
+    auth=usage_auth("sessions:read"),
     response={200: HostedOperationResponse} | COMMON_ERROR_RESPONSES,
 )
 def get_hosted_operation(request, response: HttpResponse, workspace_id: str,
@@ -569,7 +578,8 @@ def get_hosted_operation(request, response: HttpResponse, workspace_id: str,
         with transaction.atomic():
             if locked_workspace_membership_for(request.user, workspace_id) is None:
                 return Status(404, {"error": "operation_not_found"})
-            receipt = replay_operation(request.user, workspace_id, command, operation_id)
+            grant = require_request_delegation(request, "sessions:read", workspace_id=workspace_id, lock=True)
+            receipt = replay_operation(request.user, workspace_id, command, operation_id, app_delegation=grant)
             if receipt is None:
                 return Status(404, {"error": "operation_not_found"})
             return serialize_operation(receipt)
@@ -579,7 +589,7 @@ def get_hosted_operation(request, response: HttpResponse, workspace_id: str,
 
 @router.get(
     "/sessions/{session_id}",
-    auth=session_auth,
+    auth=usage_auth("sessions:read"),
     response={200: SessionEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def get_session(request, session_id: str):
@@ -727,7 +737,7 @@ def permanently_delete_session(request, session_id: str):
 
 @router.get(
     "/sessions/{session_id}/transcript",
-    auth=session_auth,
+    auth=usage_auth("sessions:read"),
     response=None,
 )
 def session_transcript(request, session_id: str):
@@ -787,7 +797,7 @@ def session_transcript(request, session_id: str):
 
 @router.get(
     "/sessions/{session_id}/transcript/patches",
-    auth=session_auth,
+    auth=usage_auth("sessions:read"),
     response=None,
 )
 def session_transcript_patches(request, session_id: str):
@@ -839,7 +849,7 @@ def session_transcript_patches(request, session_id: str):
 
 @router.get(
     "/sessions/{session_id}/transcript/content",
-    auth=session_auth,
+    auth=usage_auth("sessions:read"),
     response={200: TranscriptContentRangeResponse} | COMMON_ERROR_RESPONSES,
 )
 def session_transcript_content(request, session_id: str):
@@ -958,7 +968,7 @@ def session_transcript_content(request, session_id: str):
     )
 
 
-@router.get("/sessions/{session_id}/transcript/turn-metadata", auth=session_auth,
+@router.get("/sessions/{session_id}/transcript/turn-metadata", auth=usage_auth("sessions:read"),
     response={200: TranscriptTurnMetadataResponse, **COMMON_ERROR_RESPONSES})
 def session_transcript_turn_metadata(request, session_id: str):
     session = _authorized_transcript_session(request.user, session_id)
@@ -991,7 +1001,7 @@ def session_transcript_turn_metadata(request, session_id: str):
 
 @router.get(
     "/sessions/{session_id}/transcript/active-agent-run",
-    auth=session_auth,
+    auth=usage_auth("sessions:read"),
     response=None,
 )
 def session_transcript_active_agent_run(request, session_id: str):
@@ -1048,7 +1058,7 @@ def session_transcript_active_agent_run(request, session_id: str):
 
 @router.get(
     "/sessions/{session_id}/context-usage",
-    auth=session_auth,
+    auth=usage_auth("sessions:read"),
     response={200: SessionContextUsageEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def session_context_usage(request, session_id: str):
@@ -1123,7 +1133,7 @@ def _canonical_waterline(value: str) -> bool:
 
 @router.post(
     "/workspaces/{workspace_id}/sessions/{session_id}/messages",
-    auth=session_auth,
+    auth=usage_auth("messages:submit"),
     response={
         202: HostedOperationResponse,
         codes_4xx: ErrorResponse,
@@ -1159,7 +1169,12 @@ def create_session_message(
             membership = locked_workspace_membership_for(request.user, workspace_id)
             if membership is None:
                 return Status(404, {"error": "session_not_found"})
-            receipt = replay_operation(request.user, workspace_id, "submitMessage", payload.operation_id, digest)
+            grant = require_request_delegation(request, "messages:submit", workspace_id=workspace_id,
+                agent_id=payload.agent_id, session_id=session_id,
+                additional_scopes=(["sessions:create"] if session_id == "new" else [])
+                    + (["attachments:write"] if uploads else []), lock=True)
+            receipt = replay_operation(request.user, workspace_id, "submitMessage", payload.operation_id, digest,
+                                       app_delegation=grant)
             if receipt is not None:
                 return Status(202, serialize_operation(receipt))
     except ValueError as error:
@@ -1243,7 +1258,12 @@ def create_session_message(
             if membership is None:
                 raise AgentSessionCreationError(404, "session_not_found")
             workspace = membership.workspace
-            receipt = replay_operation(request.user, workspace_id, "submitMessage", payload.operation_id, digest)
+            grant = require_request_delegation(request, "messages:submit", workspace_id=workspace_id,
+                agent_id=payload.agent_id, session_id=session_id,
+                additional_scopes=(["sessions:create"] if session_id == "new" else [])
+                    + (["attachments:write"] if uploads else []), lock=True)
+            receipt = replay_operation(request.user, workspace_id, "submitMessage", payload.operation_id, digest,
+                                       app_delegation=grant)
             if receipt is not None:
                 raise AcceptedOperationReplay(receipt)
             admission_error = queued_admission_error(workspace.id)
@@ -1324,6 +1344,8 @@ def create_session_message(
                 workspace=workspace,
                 session=session,
                 user=request.user,
+                acting_app=grant.app if grant else None,
+                app_delegation=grant,
                 modelConfig=model,
                 thinkingMode=thinking_mode,
                 prompt=prompt,
@@ -1343,7 +1365,7 @@ def create_session_message(
             session.updatedAt = timezone.now()
             session.save(update_fields=["title", "updatedAt"])
             receipt = accept_operation(request.user, workspace, "submitMessage", payload.operation_id,
-                                       digest, session, agent_run)
+                                       digest, session, agent_run, app_delegation=grant)
     except AcceptedOperationReplay as replay:
         _delete_stored_upload_batch(stored)
         return Status(202, serialize_operation(replay.receipt))
@@ -1435,7 +1457,7 @@ def _parse_session_message_request(request):
 
 @router.post(
     "/sessions/{session_id}/agent-runs/{agent_run_id}/supplements",
-    auth=session_auth,
+    auth=usage_auth("messages:submit"),
     response={
         202: AgentRunSupplementResponse,
         codes_4xx: ErrorResponse,
@@ -1460,6 +1482,7 @@ def supplement_agent_run(
         return Status(404, {"error": "active_agent_run_not_found"})
     if not agent_run_membership_is_current(agent_run):
         return Status(404, {"error": "active_agent_run_not_found"})
+    require_request_delegation(request, "messages:submit", session_id=session_id)
     try:
         result = request_agent_run_supplement(agent_run, payload.supplement_id, payload.message)
     except ValueError as error:
@@ -1483,7 +1506,7 @@ def supplement_agent_run(
 
 @router.post(
     "/sessions/{session_id}/agent-runs/{agent_run_id}/cancel",
-    auth=session_auth,
+    auth=usage_auth("runs:cancel"),
     response={
         200: AgentRunCancellationResponse,
         202: AgentRunCancellationResponse,
@@ -1504,6 +1527,7 @@ def cancel_agent_run(request, session_id: str, agent_run_id: str):
         return Status(404, {"error": "agent_run_not_found"})
     if not agent_run_membership_is_current(agent_run):
         return Status(404, {"error": "agent_run_not_found"})
+    require_request_delegation(request, "runs:cancel", session_id=session_id)
     # Runtime also consumes any remaining continuation for a terminal owner.
     try:
         cancellation = request_agent_run_cancellation(agent_run)

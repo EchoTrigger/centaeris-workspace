@@ -481,8 +481,79 @@ not withdraw an external call already dispatched.
 Private credential resolution requires persistent null Agent definition and null
 Run definition version. Missing managed version data never selects that path.
 The old `/internal/mcp-bearer-credentials/resolve` endpoint remains private-only;
-the new adapter uses connector authorization. Authentication changes and periodic
-SSE revocation remain outside this delivery.
+the new adapter uses connector authorization. Delegated Runs additionally require
+their current user-app grant before connector dispatch.
+
+## User-delegated business applications
+
+Applications act for an existing signed-in user. They use opaque bearer tokens,
+not a separate service identity. Platform registration and user consent remain
+browser-only and retain CSRF protection. These `/api` routes use strict camelCase
+schemas; unknown fields and scopes are rejected.
+
+| Method and route | Behavior |
+| --- | --- |
+| `GET /business-apps` | Signed-in user lists active applications. |
+| `GET /admin/business-apps` | Platform superuser lists registered applications. |
+| `POST /admin/business-apps` | Superuser registers `{name}`; status defaults to `pending`. |
+| `PATCH /admin/business-apps/{appId}` | Superuser sets `{status: "active"}` or `{status: "revoked"}`; revoked applications cannot be reactivated. |
+| `GET /account/app-delegations` | User lists their own grants, without access tokens. |
+| `POST /account/app-delegations` | User consents to `{appId, workspaceId, definitionId, scopes, expiresInSeconds}`. |
+| `DELETE /account/app-delegations/{delegationId}` | User permanently revokes their own grant; repeat revocation returns 204. |
+
+Consent requires an active application and a currently available published
+definition in the user's Workspace. `scopes` must be a nonempty list of unique
+values from the table below. `expiresInSeconds` defaults to 3600 and ranges from
+300 to 86400. The 201 response contains `{delegation, accessToken, tokenType:
+"Bearer"}` with `Cache-Control: no-store`. The token is shown only once and only
+its SHA-256 digest is stored. Grant metadata includes `id`, `appId`, `appName`,
+`workspaceId`, `workspaceName`, `definitionId`, `definitionName`, `scopes`,
+`issuer`, `audience`, `createdAt`, `expiresAt` and `revokedAt`. The server fixes
+issuer `centaeris-workspace` and audience `centaeris-workspace-api`; callers cannot
+set these values, another `userId`, origin fields or a token digest.
+
+Use `Authorization: Bearer {accessToken}` on the existing usage routes:
+
+| Scope | Existing operations |
+| --- | --- |
+| `assistant:use` | List/get the granted assistant, list its available definition, obtain the user's private definition instance. |
+| `sessions:create` | Create a Session for that instance. |
+| `sessions:read` | List/get its Sessions, operation receipts, transcript pages/patches/content, turn metadata, active Run, context usage and citation details. |
+| `messages:submit` | Submit messages/supplements and list usable models. A `sessions/new/messages` request also requires `sessions:create`. |
+| `attachments:write` | Upload files to its Session or delete its attachment links. Inline message uploads additionally require this scope. |
+| `events:read` | Subscribe to the existing Session event stream. |
+| `artifacts:read` | Download artifacts and read file/citation previews or downloads associated with the granted assistant's Sessions. Existing source/file ACLs still apply. |
+| `runs:cancel` | Request cancellation of an owned Run in its Session. |
+
+Each request validates current application status, grant issuer/audience,
+expiry/revocation, exact membership identity, definition availability, scopes and
+object ownership. Malformed or unknown tokens return 401 `delegation_invalid`;
+unavailable grants return 403 `delegation_not_available`, and missing scopes
+return 403 `delegation_scope_forbidden`. Out-of-bound resources return 404.
+Cookie identity combined with any Authorization header returns 400
+`authentication_mixed`; a bearer token never falls back to a browser session.
+Definition, Plugin, credential, global Library and delegation management routes
+do not accept app bearer authentication.
+
+Applications reuse the original Session ID, `operationId`/digest receipts, 409
+concurrency outcomes, cancellation requested/terminal behavior and history
+contracts. Browser and app retries share the same user-owned operation namespace;
+receipt replay keeps the original acting application and grant. Multipart
+`POST /sessions/{sessionId}/uploads` returns the existing `libraryObjects` and
+`assets`; `assets[].id` is a `SessionAssetLink` used in JSON `attachmentRefs`.
+Run `assetRefs` includes all Session attachments, whereas `messageAssetRefs`
+includes only the submitted message's refs. Artifact references and authenticated
+download URLs remain stable; citations describe tool sources rather than answer
+spans.
+
+An open event stream rechecks authority before each item and every five seconds
+while waiting. Checks time out after five seconds and fail closed, so committed
+revocation closes the stream within fifteen seconds. This adds no event type:
+`session.stream.item.v1` live text remains a full snapshot with a revision, and
+committed items retain `sourceSequence` and the Core event. Connector dispatch
+also checks the Run's current grant after lazy initialization and queue waiting.
+Accepted configuration snapshots do not preserve withdrawn security authority;
+already dispatched external effects cannot be recalled by these checks.
 
 ## Execution recovery scheduling
 

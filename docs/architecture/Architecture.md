@@ -96,8 +96,9 @@ the fingerprint and current authority after initialization and connection-queue
 waiting, including calls using the cached provider. Changed authority,
 fingerprints or API failures reject the call
 without executing or reconnecting the inner provider. Ordinary configuration
-stays frozen while security revocation remains current. This boundary covers MCP
-dispatch; it does not add periodic SSE revocation or cancel all accepted execution.
+stays frozen while security revocation remains current. Delegated Runs also require
+their current user-app grant at this dispatch boundary. SSE checks are separate
+from provider invocation; neither check cancels all accepted execution.
 The authorization decision precedes the actual provider invocation; it cannot
 atomically fence a remote effect against revocation committed after that decision
 or withdraw an external call already dispatched.
@@ -106,9 +107,42 @@ The private credential path requires persistent `Agent.definition_id = null` and
 `AgentRun.definition_version_id = null`. A managed Agent missing its version is
 rejected. The old bearer resolver is restricted to that private state; the new
 adapter always uses strict connector authorization. Models and external tool
-arguments cannot choose secret references. Public responses expose neither tokens
-nor authorization signatures. The management contracts support a scoped approval
+arguments cannot choose secret references. Public responses expose neither downstream
+tokens nor internal authorization signatures. The management contracts support a scoped approval
 picker and binding controls; a new real-secret management UI is not implemented.
+
+## Delegated business applications
+
+The API registers `BusinessApplication` records and user-owned `UserAppDelegation`
+grants. Registration is platform-admin-only and defaults to pending. The existing
+Settings layout lets a signed-in user explicitly select an active application,
+Workspace, available definition, operation scopes and expiry, then revoke the
+grant later. The acting identity remains that user, with the application recorded
+as the actor; applications cannot supply a different user identity or manage
+definitions, Plugins, connector approvals or credentials.
+
+A grant issues a random opaque bearer token once, with a no-store response. Only
+its SHA-256 digest is persisted. The server fixes issuer and audience, validates
+expiry and revocation, and intersects the scopes with the user's current membership
+identity, definition availability and resource ownership. Leaving and rejoining a
+Workspace does not revive an old grant. Browser cookies keep their existing CSRF
+checks; requests combining cookie identity and an Authorization header fail.
+
+Delegated requests use the existing Session, upload, transcript, citation,
+artifact-download and cancellation routes. A delegated Run and hosted operation
+receipt retain their server-assigned application and grant origin. Browser and
+application submissions share the user-owned operation identity and digest, so
+retries recover the same receipt and changed input still returns 409. Acceptance
+and revocation serialize under the Workspace lock; current grants are checked
+again before acceptance commits. Migration leaves old Run and receipt origins
+null and does not invent applications, grants or credentials.
+
+An open Session stream checks current user, membership, definition, ownership and,
+when delegated, grant authority before each item and every five seconds while
+waiting for an item. Authority checks have a five-second timeout and fail closed;
+the stream ends within fifteen seconds of committed revocation. Its existing
+`session.stream.item.v1` snapshots, revisions and committed cursors are unchanged.
+No check promises to withdraw an external effect already dispatched.
 
 ## Request flow
 

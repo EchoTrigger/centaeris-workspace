@@ -13,11 +13,13 @@ import GlobalPluginSettings from "./GlobalPluginSettings";
 import PluginSettings from "./PluginSettings";
 import WorkspaceGroupsRoute from "./WorkspaceGroupsRoute";
 import WorkspaceMembersRoute from "./WorkspaceMembersRoute";
+import AppDelegations from "./AppDelegations";
 
 const ADMIN_ROLES = new Set(["owner", "admin"]);
 const SECTIONS = () => ({
   preferences: { label: t("settingsRoute.preferences"), title: t("settingsRoute.preferences"), icon: SlidersHorizontal, group: "", account: true },
   general: { label: t("pluginSettings.general"), title: t("pluginSettings.general"), icon: Settings2, group: "", account: true },
+  applications: { label: t("appDelegations.title"), title: t("appDelegations.title"), icon: Boxes, group: "", account: true },
   members: { label: t("invitationActivationRoute.member"), title: t("settingsRoute.membersAndPermissions"), icon: Users, group: t("settingsRoute.workspace") },
   groups: { label: t("settingsRoute.groups"), title: t("settingsRoute.groups"), icon: UsersRound, group: t("settingsRoute.workspace"), hiddenInNav: true },
   plugins: { label: t("libraryRoute.plugins"), title: t("settingsRoute.workspacePlugins"), icon: Plug, group: t("settingsRoute.workspace") },
@@ -147,6 +149,7 @@ export default function SettingsPage() {
 
   const body = section === "preferences" ? <Preferences userId={user.id} />
     : section === "security" ? <AccountSecurity />
+    : section === "applications" ? <AppDelegations isSuperuser={Boolean(user?.isSuperuser)} />
     : section === "members" ? <WorkspaceMembersRoute embedded />
       : section === "groups" ? <WorkspaceGroupsRoute embedded />
         : section === "plugins" ? <PluginSettings workspace={workspace} isSuperuser={Boolean(user?.isSuperuser)} />

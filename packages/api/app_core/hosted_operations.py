@@ -5,6 +5,7 @@ import json
 import unicodedata
 
 from app_core.assets import MAX_DIRECT_INPUT_BYTES, safe_filename
+from app_core.app_delegations import require_delegated_session
 from app_core.models import Agent, AgentRun, HostedOperationReceipt, Session
 
 
@@ -50,7 +51,7 @@ def request_digest(payload, *, session_id=None, uploads=()):
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def replay_operation(user, workspace_id, command, operation_id, digest=None):
+def replay_operation(user, workspace_id, command, operation_id, digest=None, *, app_delegation=None):
     """Caller holds the Workspace/membership lock; authorize before digest comparison."""
     receipt = HostedOperationReceipt.objects.filter(
         user=user, workspace_id=workspace_id, command=command, operationId=operation_id,
@@ -68,6 +69,8 @@ def replay_operation(user, workspace_id, command, operation_id, digest=None):
     if (session.workspace_id != workspace_id or session.owner_id != user.id
             or agent is None or agent.owner_id != user.id or agent.workspace_id != workspace_id):
         raise HostedOperationError(404, "operation_not_found")
+    if app_delegation is not None:
+        require_delegated_session(app_delegation, session.id, require_active=False)
     if session.status != "active" or agent.status != "active":
         raise HostedOperationError(410, "operation_resource_unavailable")
     if receipt.agentRunId is not None and not AgentRun.objects.filter(
@@ -80,13 +83,15 @@ def replay_operation(user, workspace_id, command, operation_id, digest=None):
     return receipt
 
 
-def accept_operation(user, workspace, command, operation_id, digest, session, agent_run=None):
+def accept_operation(user, workspace, command, operation_id, digest, session, agent_run=None, *, app_delegation=None):
     # Business records and receipt must be committed in the same caller transaction.
     return HostedOperationReceipt.objects.create(
         user=user, workspace=workspace, command=command, operationId=operation_id,
         requestDigest=digest, sessionId=session.id,
         agentRunId=agent_run.id if agent_run else None,
         turnId=agent_run.turn_id if agent_run else None,
+        acting_app=app_delegation.app if app_delegation else None,
+        app_delegation=app_delegation,
     )
 
 

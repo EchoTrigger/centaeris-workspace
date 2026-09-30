@@ -1,4 +1,5 @@
 import logging
+from app_core.app_delegations import DelegationRejected
 
 from ninja.errors import HttpError, ValidationError
 
@@ -13,6 +14,9 @@ from .security import (
 logger = logging.getLogger(__name__)
 
 VALIDATION_ERROR_CODES = {
+    "register_business_app": "business_app_request_invalid",
+    "update_business_app": "business_app_request_invalid",
+    "issue_app_delegation": "delegation_request_invalid",
     "approve_assistant_credential": "mcp_connector_request_invalid",
     "bind_assistant_connector": "mcp_connector_request_invalid",
     "create_agent_definition": "agent_definition_invalid",
@@ -54,6 +58,8 @@ VALIDATION_ERROR_CODES = {
 # method on that path. Keep the HTTP-method disambiguation explicit so validation
 # errors retain the public protocol code owned by the selected operation.
 VALIDATION_ERROR_CODE_OVERRIDES = {
+    ("POST", "list_registered_business_apps"): "business_app_request_invalid",
+    ("POST", "list_app_delegations"): "delegation_request_invalid",
     ("POST", "list_agent_definitions"): "agent_definition_invalid",
     ("PATCH", "get_agent_definition"): "agent_definition_invalid",
     ("POST", "list_agent_definition_versions"): "agent_definition_invalid",
@@ -71,6 +77,9 @@ VALIDATION_ERROR_CODE_OVERRIDES = {
 }
 
 MALFORMED_JSON_ERROR_CODES = {
+    "register_business_app": "business_app_request_invalid",
+    "update_business_app": "business_app_request_invalid",
+    "issue_app_delegation": "delegation_request_invalid",
     "approve_assistant_credential": "mcp_connector_request_invalid",
     "bind_assistant_connector": "mcp_connector_request_invalid",
     "create_agent_definition": "agent_definition_invalid",
@@ -138,6 +147,10 @@ def _mapped_error_code(request, *, malformed_json: bool) -> str:
 
 
 def install_error_handlers(api) -> None:
+    @api.exception_handler(DelegationRejected)
+    def delegation_rejected(request, error):
+        return api.create_response(request, {"error": error.code}, status=error.status)
+
     @api.exception_handler(PublicAuthenticationRequired)
     def public_authentication_required(request, error):
         return api.create_response(

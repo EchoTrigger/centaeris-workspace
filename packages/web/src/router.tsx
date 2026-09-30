@@ -215,7 +215,7 @@ export function createRouter() {
               Component: WorkspaceEntry,
             },
             { path: "workspaces", loader: workspacesLoader, Component: WorkspaceEntry },
-            ...["general", "preferences", "security"].map((section) => ({ path: `settings/${section}`, loader: accountSettingsLoader, Component: SettingsRoute })),
+            ...["general", "preferences", "security", "applications"].map((section) => ({ path: `settings/${section}`, loader: accountSettingsLoader, Component: SettingsRoute })),
             {
               id: "workspace",
               path: "w/:workspaceId",
@@ -228,7 +228,7 @@ export function createRouter() {
                   children: [
                     { path: "app", element: <></> },
                     { path: "agents/:agentId", element: <></> },
-                    ...["preferences", "security", "general", "members", "groups", "plugins", "models", "global-plugins"].map((section) => ({ path: `settings/${section}`, Component: SettingsRoute })),
+                    ...["preferences", "security", "applications", "general", "members", "groups", "plugins", "models", "global-plugins"].map((section) => ({ path: `settings/${section}`, Component: SettingsRoute })),
                   ],
                 },
                 { path: "agents/new", Component: AgentCreateRoute },

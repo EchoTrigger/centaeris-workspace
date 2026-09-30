@@ -21,7 +21,7 @@ from .schema import (
     PasswordResetRequest,
     UserEnvelope,
 )
-from .security import require_public_csrf, session_auth
+from .security import require_public_csrf, session_auth, usage_auth
 from .serialization import serialize_model, serialize_user
 
 
@@ -136,7 +136,7 @@ def current_user(request):
 
 @router.get(
     "/models",
-    auth=session_auth,
+    auth=usage_auth("messages:submit"),
     response={200: ModelsEnvelope, 401: ErrorResponse},
 )
 def available_models(request):

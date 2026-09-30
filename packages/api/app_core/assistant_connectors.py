@@ -6,6 +6,7 @@ from django.conf import settings
 from django.db import transaction
 
 from .agent_definitions import available_agent_definitions
+from .app_delegations import DelegationRejected, require_run_delegation
 from .credentials import decrypt_credential_secret, validate_bearer_token
 from .models import AgentConnectorBinding, McpBearerCredential, McpCredentialAuditEvent
 from .plugin_catalog import load_plugin_connector_resources
@@ -67,6 +68,10 @@ def authorize_connector(authorization, body):
             raise ConnectorRejected("mcp_connector_membership_revoked", 403)
         run.refresh_from_db()
         scope = _check_authorization(authorization)
+        try:
+            require_run_delegation(run, lock=True)
+        except DelegationRejected as error:
+            raise ConnectorRejected(error.code, error.status) from error
         definition_id = run.session.agent.definition_id
         if scope == "managed" and not available_agent_definitions(membership).filter(id=definition_id).exists():
             raise ConnectorRejected("agent_definition_not_available", 403)
