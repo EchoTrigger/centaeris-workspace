@@ -35,6 +35,27 @@ test("tool output appends ranges on demand and keeps earlier content readable", 
   assert.equal(reader.getSnapshot().hasMore, false);
 });
 
+test("completion subscribers can start the next page without losing its in-flight deduplication", async t => {
+  const requests = [];
+  const reader = new TranscriptContentReader(offset => new Promise(resolve => { requests.push({ offset, resolve }); }));
+  t.after(() => reader.dispose());
+  let continuation;
+  reader.subscribe(() => {
+    const state = reader.getSnapshot();
+    if (state.content === "abc" && !state.loading) continuation = reader.loadMore();
+  });
+  const first = reader.loadMore();
+  requests[0].resolve({ content: "abc", startOffset: "0", endOffset: "3", hasMore: true });
+  await first;
+  assert.deepEqual(requests.map(request => request.offset), ["0", "3"]);
+  const duplicate = reader.loadMore();
+  assert.equal(duplicate, continuation, "the old page's finally must not clear the new pending request");
+  assert.equal(requests.length, 2);
+  requests[1].resolve({ content: "def", startOffset: "3", endOffset: "6", hasMore: false });
+  await duplicate;
+  assert.equal(reader.getSnapshot().content, "abcdef");
+});
+
 test("disposing a view rejects late content even when the transport ignores cancellation", async () => {
   let resolve;
   const reader = new TranscriptContentReader(() => new Promise((done) => { resolve = done; }));

@@ -58,8 +58,11 @@ export class TranscriptContentReader {
   loadMore(): Promise<void> {
     if (this.pending) return this.pending;
     if (this.snapshot.loading || this.snapshot.error || this.controller.signal.aborted || !this.snapshot.hasMore) return Promise.resolve();
-    this.pending = this.loadPage().finally(() => { this.pending = null; });
-    return this.pending;
+    const pending = this.loadPage().finally(() => {
+      if (this.pending === pending) this.pending = null;
+    });
+    this.pending = pending;
+    return pending;
   }
 
   private async loadPage() {
@@ -97,6 +100,9 @@ export class TranscriptContentReader {
         throw new Error("transcript content continuation made no progress");
       }
       this.endOffset = page.endOffset;
+      // Completion subscribers may immediately request the next page. Retire
+      // this request before notifying them that loading has finished.
+      this.pending = null;
       this.publish({
         content: this.snapshot.content + page.content,
         hasMore: page.hasMore,
