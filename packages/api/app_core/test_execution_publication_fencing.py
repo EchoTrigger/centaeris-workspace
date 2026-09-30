@@ -24,7 +24,7 @@ from django.utils import timezone
 
 from .agent_run_authorization_factory import create_agent_run_authorization
 from .http import internal, workspaces
-from .models import AgentRun, ModelConfig, Workspace
+from .models import Agent, AgentRun, ModelConfig, Workspace
 from .testing import create_session
 
 
@@ -120,7 +120,7 @@ class ExecutionPublicationFencingTests(TransactionTestCase):
         finally:
             connections.close_all()
 
-    def _during_upload(self, change):
+    def _during_upload(self, change, *, body=None):
         """Let storage finish, change committed facts, then allow publication."""
         uploaded, release = Event(), Event()
         real_store = internal._store_workspace_snapshot
@@ -135,7 +135,7 @@ class ExecutionPublicationFencingTests(TransactionTestCase):
 
         with patch.object(internal, "_store_workspace_snapshot", paused_store):
             with ThreadPoolExecutor(max_workers=1) as executor:
-                pending = executor.submit(self._thread_post, self._body()[0])
+                pending = executor.submit(self._thread_post, body if body is not None else self._body()[0])
                 try:
                     self.assertTrue(uploaded.wait(5), "Snapshot did not finish uploading")
                     change()
@@ -211,6 +211,64 @@ class ExecutionPublicationFencingTests(TransactionTestCase):
         type(self.session).objects.filter(id=self.session.id).update(
             status="deleted", deletedAt=now, purgedAt=now,
         )
+
+    def _purge_agent(self):
+        now = timezone.now()
+        Agent.objects.filter(id=self.session.agent_id).update(
+            status="deleted", deletedAt=now, purgedAt=now,
+        )
+
+    def test_parent_purge_during_snapshot_upload_fences_live_lease(self):
+        self._parent_purge_during_upload(checkpoint=False)
+
+    def test_parent_purge_during_checkpoint_upload_fences_live_lease(self):
+        self._parent_purge_during_upload(checkpoint=True)
+
+    def _parent_purge_during_upload(self, *, checkpoint):
+        body, snapshot = self._body()
+        checkpoint_id = "checkpoint:parent-purge"
+        if checkpoint:
+            metadata_size = int.from_bytes(body[:4], "big")
+            metadata = json.loads(body[4:4 + metadata_size])
+            metadata.update(schema="runtime.execution_workspace.stage.v1", checkpointId=checkpoint_id)
+            encoded = json.dumps(metadata, separators=(",", ":")).encode()
+            body = len(encoded).to_bytes(4, "big") + encoded + snapshot
+        retained_key = (
+            f"workspaces/{self.run.workspace_id}/sessions/{self.session.id}/snapshots/2/"
+            f"{hashlib.sha256(b'previous snapshot').hexdigest()}.snapshot"
+        )
+        default_storage.save(retained_key, ContentFile(b"previous snapshot"))
+        reports = []
+
+        def purge_and_collect():
+            self._purge_agent()
+            output = io.StringIO()
+            call_command("gc_deleted_resources", older_than_seconds=0, stdout=output)
+            self.assertTrue(default_storage.exists(retained_key))
+            reports.append(output.getvalue())
+
+        original_post = self._post
+        if checkpoint:
+            self._post = lambda payload: Client().post(
+                "/internal/agent-runs/execution-workspace/stage", data=payload,
+                content_type="application/octet-stream", HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN,
+            )
+        try:
+            stale = self._during_upload(purge_and_collect, body=body)
+            self._assert_error(stale, "session_workspace_session_unavailable")
+            self.assertIn(f"Blocked workspace snapshot key {retained_key}", reports[0])
+            self._assert_error(self._post(body), "session_workspace_session_unavailable")
+        finally:
+            self._post = original_post
+        self.session.refresh_from_db()
+        self.assertEqual(self.session.status, "active")
+        self.assertIsNone(self.session.purgedAt)
+        self.assertEqual(self.session.workspaceGeneration, 0)
+        self.assertEqual(list(self.storage_root.rglob("*.snapshot")), [self.storage_root / retained_key])
+        self._assert_no_upload_temporaries()
+        AgentRun.objects.filter(id=self.run.id).update(status="completed")
+        call_command("gc_deleted_resources", older_than_seconds=0, stdout=io.StringIO())
+        self.assertFalse(default_storage.exists(retained_key))
 
     def test_purged_session_during_upload_cannot_create_final_snapshot(self):
         stale = self._during_upload(self._purge_session)
@@ -442,7 +500,15 @@ class ExecutionPublicationFencingTests(TransactionTestCase):
         body, snapshot, key = self._checkpoint_download_body()
         self._download_open_purge_race(body, snapshot, key, checkpoint=True)
 
-    def _download_open_purge_race(self, body, snapshot, key, *, checkpoint=False):
+    def test_snapshot_download_opens_before_parent_purge_can_finish(self):
+        body, snapshot = self._download_body()
+        self._download_open_purge_race(body, snapshot, self.session.workspaceStorageKey, parent=True)
+
+    def test_checkpoint_download_opens_before_parent_purge_can_finish(self):
+        body, snapshot, key = self._checkpoint_download_body()
+        self._download_open_purge_race(body, snapshot, key, checkpoint=True, parent=True)
+
+    def _download_open_purge_race(self, body, snapshot, key, *, checkpoint=False, parent=False):
         opening, release, purging = Event(), Event(), Event()
         real_open = default_storage.open
         response = None
@@ -457,7 +523,7 @@ class ExecutionPublicationFencingTests(TransactionTestCase):
         def purge():
             try:
                 purging.set()
-                self._purge_session()
+                self._purge_agent() if parent else self._purge_session()
             finally:
                 connections.close_all()
 
@@ -492,6 +558,8 @@ class ExecutionPublicationFencingTests(TransactionTestCase):
         finally:
             if response is not None:
                 response.close()
+        if parent:
+            AgentRun.objects.filter(id=self.run.id).update(status="completed")
         call_command("gc_deleted_resources", older_than_seconds=0, stdout=io.StringIO())
         self.assertFalse(default_storage.exists(key))
         self._assert_error(
@@ -534,13 +602,14 @@ class ExecutionPublicationFencingTests(TransactionTestCase):
                             cursor.execute(
                                 "SELECT EXISTS(SELECT 1 FROM pg_stat_activity "
                                 "WHERE datname=current_database() AND wait_event_type='Lock' "
-                                "AND query LIKE '%%app_core_session%%')"
+                                "AND (query LIKE '%%app_core_session%%' "
+                                "OR query LIKE '%%app_core_agent%%'))"
                             )
                             waiting = cursor.fetchone()[0]
                         if waiting:
                             break
                         time.sleep(0.02)
-                    self.assertTrue(waiting, "Upload did not reach the concurrent Session lock")
+                    self.assertTrue(waiting, "Upload did not reach the concurrent owner lock")
                 finally:
                     release_delete.set()
                 deleted = deletion.result(timeout=10)

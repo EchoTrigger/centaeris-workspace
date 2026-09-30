@@ -1,11 +1,11 @@
-"""Reclaim local workspace bytes only after their Session is permanently deleted.
+"""Reclaim local workspace bytes after their Session or Agent is permanently deleted.
 
-The upload and download paths take the same Session lock while creating a local
+The upload and download paths take the same Agent and Session locks while creating a local
 temporary file, publishing its immutable name, or opening an authorized reader.
 Snapshot payload copying stays outside those transactions. Permanent deletion
 therefore prevents new names from appearing after a GC pass has enumerated them;
 an interrupted upload can leave only a temporary file for a later pass to reclaim.
-Active Sessions and restorable trash never enter this collector.
+Active Sessions and restorable trash under retained Agents never enter this collector.
 """
 
 from dataclasses import dataclass
@@ -16,9 +16,10 @@ import stat
 
 from django.core.files.storage import default_storage
 from django.db import transaction
+from django.db.models import Q
 
 from .assets import delete_stored_object_for_gc
-from .models import AgentRun, Session
+from .models import Agent, AgentRun, Session
 
 
 _GENERATION = re.compile(r"[1-9][0-9]*\Z")
@@ -44,7 +45,9 @@ class WorkspaceSnapshotGcReport:
 def collect_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSnapshotGcReport:
     """Collect the two precise key families owned by permanently deleted Sessions.
 
-    Both the owner tombstone and object modification time must precede cutoff.
+    Both the Session or parent Agent tombstone and object modification time must
+    precede cutoff. A parent purge also covers children left active or in trash
+    by earlier releases, without changing their state or recovery references.
     Unknown Run directories are reported as blocked, not interpreted as owned
     recovery data. This collector never accesses Runtime checkpoint tables.
     """
@@ -53,8 +56,9 @@ def collect_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSnapshotGcR
     if root is None:
         return report
     sessions = Session.objects.filter(
-        status="deleted", purgedAt__lte=cutoff,
-    ).only("id", "workspace_id", "purgedAt")
+        Q(status="deleted", purgedAt__lte=cutoff)
+        | Q(agent__status="deleted", agent__purgedAt__lte=cutoff),
+    ).only("id", "workspace_id", "agent_id")
     for session in sessions.order_by("id").iterator():
         try:
             prefix = _session_prefix(session)
@@ -63,17 +67,36 @@ def collect_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSnapshotGcR
             continue
         for key in _snapshot_keys(root, prefix, session.id, report):
             try:
-                # A metadata-only unlink uses the same owner lock as upload's
-                # final link and download's open. Do not enumerate under the lock.
+                # Match public deletion and snapshot I/O: parent before child.
+                # Do not enumerate or copy payloads while holding these locks.
                 with transaction.atomic():
-                    owner = Session.objects.select_for_update().only(
+                    agent = Agent.objects.select_for_update().only(
                         "status", "purgedAt", "workspace_id",
+                    ).get(pk=session.agent_id)
+                    owner = Session.objects.select_for_update().only(
+                        "status", "purgedAt", "workspace_id", "agent_id",
                     ).get(pk=session.id)
+                    session_purged = (
+                        owner.status == "deleted"
+                        and owner.purgedAt is not None
+                        and owner.purgedAt <= cutoff
+                    )
+                    agent_purged = (
+                        agent.status == "deleted"
+                        and agent.purgedAt is not None
+                        and agent.purgedAt <= cutoff
+                    )
                     if (
-                        owner.status != "deleted"
-                        or owner.purgedAt is None
-                        or owner.purgedAt > cutoff
-                        or owner.workspace_id != session.workspace_id
+                        owner.workspace_id != session.workspace_id
+                        or owner.agent_id != agent.id
+                        or agent.workspace_id != owner.workspace_id
+                        or not (
+                            session_purged
+                            or (
+                                agent_purged
+                                and not owner.agent_runs.filter(status__in={"queued", "running"}).exists()
+                            )
+                        )
                     ):
                         report.blocked.append(key)
                         continue

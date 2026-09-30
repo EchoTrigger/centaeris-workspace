@@ -29,7 +29,7 @@ from app_core.deferred_input import (
     resolved_input_storage,
     input_storage_batch,
 )
-from app_core.models import Session, AgentRun
+from app_core.models import Agent, Session, AgentRun
 from app_core.material_contract import KnowledgeError
 from app_core.runtime_contract import (
     agent_run_binding_matches,
@@ -509,9 +509,11 @@ def _locked_session_workspace_agent_run(body: dict) -> tuple[AgentRun, Session, 
         job = cursor.fetchone()
     if job is None:
         raise SessionWorkspaceError("session_workspace_lease_lost")
-    # Session deletion locks the owner before its Runs and requests cancellation.
-    # Acquire that same owner and Run first, then lock and recheck the lease;
-    # a read-only probe is not authority to publish after waiting for the locks.
+    # Public deletion and GC lock Agent before Session. A parent purge leaves
+    # child state unchanged, so lock and recheck both owners before snapshot I/O.
+    # Then retain the existing Run/lease order and recheck the lease after waiting.
+    agent_id = Session.objects.filter(id=job[0]).values_list("agent_id", flat=True).first()
+    agent = Agent.objects.select_for_update().filter(id=agent_id).first()
     session = Session.objects.select_for_update().filter(id=job[0]).first()
     try:
         agent_run = (
@@ -548,7 +550,16 @@ def _locked_session_workspace_agent_run(body: dict) -> tuple[AgentRun, Session, 
             raise ValueError
     except (AttributeError, ValueError):
         raise SessionWorkspaceError("session_workspace_authorization_invalid") from None
-    if agent_run.status not in {"queued", "running"} or session.status != "active":
+    if (
+        agent is None
+        or agent.id != session.agent_id
+        or agent.workspace_id != session.workspace_id
+        or agent.status != "active"
+        or agent.purgedAt is not None
+        or agent_run.status not in {"queued", "running"}
+        or session.status != "active"
+        or session.purgedAt is not None
+    ):
         raise SessionWorkspaceError("session_workspace_session_unavailable")
     return agent_run, session, authorization.payload["sessionWorkspace"]
 
