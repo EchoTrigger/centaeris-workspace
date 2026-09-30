@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 import { createServer } from "vite";
 
-test("transcript reader component lifecycle", { timeout: 40_000 }, async () => {
+test("transcript reader component cancellation and bounded recovery", { timeout: 40_000 }, async () => {
   assert.ok(process.env.CHROME_BIN, "Set CHROME_BIN to a Chromium executable");
   const profile = await mkdtemp(join(tmpdir(), "centaeris-transcript-reader-"));
   const server = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), server: { port: 0, host: "127.0.0.1", strictPort: false } });
@@ -19,7 +19,7 @@ test("transcript reader component lifecycle", { timeout: 40_000 }, async () => {
     const payload = stdout.match(/<pre id="results">(.*?)<\/pre>/s)?.[1];
     assert.ok(payload, "component did not report completed assertions");
     const results = JSON.parse(payload.replaceAll("&quot;", '\"').replaceAll("&amp;", "&"));
-    assert.ok(results.length >= 7, JSON.stringify(results));
+    assert.ok(results.length >= 27, JSON.stringify(results));
     assert.deepEqual(results.filter(result => JSON.stringify(result.actual) !== JSON.stringify(result.expected)), []);
   } finally {
     await server.close();

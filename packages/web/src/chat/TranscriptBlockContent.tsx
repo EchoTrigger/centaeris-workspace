@@ -189,9 +189,8 @@ function ToolOutputBody({ reader, failed }: Readonly<{ reader: TranscriptContent
         onScroll={handleScroll}
       >{state.content}</pre>
       {state.loading ? <span className="workspaceToolOutputStatus" role="status">{t("transcriptBlockContent.loading")}</span> : null}
-      {state.error ? <span className="workspaceToolOutputStatus isError" role="alert">
+      {state.unavailable ? <span className="workspaceToolOutputStatus isError" role="alert">
         {t("transcriptBlockContent.unableToLoadContent")}
-        <button type="button" onClick={() => { reader.retry(); }}>{t("codePreview.retry")}</button>
       </span> : null}
     </div>
   );

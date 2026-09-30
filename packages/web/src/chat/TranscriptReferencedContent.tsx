@@ -33,8 +33,6 @@ function Content({ reader, mode }: Readonly<{ reader: TranscriptContentReader; m
   return <>
     {state.content ? (mode === "markdown" ? <MarkdownContent text={state.content} /> : state.content) : null}
     {state.loading ? <span role="status">{t("transcriptBlockContent.loading")}</span> : null}
-    {state.error ? <span role="alert">{t("transcriptBlockContent.unableToLoadContent")}
-      <button type="button" onClick={() => { reader.retry(); }}>{t("codePreview.retry")}</button>
-    </span> : null}
+    {state.unavailable ? <span role="alert">{t("transcriptBlockContent.unableToLoadContent")}</span> : null}
   </>;
 }

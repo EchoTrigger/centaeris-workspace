@@ -82,24 +82,6 @@ for (const outcome of ["late page", "abort rejection"]) {
   });
 }
 
-test("failed continuation can retry without duplicating text", async () => {
-  const text = "a".repeat(70000);
-  const read = source(text);
-  let fail = true;
-  const reader = new TranscriptContentReader(async (offset) => {
-    if (offset !== "0" && fail) { fail = false; throw Error("unavailable"); }
-    return read(offset);
-  });
-  await reader.loadAll();
-  assert.equal(reader.getSnapshot().error, true);
-  const loadedBefore = reader.getSnapshot().content;
-  await reader.retry();
-  await reader.loadAll();
-  assert.equal(reader.getSnapshot().content, text);
-  assert.equal(reader.getSnapshot().error, false);
-  assert.ok(reader.getSnapshot().content.startsWith(loadedBefore));
-});
-
 test("unavailable historical output reports an error without automatic retry or fallback", async () => {
   const paths = [];
   const transport = createWorkspaceTranscriptTransport({
@@ -121,8 +103,8 @@ test("unavailable historical output reports an error without automatic retry or 
   assert.equal(paths.length, 1);
   await reader.loadAll();
   assert.equal(paths.length, 1);
-  await reader.retry();
-  assert.deepEqual(paths, [paths[0], paths[0]]);
+  await reader.loadMore();
+  assert.equal(paths.length, 1);
   assert.equal(reader.getSnapshot().error, true);
   reader.dispose();
 });

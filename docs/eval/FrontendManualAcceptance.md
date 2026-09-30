@@ -20,6 +20,14 @@ Record the tested commit, browser/version, viewport, account role, and result.
   and repeat. Missing or unpublished captures must remain explicitly unavailable.
 - Switch routes or Sessions while history, stream, attachment, and preview
   requests are in flight; confirm late responses cannot overwrite the new view.
+- Interrupt a captured-text continuation with a temporary network failure. It
+  must resume the same page automatically without duplicating loaded text or
+  showing a Retry button or connection warning. Each page allows the initial
+  attempt plus five retries at 500/1000/2000/4000/8000 ms; success resets the budget.
+  After exhaustion, loaded text stays visible and incomplete content stops
+  silently until the view is recreated (including a refresh). Going offline
+  pauses reads; going online cannot restart an exhausted reader. Denied, deleted,
+  stale or unavailable references remain explicitly unavailable without retries.
 - Check the context panel, status placement, Markdown/code rendering, citations,
   and attachment cards at desktop and narrow viewports.
 - Lose the submission response after acceptance, then retry and reload the tab.
