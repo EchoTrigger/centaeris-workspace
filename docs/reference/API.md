@@ -471,9 +471,12 @@ The strict no-store response requires exactly
 may release a bearer token only to the authenticated adapter. All MCP transports
 check current membership identity, ownership and lifecycle, managed definition
 availability, Workspace plugin enablement, frozen resource, approval, binding and
-source version on every call. Runtime fixes the first fingerprint, checks it
-again on lazy connect, and compares it on cached calls. Revocation, mismatch or API
+source version on every call. Lazy connect fixes the first fingerprint before
+receiving a token. Runtime checks again on the real provider after initialization
+and connection-queue waiting, and on every cached call. Revocation, mismatch or API
 failure prevents provider execution without fallback or automatic reconnect.
+This decision is not an atomic fence against a later revocation commit and does
+not withdraw an external call already dispatched.
 
 Private credential resolution requires persistent null Agent definition and null
 Run definition version. Missing managed version data never selects that path.

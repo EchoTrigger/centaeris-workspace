@@ -459,7 +459,12 @@ impl McpServerConnector for WorkspaceMcpConnector {
                 credential_resolve_ms,
                 discovery_started.elapsed().as_millis(),
             );
-            Ok(provider)
+            // Core invokes this provider only after lazy initialization and its
+            // connection queue. Check current authority at that dispatch point.
+            Ok(Arc::new(AuthorizedMcpProvider {
+                inner: provider,
+                authorization: self.authorization.clone(),
+            }) as Arc<dyn DynamicToolProvider + Send + Sync>)
         })
     }
 }
@@ -574,10 +579,7 @@ pub(crate) async fn connect_mcp_servers(
             ));
         }
         contracts.extend(binding.contracts);
-        providers.push(Arc::new(AuthorizedMcpProvider {
-            inner: binding.provider,
-            authorization,
-        }));
+        providers.push(binding.provider);
     }
     Ok((
         McpBindings {
@@ -688,6 +690,7 @@ mod tests {
         server: McpServerDeclarationV1,
         provider: Arc<FakeProvider>,
         connects: Arc<std::sync::atomic::AtomicUsize>,
+        initialization: Option<Arc<InitializationBarrier>>,
     }
     impl McpServerConnector for FakeConnector {
         fn connect<'a>(
@@ -708,15 +711,24 @@ mod tests {
                     .connect_token(&self.server)
                     .await
                     .map_err(McpConnectError::Unavailable)?;
+                if let Some(initialization) = &self.initialization {
+                    initialization.token_received.wait().await;
+                    initialization.release.wait().await;
+                }
                 self.connects
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(self.provider.clone() as Arc<dyn DynamicToolProvider + Send + Sync>)
+                Ok(Arc::new(AuthorizedMcpProvider {
+                    inner: self.provider.clone(),
+                    authorization: self.authorization.clone(),
+                })
+                    as Arc<dyn DynamicToolProvider + Send + Sync>)
             })
         }
     }
 
     struct GuardFixture {
-        provider: AuthorizedMcpProvider,
+        provider: Arc<dyn DynamicToolProvider + Send + Sync>,
+        authorization: Arc<McpDispatchAuthorization>,
         calls: Arc<std::sync::atomic::AtomicUsize>,
         connects: Arc<std::sync::atomic::AtomicUsize>,
         requests: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
@@ -767,21 +779,236 @@ mod tests {
                     calls: calls.clone(),
                 }),
                 connects: connects.clone(),
+                initialization: None,
             }),
         )
         .unwrap()
         .provider;
         fs::remove_dir_all(root).unwrap();
         GuardFixture {
-            provider: AuthorizedMcpProvider {
-                inner,
-                authorization,
-            },
+            provider: inner,
+            authorization,
             calls,
             connects,
             requests,
             task,
             resource_digest,
+        }
+    }
+
+    struct InitializationBarrier {
+        token_received: tokio::sync::Barrier,
+        release: tokio::sync::Barrier,
+    }
+
+    // Observe Pending from the actual Core lazy future, after any outer check.
+    // While the first connector holds initialization, this proves the second
+    // call has entered Core's connection queue rather than merely been spawned.
+    struct QueuedProviderProbe {
+        inner: Arc<dyn DynamicToolProvider + Send + Sync>,
+        queued: Arc<tokio::sync::Notify>,
+    }
+
+    impl DynamicToolProvider for QueuedProviderProbe {
+        fn provider_id(&self) -> &str {
+            self.inner.provider_id()
+        }
+
+        fn execute<'a>(
+            &'a self,
+            request: DynamicToolProviderRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<DynamicToolProviderResponse, String>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                let mut observe = request.tool_call_id == "queued";
+                let mut future = self.inner.execute(request);
+                futures::future::poll_fn(|context| {
+                    let result = future.as_mut().poll(context);
+                    if observe && result.is_pending() {
+                        self.queued.notify_one();
+                        observe = false;
+                    }
+                    result
+                })
+                .await
+            })
+        }
+
+        fn execute_with_error_info<'a>(
+            &'a self,
+            request: DynamicToolProviderRequest,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<DynamicToolProviderResponse, ToolErrorInfo>> + Send + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                let mut observe = request.tool_call_id == "queued";
+                let mut future = self.inner.execute_with_error_info(request);
+                futures::future::poll_fn(|context| {
+                    let result = future.as_mut().poll(context);
+                    if observe && result.is_pending() {
+                        self.queued.notify_one();
+                        observe = false;
+                    }
+                    result
+                })
+                .await
+            })
+        }
+    }
+
+    async fn initialization_revocation(structured_errors: bool, reason: &str, status: u16) {
+        use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering::SeqCst};
+        let authority_status = Arc::new(AtomicU16::new(200));
+        let current_status = authority_status.clone();
+        let app = axum::Router::new().route(
+            "/internal/mcp-connectors/authorize",
+            axum::routing::post(move |body: axum::body::Bytes| {
+                let current_status = current_status.clone();
+                async move {
+                    let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    let status =
+                        axum::http::StatusCode::from_u16(current_status.load(SeqCst)).unwrap();
+                    let reply = if status.is_success() {
+                        authorized_reply(
+                            'a',
+                            (request["operation"] == "connect").then_some("test-secret"),
+                        )
+                    } else {
+                        json!({"error": "synthetic authority withdrawn"})
+                    };
+                    (
+                        status,
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        reply.to_string(),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let api_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let (root, activation) = banana_package();
+        let mut resolver = McpCredentialResolver::new(
+            url,
+            "internal-secret".into(),
+            "run".into(),
+            "authorization".into(),
+            format!("sha256:{}", "b".repeat(64)),
+        )
+        .unwrap();
+        resolver.client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let mut prepared = prepare_mcp_servers_at(activation, resolver, &root).unwrap();
+        let (identity, server) = prepared.servers.pop().unwrap();
+        fs::remove_dir_all(root).unwrap();
+        let authorization = Arc::new(McpDispatchAuthorization {
+            identity,
+            resolver: prepared.credential_resolver,
+            binding_digest: tokio::sync::Mutex::new(None),
+        });
+        let initialization = Arc::new(InitializationBarrier {
+            token_received: tokio::sync::Barrier::new(2),
+            release: tokio::sync::Barrier::new(2),
+        });
+        let queued = Arc::new(tokio::sync::Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let connects = Arc::new(AtomicUsize::new(0));
+        let lazy = lazy_mcp_server_binding(
+            "banana",
+            &server,
+            Arc::new(FakeConnector {
+                authorization: authorization.clone(),
+                server: server.clone(),
+                provider: Arc::new(FakeProvider {
+                    calls: calls.clone(),
+                }),
+                connects: connects.clone(),
+                initialization: Some(initialization.clone()),
+            }),
+        )
+        .unwrap()
+        .provider;
+        let provider = QueuedProviderProbe {
+            inner: lazy,
+            queued: queued.clone(),
+        };
+        let invoke = |request| async {
+            if structured_errors {
+                provider
+                    .execute_with_error_info(request)
+                    .await
+                    .map_err(|error| error.model_message)
+            } else {
+                provider.execute(request).await
+            }
+        };
+        let first = invoke(fake_request());
+        tokio::pin!(first);
+        tokio::select! {
+            _ = initialization.token_received.wait() => {},
+            result = &mut first => panic!("first call finished before initialization barrier: {result:?}"),
+        }
+        let mut second_request = fake_request();
+        second_request.tool_call_id = "queued".into();
+        let second = invoke(second_request);
+        tokio::pin!(second);
+        tokio::select! {
+            _ = queued.notified() => {},
+            result = &mut first => panic!("first call escaped initialization barrier: {result:?}"),
+            result = &mut second => panic!("queued call finished before release: {result:?}"),
+        }
+        authority_status.store(status, SeqCst);
+        let (_, (first_result, second_result)) =
+            tokio::join!(initialization.release.wait(), async {
+                tokio::join!(first, second)
+            },);
+        api_task.abort();
+        assert_eq!(
+            calls.load(SeqCst),
+            0,
+            "{reason}: dispatch after initialization/queue used withdrawn authority"
+        );
+        assert!(
+            first_result.is_err() && second_result.is_err(),
+            "{reason}: both calls must reject"
+        );
+        assert_eq!(connects.load(SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn connector_initialization_revocation_blocks_first_and_queued_execute() {
+        for (reason, status) in [
+            ("approval revoked", 403),
+            ("binding removed", 403),
+            ("membership revoked", 403),
+            ("credential rotated", 409),
+        ] {
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                initialization_revocation(false, reason, status),
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn connector_initialization_revocation_blocks_first_and_queued_error_info() {
+        for (reason, status) in [
+            ("approval revoked", 403),
+            ("binding removed", 403),
+            ("membership revoked", 403),
+            ("credential rotated", 409),
+        ] {
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                initialization_revocation(true, reason, status),
+            )
+            .await
+            .unwrap();
         }
     }
 
@@ -883,7 +1110,10 @@ mod tests {
                         .map_err(McpConnectError::Unavailable)?;
                     assert_eq!(token.as_deref(), Some("fixture-account-one"));
                     self.connects.fetch_add(1, SeqCst);
-                    Ok(Arc::new(InteropProvider(self.calls.clone()))
+                    Ok(Arc::new(AuthorizedMcpProvider {
+                        inner: Arc::new(InteropProvider(self.calls.clone())),
+                        authorization: self.authorization.clone(),
+                    })
                         as Arc<dyn DynamicToolProvider + Send + Sync>)
                 })
             }
@@ -902,10 +1132,7 @@ mod tests {
         )
         .unwrap()
         .provider;
-        let provider = AuthorizedMcpProvider {
-            inner,
-            authorization: authorization.clone(),
-        };
+        let provider = inner;
         let request = || {
             let mut request = fake_request();
             request.contract.provider_id = Some("mcp:banana:ledger".into());
@@ -945,8 +1172,8 @@ mod tests {
         use std::sync::atomic::Ordering::SeqCst;
         let fixture = guard_fixture(
             vec![
-                (StatusCode::OK, authorized_reply('a', None)),
                 (StatusCode::OK, authorized_reply('a', Some("test-secret"))),
+                (StatusCode::OK, authorized_reply('a', None)),
                 (StatusCode::OK, authorized_reply('a', None)),
                 (
                     StatusCode::FORBIDDEN,
@@ -968,7 +1195,7 @@ mod tests {
                 .iter()
                 .map(|body| body["operation"].as_str().unwrap())
                 .collect::<Vec<_>>(),
-            vec!["dispatch", "connect", "dispatch", "dispatch"]
+            vec!["connect", "dispatch", "dispatch", "dispatch"]
         );
         for body in requests.iter() {
             assert_eq!(body["pluginName"], "banana");
@@ -989,8 +1216,8 @@ mod tests {
         use axum::http::StatusCode;
         let fixture = guard_fixture(
             vec![
-                (StatusCode::OK, authorized_reply('a', None)),
                 (StatusCode::OK, authorized_reply('a', Some("test-secret"))),
+                (StatusCode::OK, authorized_reply('a', None)),
                 (StatusCode::OK, authorized_reply('b', None)),
             ],
             None,
@@ -1011,12 +1238,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connector_connect_rejects_binding_changed_after_dispatch() {
+    async fn connector_dispatch_rejects_binding_changed_after_connect() {
         use axum::http::StatusCode;
         let fixture = guard_fixture(
             vec![
-                (StatusCode::OK, authorized_reply('a', None)),
-                (StatusCode::OK, authorized_reply('b', Some("test-secret"))),
+                (StatusCode::OK, authorized_reply('a', Some("test-secret"))),
+                (StatusCode::OK, authorized_reply('b', None)),
             ],
             None,
         )
@@ -1025,7 +1252,7 @@ mod tests {
         assert_eq!(fixture.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(
             fixture.connects.load(std::sync::atomic::Ordering::SeqCst),
-            0
+            1
         );
     }
 
@@ -1082,14 +1309,24 @@ mod tests {
             invalid.push(reply);
         }
         for reply in invalid {
-            let fixture = guard_fixture(vec![(axum::http::StatusCode::OK, reply)], None).await;
+            let fixture = guard_fixture(
+                vec![
+                    (
+                        axum::http::StatusCode::OK,
+                        authorized_reply('a', Some("test-secret")),
+                    ),
+                    (axum::http::StatusCode::OK, reply),
+                ],
+                None,
+            )
+            .await;
             assert!(fixture.provider.execute(fake_request()).await.is_err());
             assert_eq!(fixture.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
             assert_eq!(
                 fixture.connects.load(std::sync::atomic::Ordering::SeqCst),
-                0
+                1
             );
-            assert_eq!(fixture.requests.lock().unwrap().len(), 1);
+            assert_eq!(fixture.requests.lock().unwrap().len(), 2);
         }
     }
 
@@ -1098,8 +1335,8 @@ mod tests {
         use axum::http::StatusCode;
         let fixture = guard_fixture(
             vec![
-                (StatusCode::OK, authorized_reply('a', None)),
                 (StatusCode::OK, authorized_reply('a', Some("test-secret"))),
+                (StatusCode::OK, authorized_reply('a', None)),
                 (
                     StatusCode::SERVICE_UNAVAILABLE,
                     json!({"error":"internal-secret test-secret"}),
@@ -1125,16 +1362,18 @@ mod tests {
 
     #[tokio::test]
     async fn connector_preserves_structured_provider_error() {
-        let mut fixture = guard_fixture(
+        let fixture = guard_fixture(
             vec![(axum::http::StatusCode::OK, authorized_reply('a', None))],
             None,
         )
         .await;
-        fixture.provider.inner = Arc::new(FakeProvider {
-            calls: fixture.calls.clone(),
-        });
-        let error = fixture
-            .provider
+        let provider = AuthorizedMcpProvider {
+            inner: Arc::new(FakeProvider {
+                calls: fixture.calls.clone(),
+            }),
+            authorization: fixture.authorization.clone(),
+        };
+        let error = provider
             .execute_with_error_info(fake_request())
             .await
             .unwrap_err();

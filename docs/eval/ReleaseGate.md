@@ -202,11 +202,34 @@ verify current membership identity, owner/lifecycle, definition availability,
 Workspace plugin enablement, frozen declaration resource, approval, binding and
 source version. A cached provider must reject revocation, changed fingerprints,
 invalid/missing response fields and API failure without executing or reconnecting.
-Connect must reject a fingerprint changed after its dispatch check. Preserve the
+Dispatch must reject a fingerprint changed after its connect check. Preserve the
 inner provider's structured errors. Synthetic model arguments must not select
 server/resource identities or secrets. Private compatibility must require durable
 null Agent definition and null Run version; missing managed version data fails.
 The old credential resolver must reject managed Agents.
+
+Initialization/queue acceptance uses explicit synchronization barriers: after the connector
+receives its token, hold initialization, prove a second call is pending inside
+Core's lazy connection queue, withdraw synthetic authority, then release both.
+The real provider must receive zero calls for approval revocation, binding
+removal, membership revocation and source rotation. Cover both `execute` and
+`execute_with_error_info`, without sleeps. The guard belongs on the connected
+provider after the lazy wait, rather than outside the lazy provider. This does
+not promise an atomic remote-effect fence against revocation after the final
+authorization decision or cancellation of already dispatched external calls.
+The local red receipt `test-results/assistant-connector-dispatch-window-red.log`
+records two failing tests with two actual calls instead of zero. The corrected
+focused receipt `test-results/assistant-connector-dispatch-window-green.log`
+records 14 passing tests; the LiveServer interoperability entry is executed
+explicitly by the API gate. The unchanged pinned Core receipt
+`test-results/assistant-connector-dispatch-window-query-loop.log` records 29
+passing `query_loop` tests.
+The full original local gate receipt
+`test-results/assistant-connector-dispatch-window-ci.log` exits 0: 651 API tests
+discovered/executed with no skips or expected failures, explicit Rust/Django
+connector interoperability, and 120 passing Web tests. The Runtime unit gate
+passes 194 tests; its 38 existing ignored markers do not replace the explicit
+LiveServer invocation.
 
 Focused synthetic evidence is retained locally in
 `test-results/assistant-connectors-api-red.log`,

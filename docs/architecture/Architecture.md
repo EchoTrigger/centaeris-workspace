@@ -90,12 +90,17 @@ Every external MCP provider, including bearer HTTP, unauthenticated HTTP and
 stdio, has a Runtime guard. Before each call the API checks current membership
 identity, Run/Session/Agent state and ownership, managed definition availability,
 Workspace plugin enablement, frozen resource identity, current approval, binding
-and source version. The guard fixes a binding fingerprint on first authorization;
-lazy connect checks it again before receiving a token, and cached dispatch checks
-it on every call. Changed authority, fingerprints or API failures reject the call
+and source version. Lazy connect fixes a binding fingerprint before receiving a
+token. The connector returns a guarded real provider, so every dispatch checks
+the fingerprint and current authority after initialization and connection-queue
+waiting, including calls using the cached provider. Changed authority,
+fingerprints or API failures reject the call
 without executing or reconnecting the inner provider. Ordinary configuration
 stays frozen while security revocation remains current. This boundary covers MCP
 dispatch; it does not add periodic SSE revocation or cancel all accepted execution.
+The authorization decision precedes the actual provider invocation; it cannot
+atomically fence a remote effect against revocation committed after that decision
+or withdraw an external call already dispatched.
 
 The private credential path requires persistent `Agent.definition_id = null` and
 `AgentRun.definition_version_id = null`. A managed Agent missing its version is
