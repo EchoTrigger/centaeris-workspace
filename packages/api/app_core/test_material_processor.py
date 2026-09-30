@@ -3,7 +3,7 @@ import tarfile
 from tempfile import TemporaryDirectory
 from pathlib import Path
 from datetime import timedelta
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from django.test import SimpleTestCase
 from django.utils import timezone
@@ -12,6 +12,33 @@ from . import material_processor
 
 
 class ProcessorArchiveTests(SimpleTestCase):
+    def test_processor_rejects_noncanonical_container_runtimes(self):
+        for runtime in ("", "RUNSC", " runsc ", "unknown", "runc,runsc"):
+            with self.subTest(runtime=runtime), self.assertRaisesRegex(ValueError, "material_processor_runtime_invalid"):
+                material_processor.container_options(runtime, "cpu")
+
+    def test_processor_uses_runsc_when_runtime_is_not_configured(self):
+        self.assert_created_runtime(None, "runsc")
+
+    def test_processor_preserves_explicit_runtime_without_fallback(self):
+        for runtime in ("runsc", "runc"):
+            with self.subTest(runtime=runtime):
+                self.assert_created_runtime(runtime, runtime)
+
+    def assert_created_runtime(self, configured, expected):
+        environment = {"MATERIAL_PROCESSOR_NAMESPACE": "owned", "MATERIAL_PROCESSOR_IMAGE": "processor-image"}
+        if configured is not None:
+            environment["OCI_RUNTIME"] = configured
+        client = Mock()
+        client.images.get.return_value.id = "sha256:processor"
+        client.containers.create.side_effect = RuntimeError("spec_creation_stopped")
+        with patch.dict(material_processor.os.environ, environment, clear=True), \
+                patch.object(material_processor.MaterialWorker, "cleanup_specifications"), \
+                self.assertRaisesRegex(RuntimeError, "spec_creation_stopped"):
+            material_processor.MaterialWorker(client)
+        self.assertEqual(client.containers.create.call_args.kwargs["runtime"], expected)
+        self.assertEqual(client.containers.create.call_count, 1)
+
     def test_processor_cpu_quota_fits_four_core_hosts(self):
         for device in ("cpu", "gpu:0"):
             with self.subTest(device=device):

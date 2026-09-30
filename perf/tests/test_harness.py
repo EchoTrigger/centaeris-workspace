@@ -121,6 +121,39 @@ class IsolationTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 control.initialize(root)
 
+    def test_init_uses_runsc_and_requires_an_explicit_runc_override(self):
+        for override, expected in ((None, 'runsc'), ('runsc', 'runsc'), ('runc', 'runc')):
+            with self.subTest(override=override), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / '.env.example').write_text((control.ROOT / '.env.example').read_text())
+                path = control.initialize(root, oci_runtime=override)
+                self.assertEqual(control.read_env(path)['OCI_RUNTIME'], expected)
+                command, env = control.compose_command(control.ROOT, path, ['config', '--format', 'json'])
+                services = json.loads(control.run(command, env=env))['services']
+                for name in ('runtime', 'material-worker'):
+                    self.assertEqual(services[name]['environment']['OCI_RUNTIME'], expected)
+
+    def test_init_rejects_invalid_runtime_without_creating_an_environment(self):
+        for value in ('', 'RUNSC', ' runsc ', 'unknown'):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / '.env.example').write_text((control.ROOT / '.env.example').read_text())
+                with self.assertRaisesRegex(ValueError, 'oci_runtime must be exactly runc or runsc'):
+                    control.initialize(root, oci_runtime=value)
+                self.assertFalse((root / 'perf/.state/test.env').exists())
+
+    def test_init_cli_passes_the_explicit_runtime(self):
+        with patch.object(sys, 'argv', ['control.py', 'init', '--oci-runtime', 'runc']), \
+                patch.object(control, 'initialize') as initialize:
+            control.main()
+        initialize.assert_called_once_with(control.ROOT, oci_runtime='runc')
+
+    def test_runtime_option_is_rejected_outside_initialization(self):
+        with patch.object(sys, 'argv', ['control.py', 'check', '--oci-runtime', 'runc']), \
+                patch.object(control, 'Stack') as stack, self.assertRaises(SystemExit):
+            control.main()
+        stack.assert_not_called()
+
     def test_compose_command_pins_every_input_and_clears_ambient_overrides(self):
         with patch.dict('os.environ', {'COMPOSE_FILE': 'production.yml', 'POSTGRES_PASSWORD': 'secret', 'WORKER_SLOT_COUNT': '16'}):
             command, env = control.compose_command(Path('/repo'), Path('/repo/perf/.state/test.env'), ['config'])

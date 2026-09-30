@@ -114,7 +114,12 @@ verification must initialize the current schema, not reuse an incompatible one.
 
 `SANDBOX_MEMORY_BYTES`, `SANDBOX_CPU_MILLI`, `SANDBOX_PIDS_LIMIT`, and
 `SANDBOX_DATA_TMPFS_BYTES` define the authorized AgentRun profile.
-`OCI_RUNTIME` selects the configured container runtime.
+Compose and the material Worker default `OCI_RUNTIME` to `runsc`. Install and
+register gVisor on the Docker host before using that profile. Hosts without
+gVisor, including local Docker Desktop test environments, must explicitly set
+`OCI_RUNTIME=runc`. Runtime selection accepts exactly `runsc` or `runc`; an empty,
+invalid or unregistered selection fails rather than falling back. Existing
+private `.env` values are not replaced when the default changes.
 
 `RUNTIME_EXECUTION_RECOVERY_MAX_ATTEMPTS` defaults to 5 replacement preparation
 attempts per AgentRun; the initial execution is excluded. Each attempt is recorded

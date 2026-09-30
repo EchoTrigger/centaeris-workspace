@@ -25,7 +25,7 @@ def compose_config(**overrides):
     env = {k: v for k, v in os.environ.items() if k not in values and k not in RETIRED}
     with tempfile.TemporaryDirectory(prefix="centaeris-compose-contract-") as temp:
         path = Path(temp) / "synthetic.env"
-        path.write_text("\n".join(f"{k}={v}" for k, v in values.items()), encoding="utf-8")
+        path.write_text("\n".join(f"{k}={v}" for k, v in values.items() if v is not None), encoding="utf-8")
         result = subprocess.run(
             ["docker", "compose", "--env-file", str(path), "-f", str(ROOT / "docker-compose.yml"),
              "config", "--format", "json"],
@@ -97,6 +97,26 @@ class DeploymentContractTests(unittest.TestCase):
         runtime = compose_config()["services"]["runtime"]
         self.assertEqual(runtime["entrypoint"], ["runtime_server"])
         self.assertFalse(runtime.get("command"))
+
+    def test_sandbox_and_material_processor_default_to_runsc(self):
+        for values in ({}, {"OCI_RUNTIME": None}):
+            services = compose_config(**values)["services"]
+            for service in ("runtime", "material-worker"):
+                with self.subTest(values=values, service=service):
+                    self.assertEqual(services[service]["environment"]["OCI_RUNTIME"], "runsc")
+
+    def test_explicit_runc_override_reaches_both_execution_services(self):
+        services = compose_config(OCI_RUNTIME="runc")["services"]
+        for service in ("runtime", "material-worker"):
+            with self.subTest(service=service):
+                self.assertEqual(services[service]["environment"]["OCI_RUNTIME"], "runc")
+
+    def test_compose_does_not_replace_an_explicit_invalid_runtime(self):
+        for value in ("", "RUNSC", "unknown", "runc,runsc"):
+            services = compose_config(OCI_RUNTIME=value)["services"]
+            for service in ("runtime", "material-worker"):
+                with self.subTest(value=value, service=service):
+                    self.assertEqual(services[service]["environment"]["OCI_RUNTIME"], value)
 
     def test_default_sandbox_resources_reach_authorization_service(self):
         services = compose_config()["services"]

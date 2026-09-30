@@ -125,7 +125,7 @@ services:
       REDIS_URL: *redis-url
       RUNTIME_STREAM_TTL_SECONDS: ${RUNTIME_STREAM_TTL_SECONDS}
       RUNTIME_LIVE_STATE_TTL_SECONDS: ${RUNTIME_LIVE_STATE_TTL_SECONDS}
-      OCI_RUNTIME: ${OCI_RUNTIME}
+      OCI_RUNTIME: ${OCI_RUNTIME-runsc}
       WORKSPACE_GENERAL_IMAGE: *workspace-general-image
       PLUGIN_VOLUME_NAME: ${COMPOSE_PROJECT_NAME:-centaeris-workspace}_plugin-data
       AGENT_MEMORY_VOLUME_NAME: ${COMPOSE_PROJECT_NAME:-centaeris-workspace}_agent-memory
@@ -313,7 +313,7 @@ services:
       MATERIAL_PROCESSOR_NAMESPACE: ${COMPOSE_PROJECT_NAME:-centaeris-workspace}
       MATERIAL_PROCESSOR_IMAGE: *document-processor-image
       MATERIAL_PROCESSOR_DEVICE: *processor-device
-      OCI_RUNTIME: ${OCI_RUNTIME:-runc}
+      OCI_RUNTIME: ${OCI_RUNTIME-runsc}
     volumes:
       - type: volume
         source: storage-data

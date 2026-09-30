@@ -70,6 +70,8 @@ def unpack_outputs(chunks, root, maximum):
 
 
 def container_options(runtime, device):
+    if runtime not in {"runc", "runsc"}:
+        raise ValueError("material_processor_runtime_invalid")
     if device not in {"cpu", "gpu:0"}:
         raise ValueError("material_processor_device_invalid")
     options = dict(user="10001:10001", network_mode="none", read_only=True,
@@ -89,7 +91,7 @@ class MaterialWorker:
         if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,64}", self.namespace):
             raise ValueError("material_processor_namespace_invalid")
         self.owner = "material-worker:" + uuid.uuid4().hex
-        self.options = container_options(os.environ.get("OCI_RUNTIME", "runc"), os.environ.get("MATERIAL_PROCESSOR_DEVICE", "cpu"))
+        self.options = container_options(os.environ.get("OCI_RUNTIME", "runsc"), os.environ.get("MATERIAL_PROCESSOR_DEVICE", "cpu"))
         self.image = self.client.images.get(os.environ["MATERIAL_PROCESSOR_IMAGE"]).id
         self.cleanup_specifications()
         self.spec = self.load_specification()

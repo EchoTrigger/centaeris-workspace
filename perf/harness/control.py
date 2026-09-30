@@ -22,8 +22,12 @@ def read_env(path):
                 if line and not line.startswith('#') and '=' in line)
 
 
-def initialize(root):
+def initialize(root, oci_runtime=None):
+    if oci_runtime is not None and oci_runtime not in {'runc', 'runsc'}:
+        raise ValueError('oci_runtime must be exactly runc or runsc')
     values = read_env(root / '.env.example')
+    if oci_runtime is not None:
+        values['OCI_RUNTIME'] = oci_runtime
     for key in ('DJANGO_SECRET_KEY', 'INTERNAL_API_TOKEN', 'AGENT_RUN_AUTHORIZATION_SIGNING_KEY',
                 'POSTGRES_PASSWORD', 'BOOTSTRAP_SUPERADMIN_PASSWORD'):
         values[key] = secrets.token_hex(32)
@@ -315,9 +319,13 @@ def main():
     parser.add_argument('--experiment-id')
     parser.add_argument('--seconds', type=int, default=1)
     parser.add_argument('--rate', type=int, default=60)
+    parser.add_argument('--oci-runtime', choices=['runsc', 'runc'],
+                        help='Explicit sandbox runtime for init; runc supports hosts without runsc.')
     args = parser.parse_args()
+    if args.oci_runtime is not None and args.action != 'init':
+        parser.error('--oci-runtime only applies to init; it does not change an existing stack')
     if args.action == 'init':
-        initialize(ROOT)
+        initialize(ROOT, oci_runtime=args.oci_runtime)
         print('Created perf/.state/test.env; root .env was not read or changed.')
         return
     stack = Stack()

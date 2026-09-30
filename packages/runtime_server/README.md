@@ -14,9 +14,11 @@ See [Workspace architecture](../../docs/architecture/Architecture.md),
 - `OCI_RUNTIME` is exactly `runc` or `runsc`; Runtime verifies that Docker has
   registered the selected runtime and does not fall back to another runtime or
   a host process.
-- Local Docker Desktop uses `runc`. Selecting `runsc` requires a host where
-  gVisor is separately installed and registered; source availability does not
-  make that deployment profile verified.
+- Compose defaults to `runsc`; gVisor must be installed and registered on the
+  Docker host. Local Docker Desktop tests on hosts without gVisor explicitly
+  set `OCI_RUNTIME=runc`. There is no automatic fallback. Performance evidence
+  must identify the actual platform, such as systrap; it does not establish
+  latency or capacity for an untested KVM deployment.
 - Every AgentRun receives one temporary container with explicit mounts, work
   directory, UID/GID, network, CPU, memory, PID, and temporary-space limits.
 - `read`, `bash`, `edit`, and `write` use that same container. Fixed helpers run
