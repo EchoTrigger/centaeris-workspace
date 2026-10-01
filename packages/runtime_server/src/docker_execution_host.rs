@@ -1109,14 +1109,28 @@ impl DockerExecutionHostRunner {
 
     fn capture_recovery_workspace(
         &self,
-        collect: impl FnOnce() -> Result<RecoveryWorkspaceSnapshotV1, String>,
+        collect: impl FnOnce() -> Result<RecoveryWorkspaceSnapshotV1, String> + Send,
     ) -> Result<Option<RecoveryWorkspaceSnapshotV1>, String> {
         *self
             .recovery_snapshot
             .lock()
             .map_err(|_| "recovery snapshot lock poisoned")? = None;
         let token = self.recovery_activity.begin_snapshot_capture();
-        let snapshot = collect()?;
+        // ModelRequestStarted is invoked inside the async model driver. Keep
+        // collection, the synchronous HTTP response and its body/drop together
+        // outside that context, without retrying the staging operation.
+        let snapshot = if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+                tokio::task::block_in_place(collect)
+            } else {
+                std::thread::scope(|scope| match scope.spawn(collect).join() {
+                    Ok(result) => result,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                })
+            }
+        } else {
+            collect()
+        }?;
         let evidence = match self
             .recovery_activity
             .complete_quiesced_snapshot(token, true, true)
@@ -3849,6 +3863,63 @@ mod tests {
             snapshot_size_bytes: 0,
             expanded_size_bytes: 0,
             file_count: 0,
+        }
+    }
+
+    #[test]
+    fn recovery_snapshot_http_lifecycle_is_safe_inside_async_safe_point() {
+        use std::net::TcpListener;
+        for multi_thread in [false, true] {
+            for status in [200, 503] {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let endpoint = format!("http://{}/stage", listener.local_addr().unwrap());
+                let body = serde_json::to_vec(&empty_recovery_snapshot()).unwrap();
+                let server = std::thread::spawn(move || {
+                    let (mut socket, _) = listener.accept().unwrap();
+                    socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        let mut byte = [0];
+                        socket.read_exact(&mut byte).unwrap();
+                        request.push(byte[0]);
+                    }
+                    assert!(request.starts_with(b"POST /stage HTTP/1.1\r\n"));
+                    write!(socket, "HTTP/1.1 {status} fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                    socket.write_all(&body).unwrap();
+                });
+                // The host and its blocking client are created/dropped outside Tokio.
+                let mut runner = test_docker_execution_host_runner();
+                runner.api_client = reqwest::blocking::Client::builder()
+                    .no_proxy()
+                    .timeout(Duration::from_secs(5))
+                    .build()
+                    .unwrap();
+                let runtime = if multi_thread {
+                    tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap()
+                } else {
+                    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+                };
+                let mut calls = 0;
+                let result = runtime.block_on(async {
+                    runner.capture_recovery_workspace(|| {
+                        calls += 1;
+                        let response = runner.api_client.post(&endpoint).send().map_err(|e| e.to_string())?;
+                        if !response.status().is_success() {
+                            return Err(format!("stage execution workspace returned {}", response.status().as_u16()));
+                        }
+                        response.json::<RecoveryWorkspaceSnapshotV1>().map_err(|e| e.to_string())
+                    })
+                });
+                server.join().unwrap();
+                assert_eq!(calls, 1, "no internal staging retry");
+                if status == 200 {
+                    assert_eq!(result.unwrap(), Some(empty_recovery_snapshot()));
+                    assert!(runner.recovery_workspace_evidence().unwrap().is_some());
+                } else {
+                    assert_eq!(result, Err("stage execution workspace returned 503".into()));
+                    assert!(runner.recovery_workspace_evidence().unwrap().is_none());
+                }
+            }
         }
     }
 
