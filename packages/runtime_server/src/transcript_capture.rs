@@ -1,6 +1,6 @@
 //! Best-effort hosted text archive. Core events and tool outcomes are unchanged.
 use crate::postgres_store::PostgresRuntimeStore;
-use centaeris_core::session::{SequencedSessionRecord, SessionRecordType};
+use centaeris_core::session::{SequencedSessionRecord, SessionCommitReceipt, SessionRecordType};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -44,6 +44,21 @@ impl PublishQueue {
 
 /// Called only after the fenced event commit succeeds. No failure escapes into
 /// the tool safe point. One publisher per Execution; queued bytes are bounded.
+pub(crate) fn publish_committed(
+    store: PostgresRuntimeStore,
+    execution_id: String,
+    publisher: Arc<CapturePublisher>,
+    capture: &mut CaptureBuffer,
+    receipt: &SessionCommitReceipt,
+    budget: usize,
+) {
+    let records = receipt.records.iter().map(|record| SequencedSessionRecord {
+        sequence: record.sequence,
+        event: record.event.clone(),
+    }).collect::<Vec<_>>();
+    publish(store, execution_id, publisher, capture.take(&records), budget);
+}
+
 pub(crate) fn publish(
     store: PostgresRuntimeStore,
     execution_id: String,
@@ -300,6 +315,8 @@ mod tests {
     use super::*;
     use centaeris_core::session::SessionLogRecord;
     use serde_json::json;
+
+    include!("transcript_capture_boundary_tests.rs");
 
     #[test]
     #[ignore = "Django invokes this contract against its migrated disposable PostgreSQL database"]

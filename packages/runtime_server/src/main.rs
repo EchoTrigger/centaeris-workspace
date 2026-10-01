@@ -3252,11 +3252,12 @@ fn execute_agent_run(
             // Capture publication is downstream of the durable Core event and
             // must never change its successful tool outcome or trigger replay.
             if let Ok(mut capture) = docker_execution.transcript_capture.lock() {
-                transcript_capture::publish(
+                transcript_capture::publish_committed(
                     job_store.as_ref().clone(),
                     docker_execution.execution_id().to_string(),
                     docker_execution.transcript_publisher.clone(),
-                    capture.take(&events),
+                    &mut capture,
+                    &receipt,
                     usize::try_from(
                         agent_run_start.authorization.resources.memory_bytes
                             .min(agent_run_start.authorization.resources.data_tmpfs_bytes),

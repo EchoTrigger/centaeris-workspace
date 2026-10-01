@@ -35,8 +35,11 @@ def main():
     env = {**os.environ, 'CENTAERIS_ALLOW_POSTGRES_TEST_RESET': '1',
            'CENTAERIS_TEST_POSTGRES_URL': url, 'INTERNAL_API_TOKEN': uuid.uuid4().hex,
            'CARGO_BUILD_JOBS': '1', 'EXECUTION_GLOBAL_LIMIT': '8',
-           'EXECUTION_TENANT_LIMIT': '4'}
-    commands = [['cargo', 'test', '--locked', '-p', 'runtime_server', 'postgres_outbox', '--']]
+           'EXECUTION_TENANT_LIMIT': '4', 'CENTAERIS_CAPTURE_BOUNDARY_DATABASE': url}
+    commands = [['cargo', 'test', '--locked', '-p', 'runtime_server',
+                 'transcript_capture::tests::transcript_capture_second_run_requires_committed_session_sequence',
+                 '--', '--exact'],
+                ['cargo', 'test', '--locked', '-p', 'runtime_server', 'postgres_outbox', '--']]
     exact_tests = [
         'postgres_transcript_concurrent_duplicate_commit_is_idempotent',
         'postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_state',
