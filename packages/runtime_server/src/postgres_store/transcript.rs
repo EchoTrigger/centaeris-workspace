@@ -43,6 +43,12 @@ fn workspace_transcript_initial_generation() -> String {
 const WORKSPACE_TRANSCRIPT_STREAM_ID_V1: &str = "workspace-transcript.v1";
 static TRANSCRIPT_REBUILDS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
+#[cfg(test)]
+thread_local! {
+    static CATCH_UP_AFTER_INITIAL_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TranscriptCatchUpProgress {
     pub source_high_water: u64,
@@ -215,7 +221,13 @@ impl PostgresRuntimeStore {
     ) -> Result<TranscriptCatchUpProgress, String> {
         require_nonempty(session_id, "sessionId")?;
         require_nonempty(projection_generation, "projectionGeneration")?;
-        let head = self.load_transcript_projection_head(session_id, projection_generation)?;
+        let (head, recovery_json) = self.load_transcript_catch_up_snapshot(session_id, projection_generation)?;
+        #[cfg(test)]
+        CATCH_UP_AFTER_INITIAL_READ.with(|observer| {
+            if let Some(observe) = observer.borrow_mut().take() {
+                observe();
+            }
+        });
         if let Some(head) = &head {
             if let Some(reason) = &head.invalidation_reason {
                 return Err(format!("transcript projection is invalidated: {reason}"));
@@ -239,15 +251,10 @@ impl PostgresRuntimeStore {
         let mut projector = if projected_high_water == 0 {
             TranscriptProjectorV1::new(session_id.to_string(), projection_generation.to_string())?
         } else {
-            let recovery = self
-                .load_latest_transcript_recovery(
-                    session_id,
-                    projection_generation,
-                    projected_high_water,
-                )?
-                .ok_or_else(|| {
+            let (checkpoint_json, frontier_json) = recovery_json.ok_or_else(|| {
                     "transcript projection recovery checkpoint is missing".to_string()
                 })?;
+            let recovery = decode_recovery_json(&checkpoint_json, &frontier_json)?;
             if recovery.checkpoint.source_high_water != projected_high_water.to_string() {
                 return Err("transcript projection recovery is behind projection head".to_string());
             }
@@ -366,6 +373,32 @@ impl PostgresRuntimeStore {
             source_bytes_projected,
             oversized_source_events,
             caught_up: next_projected_high_water == source_high_water,
+        })
+    }
+
+    fn load_transcript_catch_up_snapshot(
+        &self,
+        session_id: &str,
+        projection_generation: &str,
+    ) -> Result<(Option<TranscriptProjectionHeadV1>, Option<(String, String)>), String> {
+        // READ COMMITTED transactions alone do not pin two SELECT snapshots.
+        // The current recovery slot and head must come from one statement.
+        self.with_client(|client| {
+            let row = client.query_opt(
+                "SELECT h.source_high_water,h.invalidation_reason,r.checkpoint_json,r.frontier_json FROM runtime.transcript_projection_heads h LEFT JOIN runtime.transcript_projection_current_recoveries r ON r.session_id=h.session_id AND r.projection_version=h.projection_version AND r.projection_generation=h.projection_generation AND r.source_high_water<=h.source_high_water WHERE h.session_id=$1 AND h.projection_version=$2 AND h.projection_generation=$3",
+                &[&session_id, &TRANSCRIPT_PROJECTION_VERSION_V1, &projection_generation],
+            ).map_err(|error| format!("load transcript catch-up snapshot failed: {error}"))?;
+            let Some(row) = row else { return Ok((None, None)); };
+            let head = TranscriptProjectionHeadV1 {
+                session_id: session_id.to_string(),
+                projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
+                projection_generation: projection_generation.to_string(),
+                source_high_water: row.get::<_, i64>(0).to_string(),
+                invalidation_reason: row.get(1),
+            };
+            head.validate()?;
+            let recovery = row.get::<_, Option<String>>(2).zip(row.get::<_, Option<String>>(3));
+            Ok((Some(head), recovery))
         })
     }
 }
@@ -1095,13 +1128,17 @@ fn decode_block_row(row: &Row) -> Result<TranscriptBlockV1, String> {
 }
 
 fn decode_recovery(row: &Row) -> Result<TranscriptProjectionRecoveryV1, String> {
+    decode_recovery_json(&row.get::<_, String>(0), &row.get::<_, String>(1))
+}
+
+fn decode_recovery_json(checkpoint: &str, frontier: &str) -> Result<TranscriptProjectionRecoveryV1, String> {
     let recovery = TranscriptProjectionRecoveryV1 {
         checkpoint: serde_json::from_str::<TranscriptProjectionCheckpointV1>(
-            row.get::<_, String>(0).as_str(),
+            checkpoint,
         )
         .map_err(|error| format!("decode transcript projection checkpoint failed: {error}"))?,
         frontier: serde_json::from_str::<TranscriptProjectionFrontierV1>(
-            row.get::<_, String>(1).as_str(),
+            frontier,
         )
         .map_err(|error| format!("decode transcript projection frontier failed: {error}"))?,
     };
@@ -1219,6 +1256,8 @@ LIMIT $7
 #[cfg(test)]
 mod tests {
     use super::{decode_source_record, SourceFact, TRANSCRIPT_SOURCE_SLICE_SQL};
+
+    include!("transcript_boundary_tests.rs");
 
     #[test]
     fn workspace_resume_cursor_uses_one_session_display_stream() {
